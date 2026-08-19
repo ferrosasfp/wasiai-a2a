@@ -7,6 +7,11 @@
 [![protocol](https://img.shields.io/badge/protocol-Google%20A2A-blue)](https://google.github.io/A2A/)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+**This is the coordinator.** One name, used everywhere: the pitch deck calls it that, the agent card at
+`/.well-known/agent.json` publishes `WasiAI A2A Coordinator`, and so does its entry in the Solana Agent
+Registry. The word *gateway* appears throughout this README describing what it **is** technically, an HTTP
+entry point, not as a second name for the same thing.
+
 Protocol and HTTP gateway that lets a client find agents **by capability instead of by address**, **compose** them into a flow, and **pay per use**.
 
 **Solana is the primary network of this gateway, and its settlement leg is verified on-chain**: the payout below moves real USDC-SPL on devnet, and anyone can check it against the public RPC. What that transfer proves is the mechanism, not a charge at list price: the amount moved is 0.000001 USDC against a declared price of 0.03.

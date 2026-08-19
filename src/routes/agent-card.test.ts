@@ -544,7 +544,7 @@ describe('agent-card routes', () => {
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.name).toBe('WasiAI A2A Gateway');
+      expect(body.name).toBe('WasiAI A2A Coordinator');
       expect(body.skills.map((s: { id: string }) => s.id)).toEqual([
         'discover',
         'compose',

@@ -275,9 +275,16 @@ export const agentCardService = {
       quoteEndpoint,
     };
     return {
-      name: 'WasiAI A2A Gateway',
+      // ⛔ EL NOMBRE ES `Coordinator`, NO `Gateway`, Y LA DIFERENCIA NO ES DE GUSTO. `gateway` describe
+      // el ROL TÉCNICO (una puerta HTTP) y aparece 29 veces en el README con ese sentido, que es
+      // correcto. `Coordinator` es el NOMBRE de la pieza, y es como la nombran el pitch (lámina 4),
+      // el registro de agentes de Solana y esta carta. Tener dos nombres para lo mismo hacía que la
+      // lámina se leyera como si hubiera dos piezas: lo notó el founder leyendo este mismo campo.
+      // ⚠️ SI ESTE LITERAL CAMBIA, hay que republicar los metadatos del registro on-chain: el activo
+      // `8EQfLhMG9aKTgxS5YarUmg9SsUWqCFa4ZQ8NMR2HzFde` (devnet) apunta a un IPFS que copia este nombre.
+      name: 'WasiAI A2A Coordinator',
       description:
-        'A2A-compliant gateway that discovers, composes, and orchestrates AI agents from multiple registries',
+        'A2A coordinator that discovers, composes, and orchestrates AI agents from multiple registries',
       url: baseUrl,
       capabilities: {
         streaming: false,

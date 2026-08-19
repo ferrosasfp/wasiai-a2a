@@ -487,7 +487,7 @@ describe('agentCardService', () => {
   describe('buildSelfAgentCard', () => {
     it('returns gateway card with correct name', () => {
       const card = agentCardService.buildSelfAgentCard('https://gw.wasiai.io');
-      expect(card.name).toBe('WasiAI A2A Gateway');
+      expect(card.name).toBe('WasiAI A2A Coordinator');
     });
 
     it('includes discover, compose, orchestrate skills', () => {
