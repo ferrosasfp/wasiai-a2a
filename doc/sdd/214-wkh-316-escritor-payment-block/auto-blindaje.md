@@ -142,3 +142,67 @@
   con el `error_code`, los tres casos habrían pasado y yo habría publicado que AC-5 es
   case-insensitive — que es falso, y encima el test habría muerto por la razón barata (AC-4). Es
   CD-A4 exactamente: un testigo que muere por el motivo equivocado no prueba lo que dice probar.
+
+---
+
+### [2026-08-19 00:33] Wave 3B — 🔴 Mi log de auditoría reportaba la billetera NUEVA como si fuera la vieja
+
+- **Error**: escribí el log de auditoría del PATCH leyendo el bloque anterior **después** del merge:
+  `prev: readStoredPaymentBlock(readMetadataObject(existing.metadata))`, puesto abajo de todo junto a
+  la llamada. El test del reemplazo salió rojo con
+  `prev.contract === next.contract === 'Vote111…'`.
+- **Causa raíz**: `readMetadataObject` **no copia**: devuelve `raw as Record<string, unknown>`, el
+  MISMO objeto. El merge de `update()` hace `meta.payment = paymentBlock` sobre ese objeto, así que
+  **muta `existing.metadata` en el lugar**. Para cuando yo leía `prev`, ya era `next`.
+- **Por qué importa más que un test rojo**: ese log tiene UNA razón de existir — contestar *"¿a qué
+  billetera se re-apuntó, y cuándo?"* el día que un cobro aparezca donde no debe. Un `prev` que
+  repite el valor nuevo **no es un log incompleto: es un log que miente**, y miente justo en la
+  pregunta para la que se escribió. Y en producción no hubiera fallado nada: el objeto mutado es una
+  fila recién traída de Supabase, así que no hay corrupción visible. Habría envejecido en silencio
+  hasta la primera investigación.
+- **Fix**: capturar `previousPaymentBlock` **antes** del bloque de merge, con el porqué escrito al
+  lado en el código. Verificado por mutación (M14): devolviendo la lectura a su lugar de abajo, los
+  dos tests de auditoría se ponen rojos.
+- **Aplicar en**: cualquier lectura de "estado anterior" en un método que también mergea. Regla
+  operativa: **si vas a loguear un `prev`, capturalo en la primera línea que tenga el dato, no donde
+  te queda cómodo escribirlo**. Y antes de asumir que una función de narrowing devuelve una copia,
+  leele el `return`: acá el `as` sobre el mismo objeto está a la vista.
+
+---
+
+### [2026-08-19 00:33] Wave 3B — El validador SSRF hace un DNS REAL, y mi suite lo descubrió con ENOTFOUND
+
+- **Error**: los 5 tests nuevos de `publish()` murieron con
+  `Invalid agentUrl: getaddrinfo ENOTFOUND mi-agente.example`, antes de llegar al insert que querían
+  medir.
+- **Causa raíz**: `publish()` corre `validateRegistryUrl` (defense-in-depth de SSRF), que **resuelve
+  DNS de verdad**. `src/services/agent.payment.test.ts` era hasta ahora un archivo sólo de LECTURA
+  (`listAsAgents`/`getBySlugAsAgent`), así que nunca había necesitado mockear `node:dns`. Al
+  agregarle tests de ESCRITURA, heredó una dependencia de red que su harness no tenía.
+- **Fix**: `vi.mock('node:dns', …)` con el mismo patrón que `agents.publish.test.ts:33-35`, y
+  `mockLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }])` en el `beforeEach` del
+  bloque de altas.
+- **Aplicar en**: cuando le agregues a un archivo de test un camino que no ejercitaba antes,
+  **el harness que alcanzaba para el camino viejo no alcanza**. Lo que hay que revisar no es qué
+  mockea el archivo, sino qué I/O toca el camino NUEVO. Es la cara "de adentro" de CD-A6: ahí se
+  revisan los mocks de los consumidores del módulo que cambiás; acá, los del camino que estrenás.
+
+---
+
+### [2026-08-19 00:35] Wave 3B — Desviación declarada: `buildMetadata` recibe el `payment` por un parámetro APARTE
+
+- **Qué dice el Story File** (§F, punto 3): *"`buildMetadata`: agregar `payment` al tipo del
+  parámetro y `if (source.payment !== undefined) meta.payment = source.payment;"*.
+- **Por qué no lo hice así**: con `payment` como key de `source`, la llamada que ya existe
+  —`buildMetadata(input)`— tomaría **`input.payment`**, que es el objeto CRUDO del caller. O sea que
+  el punto 3 del Story File construye exactamente el agujero que DT-STORY-2 declara normativo cerrar,
+  y lo deja dependiendo de que nadie se equivoque en el call-site.
+- **Qué hice**: `buildMetadata(source, payment?)`. Como parámetro separado, el único valor que se le
+  puede pasar es el que produjo `validatePaymentBlock`. La regla deja de ser una prohibición y pasa a
+  ser una imposibilidad. Es un ENDURECIMIENTO del Story File, no una relajación, y el comportamiento
+  observable es idéntico.
+- **Verificado por mutación (M16)**: cambiando la llamada a `buildMetadata(input, input.payment)`,
+  T-316-02 se pone rojo. O sea que el test cubre el agujero **aunque** alguien revierta la firma.
+- **Aplicar en**: cuando un Story File te pida una firma que permite el error que él mismo prohíbe,
+  la salida no es elegir uno de los dos: es implementar el invariante en el tipo y **declarar la
+  desviación**.

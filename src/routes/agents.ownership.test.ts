@@ -97,6 +97,33 @@ vi.mock('../middleware/a2a-key.js', () => ({
   ],
 }));
 
+/**
+ * 🔴 WKH-316 — este archivo usa el service REAL, así que la defense-in-depth de
+ * `publish`/`update` llama a `validatePaymentBlock`. Sin este mock el registry
+ * de adapters está SIN inicializar y `getAdaptersBundle` devuelve `undefined`
+ * para toda chain: cualquier PATCH con `payment` moriría en el paso 3 con un 422
+ * en vez de llegar al guard de dueño, y T-316-12 estaría midiendo otra cosa.
+ * `importOriginal` + spread por lo de siempre: sin el spread, el resto de los
+ * exports queda `undefined`.
+ */
+const INITIALIZED_CHAINS = ['solana-devnet', 'avalanche-fuji'];
+vi.mock('../adapters/registry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../adapters/registry.js')>();
+  return {
+    ...actual,
+    getInitializedChainKeys: () => INITIALIZED_CHAINS,
+    getAdaptersBundle: (chainKey?: string) =>
+      chainKey !== undefined && INITIALIZED_CHAINS.includes(chainKey)
+        ? { payment: { supportedTokens: [{ symbol: 'USDC' }] } }
+        : undefined,
+  };
+});
+
+vi.mock('../lib/operator-address.js', () => ({
+  resolveOperatorAddress: () => Promise.resolve(null),
+}));
+
 import agentsRoutes from './agents.js';
 
 const OWNER_A_ROW = {
@@ -313,5 +340,65 @@ describe('agents routes — ownership / anti-IDOR (WKH-134)', () => {
       expect(res.json().error).toBe('Invalid enabled');
       expect(state.updateCalled).toBe(false);
     }
+  });
+
+  // ── WKH-316 · el bloque `payment` en el PATCH ────────────────────
+
+  const SOL_PAYTO = 'So11111111111111111111111111111111111111112';
+  const VALID_PAYMENT = {
+    method: 'x402',
+    chain: 'solana-devnet',
+    contract: SOL_PAYTO,
+    asset: 'USDC',
+  };
+
+  it('T-316-12 · AC-7: owner B PATCH payment sobre el agente de A → 404, y CERO update', async () => {
+    // ⚠️ Lo que este test prueba, y lo que NO. Prueba que el bloque `payment`
+    // VÁLIDO no le abre a un no-dueño una puerta que los otros campos no le
+    // abren: sigue saliendo por `OwnershipMismatchError` → 404 disclosure-safe,
+    // sin tocar la fila. NO prueba aislamiento por filtro — el mock de este
+    // archivo devuelve `state.row` sin mirar los `.eq()` (ver el docblock de
+    // arriba). El aislamiento vive en `src/services/agent.ownership.test.ts`.
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/agents/a-owned-agent',
+      payload: { payment: VALID_PAYMENT },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe('Agent not found');
+    expect(state.updateCalled).toBe(false);
+    expect(mockLog).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-316-12 (gemelo): el MISMO PATCH lo hace el dueño → 200 y el update corre', async () => {
+    // Sin este gemelo, un `return 404` incondicional en el PATCH pasaría el test
+    // de arriba (CD-A4).
+    currentOwner = 'tenant-A';
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/agents/a-owned-agent',
+      payload: { payment: VALID_PAYMENT },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(state.updateCalled).toBe(true);
+    expect(mockLog).not.toHaveBeenCalled();
+  });
+
+  it('el 422 del bloque inválido GANA sobre el 404 de dueño, y no toca la fila', async () => {
+    // Consecuencia declarada del diseño: el guard del route corre ANTES que el
+    // guard de dueño, que vive dentro de `update()`. Un no-dueño con un bloque
+    // inválido recibe 422, no 404. Disclosure: cero — la respuesta depende sólo
+    // de su propio input y de config ya pública por `GET /capabilities`.
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/agents/a-owned-agent',
+      payload: { payment: { ...VALID_PAYMENT, chain: 'polygon' } },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error_code).toBe('INVALID_PAYMENT_CHAIN');
+    expect(state.updateCalled).toBe(false);
   });
 });
