@@ -7,6 +7,11 @@
 [![protocolo](https://img.shields.io/badge/protocolo-Google%20A2A-blue)](https://google.github.io/A2A/)
 [![licencia](https://img.shields.io/badge/licencia-MIT-green)](LICENSE)
 
+**Esto es el coordinador.** Un solo nombre, usado en todos lados: así lo llama el pitch deck, la agent card
+en `/.well-known/agent.json` publica `WasiAI A2A Coordinator`, y lo mismo dice su entrada en el Solana Agent
+Registry. La palabra *gateway* aparece a lo largo de este README describiendo lo que **es** técnicamente, un
+punto de entrada HTTP, no como segundo nombre de la misma cosa.
+
 Protocolo y gateway HTTP para que un cliente encuentre agentes **por capacidad y no por dirección**, los **componga** en un flujo y **pague por uso**.
 
 **Solana es la red principal de este gateway, y su leg de liquidación está verificado en cadena**: el pago de abajo mueve USDC-SPL de verdad en devnet, y cualquiera lo puede comprobar contra el RPC público. Lo que esa transferencia prueba es el mecanismo, no un cobro a precio de lista: el monto movido es 0,000001 USDC contra un precio declarado de 0,03.
@@ -162,6 +167,8 @@ Las filas de abajo van en orden de producto; el endpoint devuelve Kite primero, 
 
 Las tres filas EVM se comprueban mandando `x-payment-chain` a `POST /compose` sin pago: el `402` vuelve con `eip155:2368`, `eip155:43113` o `eip155:84532` y el monto en los decimales del token de esa red. La fila de Solana se comprueba al revés, y esa es su naturaleza: el mismo request con `x-payment-chain: solana-devnet` devuelve `400 CHAIN_INBOUND_PAYMENT_UNSUPPORTED`, porque paga hacia afuera y no cobra hacia adentro.
 
+Parámetros de descubrimiento del catálogo (WKH-322): `/discover` ahora rechaza las claves que no reconoce con `400 UNKNOWN_DISCOVER_PARAM`, listando las aceptadas. Eso evita que un filtro mal escrito matchee el catálogo entero en silencio. Los parámetros aceptados son `allowTrial`, `capabilities`, `includeInactive`, `limit`, `maxPrice`, `minReputation`, `min_reputation`, `q`, `registry`, `verified`. El alias `min_reputation` se agregó para que una sola forma de escribirlo sirva tanto en `/discover` como en los `constraints` de `/compose`.
+
 **Ninguna red mainnet está inicializada en el deployment de hoy.** Los adaptadores de mainnet existen y hubo liquidaciones reales en Avalanche C-Chain en abril de 2026 (ver [Evidencia on-chain](#evidencia-on-chain)), pero el gateway que está arriba ahora mismo corre testnet y devnet, sin dinero real.
 
 Estado del catálogo en ese mismo deployment: 25 agentes descubribles (medido el 2026-08-15 contra `GET /discover`, tres corridas seguidas), de un marketplace federado más los publicados directo contra el gateway. Tres cobran en Solana devnet, y son toda la línea de remesa. Los agentes en sí no viven en este repo: este repo es el protocolo y el gateway, y el catálogo es de terceros.
@@ -289,7 +296,7 @@ Cada fila de abajo se leyó de `src/routes/` con los prefijos que registra `src/
 |---|---|---|
 | `GET` | `/` | info del servicio |
 | `GET` | `/health` | probe de salud |
-| `GET` | `/.well-known/agent.json` | agent card del propio gateway |
+| `GET` | `/.well-known/agent.json` | agent card del propio gateway. La misma identidad está anclada en cadena en el [Solana Agent Registry](https://explorer.solana.com/address/8EQfLhMG9aKTgxS5YarUmg9SsUWqCFa4ZQ8NMR2HzFde?cluster=devnet) |
 | `GET \| POST` | `/discover` | busca agentes en todos los registries |
 | `GET` | `/discover/:slug` | un agente puntual |
 | `GET` | `/capabilities` | métodos, cadenas inicializadas y catálogo |
@@ -427,10 +434,15 @@ Liquidaciones verificables. La de Solana es devnet (sin dinero real) y se confir
 | Tx | Red | Qué fue |
 |---|---|---|
 | [`3pNqu9jH…`](https://explorer.solana.com/tx/3pNqu9jHduGaXioB8Mf7WNvBgZQgJV4MnE6NDGWZdz6aY5gr2ivxfbwzrnweutSVtyKnvv7y7kXnARroktjyWsZx?cluster=devnet) | Solana devnet | USDC-SPL de Circle saliente a la wallet de cobro de `remit-corridor-fx-solana`, 0,000001 |
+| [`3jHFjCeY…`](https://explorer.solana.com/tx/3jHFjCeYpXUdcGSPM7NkUzzUgNyQ3Z7htdtg39t8rUaemJuWV5JkSCPRiv6NadYkKj9PWMQpnPfZqg23mFZFq2ER?cluster=devnet) | Solana devnet | El gateway registrándose a **sí mismo** como agente en el [Solana Agent Registry](https://explorer.solana.com/address/8EQfLhMG9aKTgxS5YarUmg9SsUWqCFa4ZQ8NMR2HzFde?cluster=devnet), 0,0034 de rent |
 | [`0x9fa6ff83…`](https://snowtrace.io/tx/0x9fa6ff83eb10e51685ce078e69f9c42fcbe3b138b5b8c3f32909c9fee279c6f1) | Avalanche C-Chain (43114) | USDC saliente a `wasi-chainlink-price`, $0,001 |
 | [`0xa22086d0…`](https://snowtrace.io/tx/0xa22086d048b0222a8e08a5ca08997ae6c359e5ba674e63133a0ffbc463af16f9) | Avalanche C-Chain (43114) | USDC saliente a `wasi-defi-sentiment`, $0,010 |
 | [`0xca10320c…`](https://snowtrace.io/tx/0xca10320c24ff513d773ce65e0bd306d4acce3e4883180c9dca5573da6cf1dfdb) | Avalanche C-Chain (43114) | USDC saliente a `wasi-wallet-profiler`, $0,050 |
 | [`0x6f406c08…`](https://testnet.kitescan.ai/tx/0x6f406c08f6e59e3c5029f57ec3a84bb4596b94bb02568055ec4f9572981a1bf9) | Kite testnet (2368) | PYUSD entrante, 1,0 |
+
+La fila del registro es una clase de evidencia distinta de las demás: no es un pago, es la identidad propia del coordinador. El gateway publica una agent card en `/.well-known/agent.json`, y esa card la sirve un dominio que controlamos nosotros. La entrada en el registro no: es un asset MPL Core en Solana cuyos datos de cuenta apuntan a un documento IPFS que lista las tres skills de orquestación y `x402Support: true`, un campo que define el registro mismo. Cualquiera lo puede leer sin pedirnos nada.
+
+Estar registrado no es lo mismo que ser descubierto. Todavía nadie encontró este gateway a través del registro, y esa frase se queda acá hasta que alguien lo haga.
 
 Sobre Base Sepolia hay cinco corridas documentadas (tres liquidaciones sueltas, una de `/compose` de punta a punta y una del leg de salida), con los hashes y el método de verificación en [`doc/BASE-EVIDENCE.md`](doc/BASE-EVIDENCE.md).
 
