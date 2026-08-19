@@ -108,8 +108,8 @@ function isValidPayoutWalletForChain(
  * chequeos en este archivo está prohibido.
  *
  * El `reason` sale del mapa del módulo y es ESTÁTICO: **ninguno refleja el valor
- * recibido** (CD-8, mismo patrón que el guard de `payoutWallet` de acá arriba).
- * El valor va al `request.log.warn`, que es server-side.
+ * recibido** (CD-8) — y AR/MNR-1 lo sacó también del LOG: se loguea sólo
+ * `{ field, code }`, nunca el valor del caller (`T-316-27` / `T-316-28`).
  */
 function paymentRejectionBody(
   rejection: PaymentBlockRejection,
@@ -270,11 +270,19 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
         if (body.payment !== undefined) {
           const result = await validatePaymentBlock(body.payment);
           if (!result.ok) {
+            // AR/MNR-1: se loguea `{ field, code }` y NUNCA el valor crudo del
+            // caller, igual que los 5 guards hermanos de este archivo
+            // (`priceUsdc`, `payoutWallet`, `referrerRef`, `enabled`,
+            // `capabilities`). `body.payment` es JSON elegido por el caller e
+            // `src/index.ts` construye Fastify sin `bodyLimit` (default 1 MiB),
+            // así que echarlo al log hace que la línea crezca con el input del
+            // atacante — la misma clase de deuda que TD-322-4
+            // (`src/lib/discovery-query.ts:219-229`). La línea es de longitud
+            // acotada: `field` y `code` son literales del validador.
             request.log.warn(
               {
                 field: result.rejection.field,
                 code: result.rejection.code,
-                value: body.payment,
               },
               'agent publish rejected: invalid payment',
             );
@@ -485,11 +493,12 @@ const agentsRoutes: FastifyPluginAsync = async (fastify) => {
         if (body.payment !== undefined && body.payment !== null) {
           const result = await validatePaymentBlock(body.payment);
           if (!result.ok) {
+            // AR/MNR-1: sólo `{ field, code }`, nunca el crudo del caller.
+            // Ver la nota extendida en el guard espejo del POST.
             request.log.warn(
               {
                 field: result.rejection.field,
                 code: result.rejection.code,
-                value: body.payment,
               },
               'agent update rejected: invalid payment',
             );

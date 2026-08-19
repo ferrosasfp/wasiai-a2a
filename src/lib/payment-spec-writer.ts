@@ -90,8 +90,8 @@ export type PaymentBlockResult =
 
 /**
  * Mensaje al cliente por código. **ESTÁTICOS a propósito (CD-8)**: ninguno
- * refleja el valor recibido. El valor va al `request.log.warn` del route, que es
- * server-side. Mismo patrón que el guard de `payoutWallet` en `routes/agents.ts`.
+ * refleja el valor recibido, y AR/MNR-1 lo saca también del log del route (que
+ * loguea sólo `{ field, code }`). Mismo patrón que el guard de `payoutWallet`.
  *
  * Vive acá y no en el route para que los dos callers del validador no puedan
  * divergir en el texto que publican como contrato.

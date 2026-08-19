@@ -780,4 +780,153 @@ describe('agents routes — publish flow (WKH-134)', () => {
     expect(res.statusCode).toBe(422);
     expect(res.body).not.toContain('chain-secreta-del-caller');
   });
+
+  // ── AR/MNR-1 · el log del 422 NO lleva el valor crudo del caller ──
+  //
+  // POR QUÉ ES UN TEST Y NO UNA CONVENCIÓN. `body.payment` es JSON elegido por
+  // el caller, y `src/index.ts` construye Fastify sin `bodyLimit` (default de
+  // 1 MiB), así que una línea de log que lo eche entera crece con el input del
+  // atacante — en el camino del dinero y con el repo público. Los 5 guards
+  // hermanos de `routes/agents.ts` (`priceUsdc` `:220`, `payoutWallet` `:237`,
+  // `referrerRef` `:252`, `enabled` `:459`, `capabilities` `:475` — todos
+  // re-medidos DESPUÉS de este fix, que desplazó las líneas de abajo del POST)
+  // loguean sólo el `field`; estos dos se desalinearon y el AR lo cazó.
+  //
+  // ⚠️ SE VERIFICA LA AUSENCIA DE LA KEY, NO QUE EL VALOR VENGA VACÍO. Un
+  // `value: ''` o un `value: '[redacted]'` pasarían un `not.toContain(marker)`
+  // sin acotar nada el día que alguien "arregle" el truncado con un slice; lo
+  // que fija la cota es que la key no exista.
+
+  /**
+   * Levanta una app aparte con un pino que escribe a un array (mismo patrón que
+   * `src/middleware/forward-key.test.ts:204-232`) y devuelve las líneas
+   * parseadas. `level: 'warn'` deja afuera el request/response logging de
+   * Fastify, que es `info`.
+   */
+  async function captureWarnLines(
+    inject: (a: ReturnType<typeof Fastify>) => Promise<unknown>,
+  ): Promise<Array<Record<string, unknown>>> {
+    const lines: Array<Record<string, unknown>> = [];
+    const logApp = Fastify({
+      logger: {
+        level: 'warn',
+        stream: {
+          write(line: string) {
+            // No se traga el error de parseo: pino tiene que emitir JSON válido
+            // con esta configuración, y si no lo hace este test dejó de medir.
+            try {
+              lines.push(JSON.parse(line) as Record<string, unknown>);
+            } catch (err) {
+              expect.fail(
+                `línea de log no parseable: ${JSON.stringify(line)} (${String(err)})`,
+              );
+            }
+          },
+        },
+      },
+    });
+    await logApp.register(agentsRoutes, { prefix: '/agents' });
+    await logApp.ready();
+    try {
+      await inject(logApp);
+    } finally {
+      await logApp.close();
+    }
+    return lines;
+  }
+
+  // `chain` desconocida en minúsculas a propósito: `normalizeChainSlug` hace
+  // `trim().toLowerCase()`, así que en mayúsculas la marca no volvería verbatim
+  // ni siquiera si el route logueara el crudo, y el test sería más débil.
+  const RAW_MARKER = 'marca-cruda-del-caller-que-no-debe-loguearse';
+
+  it('T-316-27 · AR/MNR-1: el 422 del POST loguea { field, code } y NUNCA el payment crudo', async () => {
+    const lines = await captureWarnLines((a) =>
+      a.inject({
+        method: 'POST',
+        url: '/agents',
+        payload: {
+          ...VALID_BODY,
+          payment: { ...VALID_PAYMENT, chain: RAW_MARKER },
+        },
+      }),
+    );
+
+    const rejected = lines.filter(
+      (l) => l.msg === 'agent publish rejected: invalid payment',
+    );
+    // Control de vacuidad: sin esto, un guard que no loguea NADA (o un stream
+    // que no captura) haría pasar todas las aserciones de abajo.
+    expect(rejected).toHaveLength(1);
+    const line = rejected[0] as Record<string, unknown>;
+    expect(line.field).toBe('payment.chain');
+    expect(line.code).toBe('INVALID_PAYMENT_CHAIN');
+    // La KEY no está: no es que esté vacía.
+    expect(Object.keys(line)).not.toContain('value');
+    // Y el crudo no se cuela por ninguna otra key de la línea.
+    expect(JSON.stringify(line)).not.toContain(RAW_MARKER);
+  });
+
+  it('T-316-28 · AR/MNR-1: el 422 del PATCH loguea { field, code } y NUNCA el payment crudo', async () => {
+    const lines = await captureWarnLines((a) =>
+      a.inject({
+        method: 'PATCH',
+        url: '/agents/my-weather-agent',
+        payload: { payment: { ...VALID_PAYMENT, chain: RAW_MARKER } },
+      }),
+    );
+
+    const rejected = lines.filter(
+      (l) => l.msg === 'agent update rejected: invalid payment',
+    );
+    expect(rejected).toHaveLength(1);
+    const line = rejected[0] as Record<string, unknown>;
+    expect(line.field).toBe('payment.chain');
+    expect(line.code).toBe('INVALID_PAYMENT_CHAIN');
+    expect(Object.keys(line)).not.toContain('value');
+    expect(JSON.stringify(line)).not.toContain(RAW_MARKER);
+    // Y el service no se tocó: el guard del route corre antes.
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  // ── AR/MNR-2 · desviación de contrato DECLARADA ──────────────────
+  //
+  // `POST /agents` con `payment: null` pasó de **201** (en `main` @ `8242b16`
+  // `payment` era una key desconocida del body y se ignoraba, igual que el
+  // `slug`) a **422 `INVALID_PAYMENT_BLOCK`**. Es deliberado: en un ALTA no hay
+  // nada que borrar, así que aceptar el `null` en silencio sería inventarle un
+  // significado. Ningún AC lo cubría (AC-11 sólo habla de omitir la key), así
+  // que se declara acá y en `auto-blindaje.md`.
+  //
+  // El test es un PAR, y el par es lo que lo hace no-vacío: el MISMO `null` en
+  // el PATCH es la señal de borrado (AC-8). Alinear el POST con el PATCH
+  // —`body.payment !== undefined && body.payment !== null`— es exactamente la
+  // "simplificación" que este test tiene que matar.
+  it('T-316-29 · AR/MNR-2: `payment: null` es 422 en el ALTA (contrato nuevo, declarado)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/agents',
+      payload: { ...VALID_BODY, payment: null },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error_code).toBe('INVALID_PAYMENT_BLOCK');
+    expect(res.json().field).toBe('payment');
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
+  it('T-316-29 (el otro lado del par): el MISMO `null` en el PATCH es BORRADO, no 422', async () => {
+    mockUpdate.mockResolvedValueOnce(RECORD_RESPONSE);
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/agents/my-weather-agent',
+      payload: { payment: null },
+    });
+
+    expect(res.statusCode).toBe(200);
+    // El `null` llega al service: es la señal de borrado, no un valor inválido.
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(mockUpdate.mock.calls[0]?.[1]).toHaveProperty('payment', null);
+  });
 });

@@ -220,15 +220,19 @@
   mecánico (el de ownership sólo mira su propio campo `line`), y envejecen en silencio.
 - **Qué encontré, medido contra `main` = `8242b16` y contra el árbol final**:
 
+  ⚠️ **Dos celdas de esta tabla estaban MAL y las corrigió el fix-pack del AR** (ver la entrada
+  `[2026-08-19 01:19] Fix-pack AR — BLQ-BAJO-1`). Los valores de abajo son los **corregidos y
+  re-medidos por contenido**; el número que había antes está tachado al lado.
+
   | Archivo que cita | Cita | Ahora es | ¿Lo arreglé? |
   |---|---|---|---|
   | `src/routes/agents.ownership.test.ts:17` | `services/agent.ts:701` | `:808` | ✅ sí (Scope IN) |
   | `src/routes/agents.ownership.test.ts:18` | `services/agent.ts:715` | `:822` | ✅ sí (Scope IN) |
   | `src/routes/agents.ownership.test.ts:25` | `:184` (T-143B-06, del propio archivo) | `:211` | ✅ sí (Scope IN) |
-  | `src/services/agent.ownership.test.ts:6` | `services/agent.ts:549` y `:715` | `:761` y `:822` | ❌ **NO** — fuera de Scope IN |
-  | `src/services/discovery.ts:255` | `services/agent.ts:429-440` | `:469-480` | ❌ **NO** — **CD-6 prohíbe tocar `discovery.ts`** |
-  | `src/services/orchestrate.ts:1160` | `services/agent.ts:526` | `:599` | ❌ **NO** — fuera de Scope IN |
-  | `src/lib/self-published-auth.ts:29` | `routes/agents.ts:265` | `:330` | ❌ **NO** — fuera de Scope IN |
+  | `src/services/agent.ownership.test.ts:6` | `services/agent.ts:549` (el `.eq('owner_ref')` de **`listMine`**) y `:715` (el de **`delete`**) | **`:602`** (~~`:761`~~) y `:822` | ❌ **NO** — fuera de Scope IN |
+  | `src/services/discovery.ts:255` | `services/agent.ts:429-440` — 🔴 **cita PREEXISTENTEMENTE FALSA**: ese ancla es el INSERT de `publish()`, no el SELECT de `listAsAgents` (ver `MNR-4`) | ancla desplazado: `:469-480` · **ancla que la prosa afirma: `:506-510`** | ❌ **NO** — **CD-6 prohíbe tocar `discovery.ts`** |
+  | `src/services/orchestrate.ts:1160` | `services/agent.ts:526` (el `await supabase` de **`getBySlugAsAgent`**) | **`:579`** (~~`:599`~~) | ❌ **NO** — fuera de Scope IN |
+  | `src/lib/self-published-auth.ts:29` | `routes/agents.ts:265` (`keyRow.owner_ref,` en la llamada a `publish()` del POST) | **`:338`** (~~`:330`~~ — el fix-pack de `MNR-1` agregó `+8` líneas arriba; ver la nota de abajo) | ❌ **NO** — fuera de Scope IN |
 
 - **Hallazgo aparte, PRE-EXISTENTE (no es mío, y está medido)**: `src/types/index.ts` afirma
   *"`publish` la escribe `true` (`services/agent.ts:399`)"*, y en **`main`** la línea 399 de ese
@@ -260,3 +264,211 @@
 - **Aplicar en**: cuando un instrumento de verificación contradice a la medición, **primero verificá
   el instrumento** — que es justamente lo que este `ABORT` obligó a hacer. El control correcto para
   una mutación aditiva no es "el original desapareció" sino "el md5 cambió y volvió".
+
+---
+
+# Fix-pack del AR (veredicto RECHAZADO — 1 BLQ-BAJO + 4 MENORES)
+
+> `ar-report.md` · `nexus-adversary` · 2026-08-19. Las 5 entradas de abajo son la respuesta,
+> una por hallazgo. Lo que el AR confirmó a favor de la implementación no se re-litigó ni se tocó.
+
+### [2026-08-19 01:19] Fix-pack AR — BLQ-BAJO-1 · Reporté 4 citas desplazadas con UN delta, y el archivo tiene DOS
+
+- **Error**: en la tabla de la entrada `[2026-08-19 00:44] Wave 4` publiqué el "valor nuevo ya
+  medido" de las 4 citas que no podía arreglar. **Dos de los cuatro valores eran falsos**:
+  - `src/services/agent.ownership.test.ts:6` cita el `.eq('owner_ref', ownerRef)` de **`listMine`**
+    (`main:549`). Reporté **`:761`**, que es el `.eq('owner_ref', ownerRef)` **del UPDATE de
+    `update()`** — otra función, otro hueco, otro test. El correcto es **`:602`**.
+  - `src/services/orchestrate.ts:1160` cita el `const { data, error } = await supabase` de
+    **`getBySlugAsAgent`** (`main:526`). Reporté **`:599`**, que es la MISMA línea de texto pero
+    dentro de **`listMine`**. El correcto es **`:579`**.
+- **Causa raíz**: apliqué un **desplazamiento uniforme**. `update()` creció ~54 líneas **en el
+  medio** del archivo, así que hay **dos deltas**: lo que está entre `publish()` y `update()` se
+  corrió `+53`, y lo que está debajo de `update()` se corrió `+107`. Sumar un solo delta a un ancla
+  de la zona de arriba lo manda 54 líneas más abajo de donde está. Es la misma causa que yo mismo
+  nombré para W0 (*"el desplazamiento es parte de tu diff"*) sin sacarle la consecuencia: **el
+  desplazamiento no es un número, es una función por tramos.**
+- **Por qué no lo cazó nada, y es la lección**: los dos números equivocados **contienen el mismo
+  texto** que el ancla que buscaba. `.eq('owner_ref', ownerRef)` aparece **6 veces** en
+  `src/services/agent.ts` (`:13` en un docblock, `:602`, `:710` y `:717` en comentarios, `:761`,
+  `:822`) y `const { data, error } = await supabase` aparece **9** (`:346`, `:371`, `:472`, `:506`,
+  `:546`, `:579`, `:599`, `:757`, `:818`). O sea que **cualquier verificación que abra la línea y
+  compare el texto da OK**: es evidencia que se auto-confirma, y muestra exactamente lo que el
+  verificador esperaba ver. Lo único que discrimina es la **función contenedora**.
+- **Fix**: re-medidos los dos por contenido, y cada uno verificado con su función contenedora:
+
+  | Ancla en `main` @ `8242b16` | Función en `main` | HEAD | Función en HEAD | Cómo se verificó |
+  |---|---|---|---|---|
+  | `:549` `.eq('owner_ref', ownerRef)` | `listMine` (`main:545`) | **`:602`** | `listMine` (`:598`) | `awk` de la firma de `listMine` (`:598`) hasta `:606`; la siguiente firma es `update` en `:619`, así que `:602` cae adentro |
+  | `:526` `const { data, error } = await supabase` | `getBySlugAsAgent` (`main:525`) | **`:579`** | `getBySlugAsAgent` (`:578`) | ídem: firma en `:578`, siguiente firma `listMine` en `:598` |
+
+  Las otras dos citas de la tabla se re-verificaron igual y **estaban bien**: `main:715` → `:822`
+  (las dos en `delete`, `main:691` / `:798`) y `routes/agents.ts:265` → `:330` (las dos son
+  `keyRow.owner_ref,` en la llamada a `publish()` del POST).
+- **Aplicar en**: **todo re-apuntado de citas.** Dos reglas operativas, y la segunda es la que
+  faltaba:
+  1. Si tu diff inserta líneas **en el medio** de un archivo, ese archivo tiene **más de un delta**.
+     Derivá uno por tramo, o mejor: no derives ninguno.
+  2. **Un ancla no se localiza por su texto, se localiza por su función contenedora.** Si la cadena
+     que buscás aparece más de una vez en el archivo —y en un service con N métodos, toda cadena de
+     query aparece N veces— el texto no discrimina nada. El control es: `awk` desde la firma de la
+     función hasta la firma siguiente, y verificar que el número cae **dentro** de ese rango.
+
+---
+
+### [2026-08-19 01:19] Fix-pack AR — MNR-1 · El log del 422 llevaba el `payment` crudo del caller, sin cota
+
+- **Error**: `src/routes/agents.ts:277` (POST) y `:492` (PATCH) **—numeración PRE-fix, la del árbol
+  que auditó el AR—** logueaban `{ field, code, value: body.payment }`. `body.payment` es JSON
+  **elegido por el caller**, y `src/index.ts` construye Fastify **sin `bodyLimit`** (verificado:
+  `grep -n bodyLimit src/index.ts` → exit 1, cero coincidencias), así que rige el default de
+  **1 MiB** y cada 422 escribía hasta ~1 MiB de JSON arbitrario a los logs — en el camino del
+  dinero, en un repo público. Post-fix el manejo del rechazo está en `:272-291` (POST) y `:495-507`
+  (PATCH), y la línea de log en `:282-288` y `:498-504`.
+- **Causa raíz**: escribí el log mirando qué me sería útil para diagnosticar, no qué hacen los
+  **guards hermanos del mismo archivo**. Los 5 que ya estaban —`priceUsdc` (`:220`), `payoutWallet`
+  (`:237`), `referrerRef` (`:252`), `enabled` (`:459`), `capabilities` (`:475`), los cinco re-medidos
+  en el árbol POST-fix, porque este mismo fix desplazó `+8` todo lo que está debajo del guard del
+  POST— loguean **sólo el
+  `field`**, y ninguno el valor. Además el repo ya tiene esta clase de deuda con nombre
+  (**TD-322-4**, `src/lib/discovery-query.ts:219-229`, por una línea de log que crece con el input
+  del atacante), o sea que el criterio estaba escrito y yo no lo apliqué.
+- **Fix**: los dos sitios pasan a `{ field, code }`, alineados con sus 5 hermanos. Los dos valores
+  son literales del validador (`PaymentBlockRejection`), así que la línea queda de **longitud
+  acotada**. Se fija con dos tests nuevos, `T-316-27` (POST) y `T-316-28` (PATCH), que capturan la
+  línea de pino real con un stream propio.
+- **Lo que los tests verifican, y por qué así**: se assertea la **AUSENCIA DE LA KEY**
+  (`expect(Object.keys(line)).not.toContain('value')`), no un valor vacío. Un `value: ''` o un
+  `value: '[redacted]'` pasarían un `not.toContain(marker)` y **no acotarían nada** el día que
+  alguien "arregle" el problema con un `slice()`. Los dos tests además tienen **control de
+  vacuidad** (`expect(rejected).toHaveLength(1)` + `field`/`code` con su valor exacto): sin él, un
+  guard que no loguea nada —o un stream que no captura— haría pasar todas las aserciones.
+- 🔴 **Y este fix, al arreglar `MNR-1`, rompió TRES citas más — dos de prosa y una de número.**
+  Es `BLQ-BAJO-1` otra vez, en el mismo fix-pack que lo corrige, así que va acá completo:
+  1. `src/routes/agents.ts:112` decía *"El valor va al `request.log.warn`, que es server-side"*.
+     Era **cierto** cuando se escribió y **dejó de serlo** con este fix. Corregido — está en Scope IN
+     (mismo archivo).
+  2. `src/lib/payment-spec-writer.ts:93` decía lo mismo (*"El valor va al `request.log.warn` del
+     route"*). Corregido — `payment-spec-writer.ts` también es del Scope IN de esta HU.
+  3. `src/lib/self-published-auth.ts:29` cita `routes/agents.ts:265`. En la tabla de W4 yo había
+     publicado que "ahora es `:330`"; **mi propio fix-pack lo movió a `:338`** (+8 líneas del
+     comentario nuevo, arriba de ese ancla). La celda quedó actualizada al valor del **árbol final**.
+  Las dos correcciones de prosa se hicieron **línea-neutras a propósito** (verificado: el diff de
+  `payment-spec-writer.ts` es `2 insertions / 2 deletions` y el del docblock de `routes/agents.ts`
+  también, contra el conteo de líneas de `HEAD`), justamente para **no** disparar una tercera ronda
+  de citas desplazadas en dos archivos muy citados. El único desplazamiento que este fix-pack
+  introduce es `+9` en `src/routes/agents.ts` (+8 en el POST, +1 en el PATCH), y está barrido:
+  `grep -rn 'routes/agents\.ts:[0-9]' src/ test/ doc/INTEGRATION.md README*.md` devuelve **una sola**
+  cita de código vivo, la de `self-published-auth.ts:29`, que es la del punto 3.
+- **Aplicar en**: **todo `request.log.*` que reciba un valor del body.** Regla operativa: antes de
+  loguear un valor del caller, mirá qué loguean los guards hermanos del mismo archivo; si sos el
+  único que loguea el valor, el que está mal sos vos. Y si el valor es necesario para diagnóstico,
+  la pregunta no es "¿lo logueo?" sino "**¿cuál es su cota?**" — `MAX_ECHOED_PARAM_NAME_LENGTH`
+  (`discovery-query.ts`) es el patrón que ya existe acá para eso.
+  Y la segunda regla, que este fix-pack aprendió sobre sí mismo: **cuando acotás una salida,
+  buscá la prosa que describía la salida vieja.** Una frase que era cierta cuando se escribió
+  envejece por tu edición sin aparecer en tu diff como error — aparece como contexto sin tocar.
+  Si además la corrección de la prosa puede hacerse **línea-neutra**, hacela así: el desplazamiento
+  que evitás es el que no vas a tener que barrer después.
+
+---
+
+### [2026-08-19 01:19] Fix-pack AR — MNR-2 · Desviación de contrato declarada: `POST /agents` con `payment: null` pasó de 201 a 422
+
+- **Qué cambió**: en `main` @ `8242b16`, `payment` era una key **desconocida** del body del POST y se
+  ignoraba en silencio (mismo criterio que el `slug`, `routes/agents.ts:296-298` post-fix), así que
+  `{"…","payment":null}` daba **201**. En esta rama entra al validador (`body.payment !== undefined`)
+  y cae en el paso 0 (`payment-spec-writer.ts:168-170`) → **422 `INVALID_PAYMENT_BLOCK`**. Lo mismo
+  con `payment: {}`, `payment: "x"`, `payment: []`.
+- **Es deliberado**: en un ALTA no hay nada que borrar, así que aceptar el `null` en silencio sería
+  inventarle un significado a un valor que la HU usa para otra cosa. "Sin bloque" se dice **omitiendo
+  la key** (AC-11). El porqué ya estaba escrito en el route (`:265-268`) y en `doc/INTEGRATION.md`
+  ("Deleting the block").
+- **Error, entonces, cuál fue**: no que el comportamiento sea ese, sino que **ningún AC lo cubría**
+  (AC-11 sólo habla de omitir la key entera) y **no figuraba en la lista de desviaciones declaradas**.
+  Es un cambio de contrato de una **API pública de escritura** que quedó documentado como nota de
+  diseño en vez de como desviación. Rompe a un cliente que serialice el campo como nullable, que es
+  lo que hace cualquier ORM/DTO que emite `null` para "sin valor".
+- **Fix**: declarado acá, y con test: **`T-316-29`**, escrito como **PAR**, que es lo que lo hace
+  no-vacío — el MISMO `null` es **422 en el POST** y **BORRADO (200) en el PATCH** (AC-8). El par
+  mata la "simplificación" obvia (alinear el POST con el PATCH poniéndole
+  `&& body.payment !== null`) en la dirección que importa: sin el segundo test, alguien podría en
+  cambio alinear el PATCH con el POST y romper el borrado.
+- **Aplicar en**: cuando un campo nuevo entre a un endpoint público de escritura, **preguntá qué
+  hacía ese endpoint con ese campo ANTES**. Si antes era una key desconocida, cualquier valor que
+  ahora rechaces es un cambio de contrato, y "está documentado en el INTEGRATION.md" no es lo mismo
+  que "está declarado como desviación y tiene un test que lo fija".
+
+---
+
+### [2026-08-19 01:19] Fix-pack AR — MNR-4 · Reporté el valor nuevo de una cita que ya era FALSA, así que el valor nuevo también es falso
+
+- **Error**: `src/services/discovery.ts:254-256` afirma
+  *"`listAsAgents()` es un SELECT sin `limit` ni cursor (`services/agent.ts:429-440`)"*. Yo reporté
+  que ese ancla "ahora es `:469-480`" — mecánicamente correcto (el mismo ancla, `+40`) y
+  **semánticamente falso igual que antes**: `:469-480` es el **INSERT de `publish()`**, no el SELECT
+  de `listAsAgents`.
+- **Medido (verificado por mí en el fix-pack, no copiado del AR)**:
+  - `main:429-436` = `if (input.referrerRef !== undefined)` + `.from('a2a_agents').insert(row).select().single()` → **el INSERT de `publish()`**.
+  - `HEAD:469-480` = **lo mismo, desplazado**. Sigue siendo el INSERT.
+  - `HEAD:506-510` = `const { data, error } = await supabase` / `.from('a2a_agents')` / `.select('*')`
+    / `.eq('enabled', true)` / `.order('created_at', …)`, dentro de `listAsAgents` (firma en `:505`,
+    siguiente firma `listPublisherAnchors` en `:537`). **Ése es el ancla que la prosa afirma.** El
+    equivalente en `main` es `:453-457`.
+- **Causa raíz**: mi barrido CD-A1 verificaba **que la cita apunte a la misma línea de antes**, no
+  **que la línea diga lo que la prosa afirma**. Contra una cita que nació rota, ese control la
+  propaga rota y encima le pone la apariencia de haber sido verificada. Es la misma trampa que
+  `BLQ-BAJO-1` por otro lado: el instrumento confirmaba la continuidad del ancla, no su contenido.
+- **Fix**: **no se edita `discovery.ts` — CD-6 lo prohíbe.** Queda registrado en la tabla de citas de
+  la entrada de W4 con las dos cosas que el próximo necesita y que nadie más va a re-derivar:
+  (a) el defecto es **PREEXISTENTE a esta HU**, y (b) el ancla correcto es **`:506-510`**. Quien la
+  arregle tiene que corregir la **semántica**, no sólo el número.
+- **Aplicar en**: todo re-apuntado de una cita de prosa. Regla operativa: **antes de re-apuntar una
+  cita, verificá que la cita era CIERTA.** Un ancla desplazado se arregla con aritmética; un ancla
+  equivocado se arregla leyendo la afirmación y buscando qué línea la sostiene. Si no distinguís los
+  dos casos, publicás un número nuevo para una mentira vieja.
+
+---
+
+### [2026-08-19 01:19] Fix-pack AR — MNR-3 · DEUDA TÉCNICA `TD-316-METADATA-LWW` (diferida a propósito, no arreglada)
+
+- **Qué es**: `update()` (`src/services/agent.ts:624` `const existing = await this.getRow(slug)` →
+  `:734-754` merge → `:757-763` UPDATE) es un **read-modify-write** que reescribe el objeto
+  `metadata` **completo**, sin versión, sin `updated_at` esperado y sin `WHERE metadata = <lo que
+  leí>`. Dos PATCH concurrentes se pisan **a nivel de objeto `metadata`**, no de campo (last-writer-wins).
+- **El interleaving concreto** (no es un riesgo teórico — son cuatro pasos, mismo dueño, mismo slug):
+  1. `PATCH /agents/mi-agente {"payment": {…}}` lee `existing.metadata = {inputSchema}`.
+  2. `PATCH /agents/mi-agente {"discoverable": true}` lee `existing.metadata = {inputSchema}`.
+  3. (1) escribe `{inputSchema, payment}`.
+  4. (2) escribe `{inputSchema, discoverable}` → **el bloque `payment` desaparece.**
+
+  Las dos respuestas son **200**, y **el log de auditoría no delata nada**: el de (1) reporta
+  correctamente el cambio que sí hizo, y (2) no loguea porque su `updates.payment` es `undefined`.
+  El agente queda **sin declaración de cobro** y vuelve al riel default del gateway —que es
+  exactamente lo que `doc/INTEGRATION.md` dice que pasa sin bloque— sin que nadie se entere.
+- **Por qué sube de severidad con esta HU, aunque el patrón sea preexistente**: `inputSchema`,
+  `outputSchema` y `discoverable` ya se mergeaban así antes de WKH-316. Lo que esta HU mete dentro
+  de esa ventana es **la billetera de cobro**. La ventana no la abrí yo; lo que puse adentro, sí.
+- **Por qué se DIFIERE y no se arregla acá**: el arreglo correcto es **concurrencia optimista**
+  (columna de versión + reintento del read-modify-write, o `jsonb_set` server-side sobre la key
+  `payment` en vez de reescribir el objeto). Las dos opciones son cambios de contrato de escritura
+  de `update()` que afectan a **los 4 campos del `metadata`**, no sólo a `payment`, y la de la
+  columna de versión necesita **DDL** — y esta HU es explícitamente cero-DDL/cero-migración
+  (CD-14, AC-9: ninguna fila preexistente se toca). Meterlo en un fix-pack de AR sería exactamente
+  el scope-creep que el fix-pack no puede tener. **Es otra HU.**
+- **Qué la dispararía** (los tres, cualquiera alcanza):
+  1. Que aparezca **cualquier** cliente que emita PATCH concurrentes sobre el mismo slug — un panel
+     que guarde campo por campo con auto-save ya lo hace, sin proponérselo.
+  2. Que el bloque `payment` empiece a gatear un cobro **real** (hoy `readPaymentSpec` tiene dos
+     consumidores y ninguno está en el camino de `requirePayment`): ahí la pérdida silenciosa del
+     bloque deja de ser "vuelve al default" y pasa a ser plata que cobra otro.
+  3. Que se agregue un **quinto campo** al `metadata`, que multiplica los pares de PATCH que pueden
+     interleavearse.
+- **Mitigación mientras esté abierta — cuál es, y cuál NO es**: hoy la ventana requiere concurrencia
+  del **mismo dueño** sobre el **mismo slug**, que es poco frecuente. Eso **acota la probabilidad,
+  no cierra el camino**: no hay ningún guard que impida el interleaving, y no hay ninguna señal
+  —ni en la respuesta HTTP ni en el log— de que ocurrió. Un `payment` que desaparece hoy se descubre
+  cuando alguien cobra donde no debe, no cuando pasa.
+- **Aplicar en**: toda HU que meta un dato **money-relevante** dentro de un merge en memoria
+  preexistente. Regla operativa: heredar un patrón no es heredar su severidad — **la severidad la
+  fija el dato que metés, no el que ya estaba**.
