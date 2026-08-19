@@ -356,3 +356,53 @@ la próxima HU no los repita.
   **frase**, no por diff — grepear la afirmación vieja en todo el repo, incluidos los archivos que
   la HU no abrió. Y cuando un doc dice A arriba y no-A abajo, el que suele estar podrido es el de
   **arriba**: se escribió antes y nadie vuelve a leer el intro.
+
+---
+
+## Consolidación de cierre (nexus-docs, 2026-08-19) — sólo se AGREGA, nada de arriba se toca
+
+Las 19 entradas de arriba quedan como están. Esto es el índice de lectura, y tres cosas que se midieron
+en la fase de cierre y no tenían dónde vivir.
+
+### Las DOS lecciones transversales de la HU (las demás son locales; éstas cambian cómo se revisa)
+
+**L1 — Ningún mutante puede introducir un test que no existe** (entrada *"Un mutante que ningún mutante
+podía cazar"*, `MNR-3`). El F3 entregó **20/20 mutantes muertos** y **los dos `BLQ-ALTO` pasaron igual**,
+porque los 29 `it()` armaban el sobre **siempre** a partir del challenge del mismo request. **Mutar
+código no encuentra un agujero que vive en una CLASE DE INPUT que ningún test construye.** Un score de
+mutación mide la robustez de lo ya ejercitado y no dice **nada** de lo que no.
+→ *Antes de reportar un score de mutación, listá qué inputs no aparecen en ningún fixture.* Acá eran
+dos, y se nombraban en una línea cada uno: un sobre de otro precio, y dos callers.
+
+**L2 — Verificar los SITIOS arreglados no es verificar el CLAIM** (entrada *"2ª vuelta"*). La misma
+frase falsa sobrevivió **tres pasadas**: el CR la marcó y enumeró **6 sitios**, el fix condicionó los 6,
+y el **F4 verificó los 6 contra el gateway VIVO** y concluyó *"el README no quedó falso"*. Una cuarta
+pasada encontró `README.md:35` y `README.es.md:35` intactas —**el primer bloque que lee cualquiera**, en
+un repo público— más `doc/INTEGRATION.md:7`, con el README **contradiciéndose a sí mismo** (`:35` vs
+`:214`).
+⚠️ **La pasada más rigurosa fue la que más reforzó la conclusión falsa**: medir contra producción es el
+instrumento más convincente que hubo en la HU, y por eso su ✅ se leyó como cerrado.
+→ *Barré la AFIRMACIÓN, no la lista.* La frase vieja no está en el diff **porque nadie la tocó**.
+
+### La entrada del instrumento: se lee LA CORREGIDA
+
+La entrada *"CORREGIDA — la causa que escribí acá era FALSA: el hook no elide, corrompe el PIPE"* es la
+versión vigente. **Que el hook elida líneas de un archivo es falso** (medido cuatro veces por separado:
+dev, CR, dev re-midiendo, F4). Lo cierto es que **corrompe la salida redirigida por pipe, y
+selectivamente según el consumidor**: `cat -n f | tail -1` ⇒ vacío con exit 0, `cat -n f | wc -l` ⇒ 329.
+
+### Tres mediciones nuevas de la fase de cierre
+
+- **El hook también corrompe `grep` redirigido a archivo.** `grep -n "^| 212 " doc/sdd/_INDEX.md > f`
+  bajo el hook dejó `f` con **119 bytes**; el mismo comando con `/usr/bin/grep`, **7.749**. La fila
+  entera del índice se perdió en silencio, con exit 0. Es la misma clase que la entrada corregida, en
+  otro comando: **usar `/usr/bin/<cmd>` para todo lo que después se vaya a leer como dato.**
+- **`git diff main...HEAD` dio 0 bytes PARA EL CONTROL POSITIVO**, y no era un hallazgo: `main` ya
+  apuntaba al mismo commit que `HEAD`, así que el rango comparaba el commit contra sí mismo. **El cero
+  era de la pregunta, no del repo.** Regla: en cualquier medición de diff, fijar el rango con SHAs
+  explícitos (`75de7eb...cc332f8`), nunca con un nombre de rama que otro proceso puede mover.
+- **`git status --porcelain` ⇒ 0 líneas era CIERTO, pero sólo demostrable con su control.** Los tres
+  archivos que el snapshot inicial listaba como untracked hoy están ignorados (`.gitignore:23`, `:25`) y
+  siguen en disco; `git ls-files -o` sin `--exclude-standard` devuelve **38.223** entradas ⇒ el
+  instrumento sí habla cuando hay algo que decir. Sin ese control, el 0 del `f4-report.md` §1 era
+  indistinguible de un cero falso.
