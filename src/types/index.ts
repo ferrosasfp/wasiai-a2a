@@ -204,7 +204,7 @@ export interface AgentPaymentSpec {
    * ⚠️ EL NOMBRE MIENTE — leer antes de usarlo. `contract` NO es un contrato ni un
    * token: es **la dirección de la billetera que COBRA** (el `payTo` del leg de
    * salida). El valor va tal cual al destinatario del transfer:
-   * `downstream-payment.ts:772` lo pasa por `validatePayTo` y `:777` lo firma como
+   * `downstream-payment.ts:772` lo pasa por `validatePayTo` y `:922` lo firma como
    * `to`. Poner acá la dirección de un token manda el pago al contrato del token.
    *
    * QUÉ NO ES:
@@ -507,7 +507,7 @@ export interface AgentStandingCounters {
    * AR fix-pack BLQ-MED-2 — CALLERS DISTINTOS con al menos un `failed`.
    *
    * ⚠️ Los eventos SIN `caller_ref_hash` NO cuentan acá. El bucket `'__anon__'`
-   * se EXCLUYE (`reputation.ts:182-183`, CR MNR-2), y esto es lo contrario de lo
+   * se EXCLUYE (`reputation.ts:189`, CR MNR-2), y esto es lo contrario de lo
    * que hace el cap anti-sybil, que sí lo agrupa. La razón: una llamada x402
    * anónima no exige registrarse, así que si el anónimo contara, un atacante con
    * UNA identidad más llamadas anónimas juntaría dos buckets y anularía el carril
@@ -1447,7 +1447,7 @@ export interface OrchestrateRequest {
    * chainId resuelto (request.resolvedChainId), propagado a compose para que el
    * débito per-step de steps 1..N funcione. WKH-102 (DT-1): se propaga SIEMPRE
    * (master y delegación, single-chain semantics — modelo WKH-59), no solo bajo
-   * delegación. El guard `i>0` de compose.ts:130 protege el step 0 contra
+   * delegación. El guard `i>0` de src/services/compose.ts:571 protege el step 0 contra
    * double-charge (CD-1, intacto).
    */
   chainId?: number | undefined;

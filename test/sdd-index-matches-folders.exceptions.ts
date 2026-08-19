@@ -87,7 +87,7 @@ export const ROWS_WITHOUT_FOLDER: readonly RowWithoutFolder[] = [
     key: '074',
     reason:
       'La carpeta `074-wkh-80-operator-identities-runbook/` EXISTE en el disco del autor pero ' +
-      'su único archivo (`done-report.md`) está en el `.gitignore:172`: es un runbook de ' +
+      'su único archivo (`done-report.md`) está en el `.gitignore:185`: es un runbook de ' +
       'identidades de operador. En un clon la carpeta no existe, así que el universo derivado ' +
       'de git no la tiene. La fila se queda: la HU pasó.',
   },
@@ -95,7 +95,7 @@ export const ROWS_WITHOUT_FOLDER: readonly RowWithoutFolder[] = [
     key: '149',
     reason:
       'Mismo caso que `074`: los 4 archivos de `149-wkh-71-operator-wallet-alert/` están ' +
-      'listados uno por uno en `.gitignore:177-180`, así que la carpeta no existe en un clon.',
+      'listados uno por uno en `.gitignore:190-193`, así que la carpeta no existe en un clon.',
   },
 ];
 
@@ -116,11 +116,11 @@ export interface UntrackedFolder {
 export const FOLDERS_UNTRACKED_BY_DESIGN: readonly UntrackedFolder[] = [
   {
     folder: '074-wkh-80-operator-identities-runbook',
-    reason: 'Su único archivo está gitignoreado (`.gitignore:172`): runbook de identidades de operador.',
+    reason: 'Su único archivo está gitignoreado (`.gitignore:185`): runbook de identidades de operador.',
   },
   {
     folder: '149-wkh-71-operator-wallet-alert',
-    reason: 'Sus 4 archivos están gitignoreados (`.gitignore:177-180`).',
+    reason: 'Sus 4 archivos están gitignoreados (`.gitignore:190-193`).',
   },
 ];
 
@@ -139,20 +139,20 @@ export interface UntrackedLink {
 export const LINKS_KNOWN_UNTRACKED: readonly UntrackedLink[] = [
   {
     target: '074-wkh-80-operator-identities-runbook/done-report.md',
-    reason: '`.gitignore:172`. Ver la excepción de la fila `074`.',
+    reason: '`.gitignore:185`. Ver la excepción de la fila `074`.',
   },
   {
     target: '084-wkh-69-passport-hybrid-inbound/done-report.md',
-    reason: '`.gitignore:173`. La carpeta sí está en git por sus otros archivos.',
+    reason: '`.gitignore:186`. La carpeta sí está en git por sus otros archivos.',
   },
   {
     target: '149-wkh-71-operator-wallet-alert/report.md',
-    reason: '`.gitignore:178`. Ver la excepción de la fila `149`.',
+    reason: '`.gitignore:191`. Ver la excepción de la fila `149`.',
   },
   {
     target: 'spike-kite-passport/poc-results.md',
     reason:
-      '`.gitignore:184`. Ya está declarado como puntero roto pendiente de decisión en ' +
+      '`.gitignore:197`. Ya está declarado como puntero roto pendiente de decisión en ' +
       '`test/docs-referenced-by-code-exist.test.ts` (`KNOWN_BROKEN_PENDING_DECISION`).',
   },
 ];
