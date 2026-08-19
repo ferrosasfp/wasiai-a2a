@@ -314,6 +314,44 @@ export function citeMatchesTarget(fromFile: string, token: string, target: strin
   return base === raw;
 }
 
+/**
+ * El fuente SIN los comentarios: bloques `/* … *\/` y líneas que son sólo
+ * comentario. Deja intactas las URLs y los strings de código, a diferencia de
+ * cortar por el primer `//`, que se comería la mitad de cualquier `https://…`.
+ *
+ * 🔴 PARA QUÉ EXISTE: un `includes()` sobre el fuente CRUDO no distingue «este
+ * archivo vigila X» de «este archivo MENCIONA X en un comentario». Medido sobre
+ * la delegación: `src/lib/money-invariants.fuzz.test.ts` nombra
+ * `src/lib/downstream-payment.ts` en un comentario y no verifica una sola cita,
+ * y aun así alcanzaba para declararse dueño de ese target y sacar 4 claves del
+ * universo con el guardián en 12/12 verde.
+ *
+ * ⚠️ NO ES CÓDIGO NUEVO: es el mismo criterio que `codeOnly` en
+ * `test/payment-guards-live-in-one-place.test.ts`, cuyo docblock explica el
+ * falso positivo que lo obliga (`routes/agents.ts` menciona `x402` en un mensaje
+ * de error y `getInitializedChainKeys()` en un comentario). Ese archivo es
+ * Corte A y está fuera del scope de esta HU, así que NO se tocó ni se importó
+ * de ahí: se re-escribió como función PURA sobre un string, porque
+ * `delegationFindings` recibe el fuente por un lector inyectado y no lee disco.
+ * La duplicación es deliberada y está declarada; si algún día los dos criterios
+ * divergen, el que manda es el del guard del camino del dinero.
+ *
+ * Límite, con esas palabras: es textual, no un parser. Un `/*` adentro de un
+ * string literal se come lo que sigue hasta el próximo `*\/`. El efecto es
+ * BORRAR de más, o sea degradar hacia el rojo (un control que existe se
+ * declararía ausente), que es el lado seguro para un guardián.
+ */
+export function stripComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim();
+      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'));
+    })
+    .join('\n');
+}
+
 // ── El resolver de símbolos (Compiler API) ─────────────────────────────────
 
 /**

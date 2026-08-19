@@ -444,3 +444,179 @@ tocaron). `tsc --noEmit` ⇒ **0**. `biome check src/` ⇒ **0** (489 archivos).
 - **`TD-224-CONTROLES-QUE-SE-LEEN-A-SI-MISMOS`** — buscar en el repo el resto de los controles
   que leen su propio archivo y comparan contra un literal escrito en la línea que compara.
   Medido: en `G-C10` había tres, y ninguno podía ponerse rojo.
+
+---
+
+# FIX-PACK it-2 — los 4 MENORes del re-AR (2026-08-19)
+
+> Contrato: `doc/sdd/224-citas-archivo-linea-sin-testigo/ar-report-it2.md` (**APROBADO con MENORes**).
+> Entran `MNR-it2-3/4/5/6`. `MNR-it2-1/2` **NO entran** (fuera de Scope IN) y se cierran como deuda,
+> más abajo, con inventario en vez de con una pregunta abierta.
+
+### [2026-08-19] 🪞 EL TERCER ARREGLO TRUCHO — mi testigo cubría la REGLA, no su APLICACIÓN (`MNR-it2-3`)
+
+- **Error**: escribí `G-C11` y `G-C12` como «los testigos de los dos candados», y el encabezado que
+  los presenta dice, textual, *«un candado sin testigo es una línea de código que nadie midió»*.
+  Los dos usan **fixtures en memoria**. Nada verificaba que `G-C8` **llamara** a
+  `citeTargetIfTracked` sobre el registro real. **Es el estándar del propio archivo, incumplido por
+  el archivo, dentro de la HU que existe para cazar eso.**
+- **Cómo apareció**: **NO** lo cazó ningún test — lo cazó el re-AR **ejecutando dos arreglos truchos
+  independientes**, los dos con la suite en **12/12 VERDE**. No lo habría encontrado leyendo: mis
+  12 controles estaban verdes en las dos direcciones que yo había definido.
+- **Instrumento que lo habría cazado antes**: no existía. La pregunta que faltaba no es «¿el testigo
+  mata al mutante?» sino **«¿qué mutante mata al testigo sin mover el testigo?»**. Un testigo puro
+  sobre fixtures no puede contestarla por construcción.
+- **Fix**: un **testigo NEGATIVO adentro de `G-C8`**, sobre el registro real. El barrido de
+  `SCANNER_FALSE_POSITIVES` pasó a ser una función local, y se la llama **dos veces**: una con la
+  lista real, y otra con la lista real **más canarios** — citas REALES de `CITED_LINES` que nombran
+  un archivo trackeado, appendeadas a la misma lista. Se asserta el **DELTA**, no un número escrito
+  a mano. Cuatro propiedades deliberadas, cada una matando una familia de mutante:
+  1. los canarios son citas reales y **18 basenames distintos** ⇒ mata al que resuelve sólo unos pocos;
+  2. cada canario se emite **una vez por cada `reason` que la lista tenga EN RUNTIME** ⇒ mata al
+     filtro por `reason`, incluida la `reason` de la entrada que el atacante agrega;
+  3. canarios y entradas reales se barren **en la misma llamada** ⇒ mata al `continue` por índice,
+     al `break` y al `slice`;
+  4. se compara el delta contra la corrida sin canarios ⇒ **no se pudre** cuando la lista cambie.
+  Más un control de **vacuidad** (`>= 10` citas que nombran archivo), porque sin canarios la resta
+  daría `0 === 0` y el testigo aplaudiría cualquier implementación.
+- **Clase**: patrón NUEVO, y merece nombre propio — **«el testigo prueba la regla, no su uso»**.
+  Es primo del que ya está registrado («guards que se comparan consigo mismos»), pero no el mismo:
+  acá el testigo es correcto y el que se apaga es el **llamador**.
+
+### [2026-08-19] FIX — la segunda salida de emergencia, no declarada (`MNR-it2-4`)
+
+- **Error**: el párrafo 🚧 «ACOTAR NO ES CERRAR» declaraba **una** salida (un token sin archivo).
+  Hay **dos**: un token que **sí** nombra un archivo pero que **existe en disco y NO está en el
+  índice de git** también devuelve `null` y también se puede declarar ruido. Repro del re-AR: una
+  cita a `.nexus/project-context.md:6` en un archivo del Corte A + su entrada en la lista de ruido
+  ⇒ **12/12 VERDE**.
+- **Cómo apareció**: el re-AR, ejecutando. Yo tenía el dato al lado —el docblock de
+  `citeTargetIfTracked` dice «EXISTE en el índice de git»— y **no derivé la consecuencia**.
+- **La asimetría es lo que lo hace defecto y no elección**: la MISMA cita **en `CITED_LINES`** pone
+  el guardián ROJO (`E-TARGET_MISSING`); declarada ruido, pasa en verde.
+- **Fix**: se **escribe la segunda salida** en los dos lugares donde se lee (`exceptions.ts` y el
+  comentario de `G-C8`), con la repro, con la asimetría, y con **por qué NO se cierra leyendo el
+  disco**: el índice es lo que un `checkout` trae, y un guardián que dependa de qué archivos sueltos
+  tenga cada quien da distinto en CI que en local. **Población hoy dentro del Corte A: 0** ⇒ era una
+  frase que faltaba, no un agujero abierto.
+- **Clase**: recurrente — *«acotar un agujero NO es cerrarlo»*, ahora con la variante *«y contar
+  UNA salida cuando hay DOS es la misma clase de afirmación de más»*.
+
+### [2026-08-19] 🔁 REINCIDENCIA — el número que YO introduje no cumplía MI regla (`MNR-it2-5`)
+
+- **Error**: cerré `BLQ-BAJO-2` con la regla *«todo número va con fecha y la palabra FOTO»*, la
+  apliqué bien en dos cabeceras… y el número que **ese mismo fix-pack introdujo** (*«Del registro de
+  hoy, 31 de las 50…»*) salió **sin fecha, sin FOTO, sin derivación y sin nada que lo ponga rojo**.
+  Hoy es exacto (derivado otra vez acá: **31 de 50**), así que todavía no miente.
+- **Causa raíz**: apliqué la regla a lo que estaba **corrigiendo** y no a lo que estaba
+  **escribiendo**. Es la asimetría que hace que una regla nueva no se aplique a sí misma.
+- **Fix**: fecha + FOTO + la receta (`citeNamesFile` sobre `CITED_LINES`) en los dos sitios.
+- **Aplicar en**: **el barrido del auto-blindaje se hace sobre el diff PROPIO, no sobre el archivo
+  ajeno**. Cada vez que se escriba una regla del tipo «todo X lleva Y», el paso siguiente es
+  `grep` del diff de esa misma sesión buscando X sin Y.
+
+### [2026-08-19] FIX — la delegación: candado de PRESENCIA donde hacía falta uno MECÁNICO (`MNR-it2-6`)
+
+- **Error**: `delegationFindings` verificaba *«el control sigue escrito»* y *«nombra el target»* con
+  un `includes()` sobre el fuente **CRUDO** ⇒ **un comentario alcanzaba**. El re-AR lo demostró
+  **sin inventar nada**: repurposó `src/lib/money-invariants.fuzz.test.ts` —que existe, corre, sus
+  controles siguen escritos y nombra el target en un comentario (`:14`)— y sacó **4 citas del módulo
+  de liquidación del money-path** del universo con **12/12 VERDE**.
+- **El dato asimétrico que lo hace prioritario**: `SCANNER_FALSE_POSITIVES` recibió un candado
+  **mecánico** y `DELEGATED_TARGETS` uno de **presencia** — y la delegación es **la más barata**,
+  porque **una entrada saca N claves de una vez** (4 contra 1).
+- **Decisión, entre las dos que el re-AR declaró válidas**: se **exige la coincidencia en CÓDIGO**,
+  no en prosa. La alternativa (escribir que el comentario cuenta) se descartó porque el defecto que
+  este guardián persigue es exactamente *«la prosa dice una cosa y la máquina otra»*, y aceptar la
+  prosa acá sería escribir la excepción adentro del control que la prohíbe.
+- **Instrumento**: `stripComments` en `scanner.ts`, función **pura sobre un string** — mismo criterio
+  que `codeOnly` de `test/payment-guards-live-in-one-place.test.ts`, que es **Corte A y Out of Scope
+  (CD-7)**: no se tocó ni se importó de ahí. La duplicación es deliberada y está escrita en el
+  docblock, con quién manda si divergen.
+- **Efecto colateral MEDIDO, no supuesto**: el fixture `duenoQueNoCorre` de `G-C12` pasó de 1
+  hallazgo a 2, porque su `ownerFiles` nombra el target **sólo en un comentario**. Se actualizó la
+  aserción y se escribió por qué — es la medición del cambio, no un ajuste para que pase.
+- **Lo que esto NO cierra, con esas palabras**: un dueño puede seguir nombrando el target en una
+  línea de **código** que no lo vigile. El costo subió de «escribir un comentario» a «escribir código
+  muerto que se ve en el diff»; **no bajó a cero**.
+
+## `TD-224-CONTROLES-QUE-SE-LEEN-A-SI-MISMOS` — **CERRADA con inventario**
+
+La cerré con *«hasta que alguien lo busque, no sé si hay más»*. **El re-AR lo buscó.** El inventario,
+que es lo que la deuda pedía:
+
+| Universo | Enumerado | Se leen a sí mismos | Veredicto |
+|---|---|---|---|
+| `test/**` con `readFileSync` | **16** (re-verificado acá: `git ls-files 'test/*'` + `grep -q readFileSync` ⇒ 16) | 3 | 1 **ARREGLADO** (`G-C10`), 1 **OK medido** (`scripts-imported-by-tests-are-tracked.test.ts`: su regex exige `../`), 1 🔴 **DEFECTUOSO** |
+| `src/**/*.test.ts` con `readFileSync` | **31** (re-verificado acá ⇒ 31) | 5 candidatos | **los 5 clear** |
+
+**El archivo defectuoso, con nombre**: `test/docs-referenced-by-code-exist.test.ts`. Su corpus es
+`git ls-files` filtrado a no-`doc/` + extensión de código, y **el archivo es `.ts`, no vive en `doc/`
+y está trackeado ⇒ se incluye a sí mismo**. El literal `'CLAUDE.md'` que declara es parte del corpus
+contra el que se compara. Repro del re-AR: cambiar el literal por un documento inexistente deja el
+control auditado **VERDE** (el rojo lo tira **otra** afirmación del mismo archivo). Mismo mecanismo y
+mismo resultado que el `G-C10` de esta HU. **Está en `main`, sin declarar, y es FUERA del Scope IN de
+esta HU: no se arregla acá.** Queda como deuda con dueño identificado, no como pregunta abierta.
+
+🎯 **Y el arte previo que el próximo tiene que conocer — son DOS formas de arreglo, no una**:
+1. **Recortar la cabecera** antes de comparar. Es lo que hizo `G-C10`
+   (`self.slice(0, indexOf('\nimport {'))`).
+2. **Excluirse del corpus por nombre**. Ya existe en el repo, y es anterior a esta HU:
+   `src/__tests__/discover-callsites.test.ts` declara `const SELF = …` en `:126` y lo aplica con
+   `.filter((f) => f !== SELF)` en `:272`. **Verificado acá abriendo el archivo**, no citado del AR.
+
+Cuál conviene depende de si el archivo es **su propio corpus** (forma 1) o **un elemento de un corpus
+más grande** (forma 2). El defectuoso de arriba es el caso 2.
+
+## La tabla de mutación de este fix-pack — ANTES (`cc714a1`) / DESPUÉS
+
+Arnés: worktree detached en `cc714a1` con `node_modules` enlazado; copia propia + md5 pre-registrado
+de los **5** archivos tocables (los 4 del guardián + `src/types/index.ts`), aborto si el ancla no
+aparece exactamente N veces, restauración en `finally` **verificada por md5**, **cero
+`git checkout --`**; reporter JSON con la raíz validada **adentro del JSON** (`testResults[*].name`),
+**nunca el exit code**; warning `Failed to load source map` filtrado. Worktree **eliminado**.
+
+| # | Mutante | ANTES (`cc714a1`) | DESPUÉS | Mata |
+|---|---|---|---|---|
+| **CAL-0** | registro real limpio, sin mutar | 12/12 ✅ | **12/12 ✅** | — (calibración) |
+| **CAL-1** | `https://x.io:8443/y` escrita en un archivo del Corte A + `x.io:8443` declarado ruido | 12/12 ✅ | **12/12 ✅** | — (el ruido legítimo **sigue declarable**) |
+| **T-A** | **TRUCHO A**: filtro por `reason` adentro del barrido + `CLAUDE.md :: src/types/database.types.ts:2567` movida a la lista de ruido con excusa de 300+ chars | **12/12 VERDE** 🔴 (replicado) | **11/12 — MUERE** | `G-C8` |
+| **T-B** | **TRUCHO B**: `citeTargetIfTracked` resuelve **sólo** los basenames de los fixtures de `G-C11` + `downstream-payment.ts:772` a la lista de ruido | **12/12 VERDE** 🔴 (replicado) | **11/12 — MUERE** | `G-C8` |
+| **M-DEL** | delegación repurposada: `src/lib/downstream-payment.ts` delegado a `src/lib/money-invariants.fuzz.test.ts` (que lo nombra en un comentario) + borradas sus **4** declaraciones | **12/12 VERDE** 🔴 (replicado) | **11/12 — MUERE** | `G-C9` |
+
+Los **3 exploits del re-AR se replicaron en verde ANTES** y **mueren DESPUÉS**. Las **2
+calibraciones siguen pasando**: el arreglo no cambió un rojo por otro.
+
+## Re-derivación del ítem 14 (los tokens del propio guardián)
+
+Este fix-pack escribe prosa **en** los archivos del guardián, así que su propio número se movió:
+**243 → 247** (`test` 64 · `citations` 100 · `exceptions` 46 · `scanner` 37), desglose
+**88 + 97 + 26 + 36**. Se re-derivó con `scanSource` sobre los 4 paths y se actualizó el docblock.
+🎯 Dato que vale más que el número: de los **26** que nombran un archivo fuera del índice, **5** son
+`.nexus/project-context.md` — o sea que **el ejemplo de la segunda salida de emergencia lo escribí en
+el mismo commit que la declara**. El conteo de tokens que nombran archivo **trackeado** quedó en
+**36, igual que antes**: este fix-pack no agregó ninguna afirmación nueva sin testigo.
+**El 243 de la sección anterior quedó viejo en un día. Eso ES el ítem 14**, no una anécdota.
+
+## Lo que NO pude medir — con esas palabras
+
+- **No arreglé `test/docs-referenced-by-code-exist.test.ts`.** Está en `main` y **fuera del Scope
+  IN**. Lo que hice fue inventariarlo y nombrarlo; **sigue vacuo**.
+- **No barrí `doc/`, `scripts/`, `mcp-servers/` ni `packages/`** buscando el patrón
+  auto-satisfactorio: el inventario cubre `test/**` (16) y `src/**/*.test.ts` (31). **Fuera de eso no
+  sé si hay más.**
+- **No cerré la segunda salida de emergencia** (`MNR-it2-4`): la **declaré**. Hoy su población dentro
+  del Corte A es 0, y nada la mantiene en 0.
+- **El testigo negativo de `G-C8` NO mata a un mutante que discrimine por el CONTENIDO del token**
+  (ignorar exactamente el token que se quiere apagar). Lo que dejó de ser posible es apagar el
+  candado entero o por un campo de la entrada.
+- **`stripComments` no cierra el dueño que nombra el target en código muerto.** Subió el costo, no lo
+  eliminó.
+- **No corrí la suite completa bajo cada mutante**: cada uno corrió sólo
+  `test/cited-lines-guard.test.ts`. La suite completa se corrió sobre el árbol final, limpio.
+- **No medí la VERDAD de la prosa** que rodea a las citas nuevas de este fix-pack, más allá de que
+  ninguna nombra un archivo trackeado que no estuviera ya declarado.
+- **`tsc` no cubre ni un archivo de esta HU** (`tsconfig.json` incluye sólo `src/**/*`). Se los
+  typechequeó aparte. Es un dato del re-AR **re-verificado acá**, no heredado.
+- **No ejecuté nada contra producción**: cero red, cero Railway, cero Supabase, cero `pkill`, cero
+  push, `main` intacto.

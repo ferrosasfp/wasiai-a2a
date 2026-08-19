@@ -165,24 +165,29 @@
  *     frágil que este guardián existe para no volver a guardar.
  * 14. 🎯 LOS 4 ARCHIVOS DE ESTE GUARDIÁN. No están en `CORTE_A_PATHS`, y son los
  *     citadores más densos que este commit agregó al repo: medido con
- *     `scanSource` sobre ellos mismos, **243 tokens** (`test` 61 · `citations`
- *     100 · `exceptions` 45 · `scanner` 37) contra 57 en TODO el Corte A. O sea
+ *     `scanSource` sobre ellos mismos, **247 tokens** (`test` 64 · `citations`
+ *     100 · `exceptions` 46 · `scanner` 37) contra 57 en TODO el Corte A. O sea
  *     que el guardián más que cuadruplicó la población de citas del repo en
- *     archivos que él mismo no mira. (Foto del 2026-08-19; derivalo corriendo
- *     `scanSource` sobre los cuatro paths.)
+ *     archivos que él mismo no mira. (Foto del 2026-08-19, RE-DERIVADA después
+ *     del fix-pack del re-AR —eran 243— corriendo `scanSource` sobre los cuatro
+ *     paths. Que este número se mueva cada vez que alguien escribe una línea de
+ *     prosa acá es exactamente lo que el ítem denuncia.)
  *     **Se decidió declararlo y NO incluirlos, y la razón es medida, no de
- *     esfuerzo** — el desglose de los 243:
- *       · **87** son literalmente el valor del campo `cite` de una entrada de
+ *     esfuerzo** — el desglose de los 247:
+ *       · **88** son literalmente el valor del campo `cite` de una entrada de
  *         `CITED_LINES`. Ésos YA tienen testigo, y mejor que el de acá: `G-C5`
  *         verifica esa misma cita contra el archivo apuntado y `G-C7` se pone
  *         rojo si el token desaparece de su citador.
  *       · **97** son `:N` sueltos (P3/P4) sin archivo: números de línea citados
  *         dentro de la prosa que explica el algoritmo.
- *       · **23** nombran archivos que NO EXISTEN, y no pueden existir: son los
+ *       · **26** nombran archivos que el ÍNDICE DE GIT no tiene: 21 son los
  *         fixtures en memoria de `G-C2`/`G-C3` (`a.ts:1`, `b.ts:2`, `foo.ts:42`,
- *         `./splash.tsx:245`). Declararlos exigiría una excusa escrita por cada
- *         fixture, o sea llenar el archivo de excusas de ruido para poder
- *         verificar otra cosa.
+ *         `./splash.tsx:245`), que no existen ni pueden existir, y 5 son
+ *         `.nexus/project-context.md:6` — que SÍ existe en disco y no está
+ *         trackeado. Ese par es, literalmente, el ejemplo de la segunda salida
+ *         de emergencia que el candado 2️⃣ declara y no cierra. Declararlos a
+ *         todos exigiría una excusa escrita por cada fixture, o sea llenar el
+ *         archivo de excusas de ruido para poder verificar otra cosa.
  *       · **36** nombran un archivo trackeado; de ésos, 9 son el token
  *         HISTÓRICO `.gitignore:172` —el bug que esta HU arregló, citado como
  *         ejemplo de lo que estaba mal—, que por construcción ya no describe esa
@@ -193,7 +198,11 @@
  *     ~20 anteriores las abrió el AR; las que agregó el fix-pack se abrieron al
  *     escribirlas (`fee-split.ts:316` = `const failed = …`, `:320` =
  *     `return settlement;`, `:335` NO menciona `priorTx`, con
- *     `git status --porcelain src/` vacío ⇒ disco = `HEAD`). Lo que no tienen es
+ *     `git status --porcelain src/` vacío ⇒ disco = `HEAD`). El segundo
+ *     fix-pack (el del re-AR) NO agregó ningún token nuevo que nombre un archivo
+ *     trackeado —el conteo de esa categoría quedó en 36, igual que antes—: sus
+ *     tokens nuevos son un `cite` ya declarado y tres del ejemplo que ilustra la
+ *     segunda salida de emergencia, que por definición no resuelve. Lo que no tienen es
  *     testigo MECÁNICO, y ésa es la diferencia que este ítem declara: cada vez
  *     que este archivo crece, crece la prosa que nadie confronta. Queda como
  *     `TD-224-CITAS-DEL-PROPIO-GUARDIAN`, y su arreglo NO es agregar los paths:
@@ -229,6 +238,7 @@ import {
   normalizeTarget,
   resolveSymbolPath,
   scanSource,
+  stripComments,
 } from './cited-lines-guard.scanner.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -317,6 +327,33 @@ function isDelegated(c: FoundCite): boolean {
  * misma clase de límite que «presencia, no valor» del guardián de ownership.
  * Quien escribe una delegación sigue teniendo que abrir al dueño y leerlo; lo
  * que ya no puede es inventarlo.
+ *
+ * 🔴 Y ACÁ ESTÁ ESCRITO **CÓMO SE CAE**, que es lo que faltaba. La primera
+ * versión hacía los dos `includes()` sobre el fuente CRUDO, así que **un
+ * COMENTARIO alcanzaba**. Medido, sin inventar nada: `src/lib/downstream-payment.ts`
+ * delegado a `src/lib/money-invariants.fuzz.test.ts` —un archivo que existe,
+ * que corre, cuyos controles siguen escritos y que nombra el target en un
+ * comentario— sacaba **4 claves del módulo de liquidación del money-path** del
+ * universo con el guardián en **12/12 verde**. La delegación es la excusa más
+ * BARATA que queda (una entrada saca N claves de una vez, contra 1 de
+ * `SCANNER_FALSE_POSITIVES`), así que era la que menos podía conformarse con
+ * prosa.
+ *
+ * DECISIÓN, entre las dos que había: se EXIGE la coincidencia **en código**, no
+ * en prosa — `stripComments` antes de los `includes()`. La alternativa era
+ * escribir «el comentario cuenta» y dejar que el revisor lo supiera; se
+ * descartó porque el defecto que este guardián persigue es exactamente
+ * «la prosa dice una cosa y la máquina otra», y aceptar la prosa acá sería
+ * escribir la excepción adentro del control que la prohíbe. Instrumento:
+ * `stripComments`, el mismo criterio que `codeOnly` en
+ * `test/payment-guards-live-in-one-place.test.ts` (Corte A, fuera de scope: no
+ * se tocó ni se importó de ahí).
+ *
+ * ⚠️ Lo que ESTO tampoco cierra, con esas palabras: un dueño puede seguir
+ * nombrando el target en una línea de CÓDIGO que no lo vigile (`const X =
+ * 'src/lib/downstream-payment.ts';` sin usarla). El costo subió de «escribir un
+ * comentario» a «escribir código muerto que alguien va a ver en el diff»; no
+ * bajó a cero. `G-C12` mide las dos direcciones de este cambio.
  */
 function delegationFindings(
   d: DelegatedTarget,
@@ -348,8 +385,11 @@ function delegationFindings(
       continue;
     }
     const src = read(f);
+    // 🔴 `stripComments` acá y no en el `read`: lo que se guarda es el CÓDIGO del
+    // dueño. Un comentario que nombra el target o que menciona un control ya
+    // borrado no cuenta — ver la decisión escrita en el docblock de arriba.
     if (src === null) out.push(`${tag} · no se pudo leer el archivo del dueño \`${f}\``);
-    else sources.set(f, src);
+    else sources.set(f, stripComments(src));
   }
 
   if (ownerFiles.length === 0) {
@@ -379,7 +419,8 @@ function delegationFindings(
       out.push(`${tag} · el control \`${c}\` es demasiado corto para identificar nada`);
     } else if (!all.some((s) => s.includes(c))) {
       out.push(
-        `${tag} · el control \`${c}\` ya NO existe en [${[...sources.keys()].join(', ')}]. ` +
+        `${tag} · el control \`${c}\` ya NO existe en el CÓDIGO de ` +
+          `[${[...sources.keys()].join(', ')}] (los comentarios no cuentan). ` +
           'Las citas a este target quedaron sin dueño y este guardián las sigue descartando.',
       );
     }
@@ -387,8 +428,9 @@ function delegationFindings(
 
   if (typeof d.target === 'string' && !all.some((s) => s.includes(d.target))) {
     out.push(
-      `${tag} · ninguno de los \`ownerFiles\` NOMBRA \`${d.target}\`: el dueño declarado no declara ` +
-        'este target, así que la delegación no delega en nadie.',
+      `${tag} · ninguno de los \`ownerFiles\` NOMBRA \`${d.target}\` EN CÓDIGO: lo menciona la prosa ` +
+        'o no lo menciona nadie. Un archivo que nombra el target en un comentario y no lo vigila ' +
+        'es la delegación más barata que existe, y saca N claves del universo de una vez.',
     );
   }
   return out;
@@ -1062,23 +1104,124 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // que nombre un archivo TRACKEADO POR GIT», y las dos direcciones las mide
     // `G-C11` con fixtures en memoria.
     //
-    // 🚧 ACOTAR NO ES CERRAR: un `:N` suelto (P3/P4) se puede seguir moviendo
-    // acá con una excusa, porque nada mecánico separa un `:336` que cita una
-    // línea de un `:8443` que es un puerto. Medido sobre el registro de hoy: 31
-    // de las 50 citas declaradas tienen archivo en el token y quedan
-    // protegidas; 19 no.
-    for (const e of SCANNER_FALSE_POSITIVES) {
-      const hit = citeTargetIfTracked(e.from, e.cite, TRACKED_SET, BY_BASENAME);
-      if (hit !== null) {
-        malas.push(
-          `SCANNER_FALSE_POSITIVES · ${citeKey(e.from, e.cite)} · el token NOMBRA un archivo que ` +
-            `EXISTE en el índice de git (\`${hit}\`), así que no es ruido del escáner: es una ` +
-            'AFIRMACIÓN sobre el repo. Va a `CITED_LINES` con su `mustContain`, o se corrige el ' +
-            'comentario. Esta lista es la única que exceptúa TODO, y por eso es la que no admite ' +
-            'excusas: apagar una cita real acá es indistinguible de un guardián sano.',
-        );
-      }
-    }
+    // 🚧 ACOTAR NO ES CERRAR — y son DOS salidas, no una:
+    //
+    //   (a) UN TOKEN SIN ARCHIVO. Un `:N` suelto (P3/P4) se puede seguir
+    //       moviendo acá con una excusa, porque nada mecánico separa un `:336`
+    //       que cita una línea de un `:8443` que es un puerto.
+    //   (b) UN TOKEN QUE SÍ NOMBRA UN ARCHIVO, PERO QUE NO ESTÁ EN EL ÍNDICE DE
+    //       GIT. `citeTargetIfTracked` pregunta por el ÍNDICE, no por el disco,
+    //       así que un archivo que existe pero nadie trackeó devuelve `null` y
+    //       también se puede declarar ruido. Repro medida: una cita a
+    //       `.nexus/project-context.md:6` escrita en un archivo del Corte A, más
+    //       su entrada acá, deja el guardián en 12/12 VERDE.
+    //       🔴 Y la asimetría es lo que lo hace un defecto y no una elección: la
+    //       MISMA cita declarada en `CITED_LINES` pone el guardián en ROJO
+    //       (`E-TARGET_MISSING`). Declarada ruido, pasa en verde.
+    //       NO se cierra leyendo el disco A PROPÓSITO: el índice es lo que un
+    //       `checkout` trae, y un guardián que dependa de qué archivos sueltos
+    //       tenga cada quien en su working tree da distinto en CI que en local.
+    //       Población hoy dentro del Corte A: 0. Es una frase que falta, no un
+    //       agujero abierto — `TD-316-CITAS-PROJECT-CONTEXT`.
+    //
+    // Cuánto cubre el candado: `CITED_LINES.filter(citeNamesFile)` sobre
+    // `CITED_LINES.length`. Al 2026-08-19 eran 31 de 50 — es una FOTO, no la
+    // cites: derivala con `citeNamesFile` sobre `CITED_LINES`, que es la única
+    // fuente que no envejece. Las otras 19 dependen de que quien escriba la
+    // excusa la escriba en serio, y de que quien revise la lea.
+    const ruidoQueNombraArchivoTrackeado = (
+      lista: readonly { readonly from: string; readonly cite: string }[],
+    ): string[] =>
+      lista.flatMap((e) => {
+        const hit = citeTargetIfTracked(e.from, e.cite, TRACKED_SET, BY_BASENAME);
+        return hit === null
+          ? []
+          : [
+              `SCANNER_FALSE_POSITIVES · ${citeKey(e.from, e.cite)} · el token NOMBRA un archivo que ` +
+                `EXISTE en el índice de git (\`${hit}\`), así que no es ruido del escáner: es una ` +
+                'AFIRMACIÓN sobre el repo. Va a `CITED_LINES` con su `mustContain`, o se corrige el ' +
+                'comentario. Esta lista es la única que exceptúa TODO, y por eso es la que no admite ' +
+                'excusas: apagar una cita real acá es indistinguible de un guardián sano.',
+            ];
+      });
+
+    const hallazgosDelRuidoReal = ruidoQueNombraArchivoTrackeado(SCANNER_FALSE_POSITIVES);
+    malas.push(...hallazgosDelRuidoReal);
+
+    // ══ EL TESTIGO NEGATIVO DE ESTE CANDADO, SOBRE EL REGISTRO REAL ══════════
+    //
+    // 🔴 POR QUÉ ACÁ ADENTRO Y NO EN `G-C11`. `G-C11` prueba la REGLA
+    // (`citeTargetIfTracked`) con fixtures en memoria; NADA probaba que `G-C8`
+    // la APLIQUE al registro real. La diferencia no es teórica: se midieron dos
+    // arreglos truchos que dejaban el guardián en 12/12 VERDE con `G-C11`
+    // intacto —
+    //   · TRUCHO A: una línea de filtro adentro de este barrido
+    //     (`if (e.reason.trim().length > 150) continue;`) más la cita real
+    //     movida acá con una excusa larga. La regla sigue perfecta; deja de
+    //     aplicarse.
+    //   · TRUCHO B: hacer que `citeTargetIfTracked` resuelva SÓLO los basenames
+    //     que los fixtures de `G-C11` usan. Los 6 casos positivos de `G-C11`
+    //     son justo ésos, así que sigue verde, y `downstream-payment.ts:772`
+    //     —money-path— se puede declarar ruido.
+    //
+    // Cómo los mata este testigo, que es lo que hay que leer antes de tocarlo:
+    //
+    //  1. Los canarios son citas REALES del registro, con su `from` y su token
+    //     originales — no fixtures. Un `citeTargetIfTracked` que sólo resuelva
+    //     un puñado de basenames deja de resolver la mayoría de los canarios y
+    //     la resta no da. (Al 2026-08-19: 18 basenames distintos, FOTO.)
+    //  2. Cada canario se emite UNA VEZ POR CADA `reason` que hoy vive en
+    //     `SCANNER_FALSE_POSITIVES`, leído en RUNTIME. Un filtro por `reason`
+    //     que esconda una entrada nueva esconde también a los canarios que
+    //     llevan ESA MISMA `reason`, y la resta no da.
+    //  3. Los canarios se barren EN LA MISMA LLAMADA que las entradas reales,
+    //     appendeados. Un `continue` por índice, o un `break`, o un `slice`,
+    //     recorta a los canarios igual que a las entradas.
+    //  4. Se compara el DELTA contra la corrida sin canarios, no un número
+    //     escrito a mano: el testigo no se pudre cuando la lista real cambie.
+    //
+    // Lo que este testigo NO cierra, con esas palabras: un mutante que
+    // discrimine por el CONTENIDO del token (por ejemplo, ignorar exactamente
+    // el único token que se quiere apagar) sigue pasando. Lo que dejó de ser
+    // posible es apagar el candado ENTERO o por un campo de la entrada.
+    const citasQueNombranArchivo = CITED_LINES.filter(
+      (c) =>
+        citeNamesFile(c.cite) &&
+        TRACKED_SET.has(c.target) &&
+        citeMatchesTarget(c.from, c.cite, c.target),
+    );
+    // Control de vacuidad: sin canarios, la resta de abajo daría 0 === 0 y este
+    // testigo aplaudiría cualquier implementación. El piso es 10 y no el número
+    // de hoy a propósito — un `toBe(31)` se pudre con la primera cita que
+    // alguien agregue o borre.
+    expect(
+      citasQueNombranArchivo.length,
+      'No quedan citas declaradas que nombren un archivo trackeado, así que el testigo del\n' +
+        'candado 2️⃣ se quedó sin material y estaría pasando por vacuidad.\n',
+    ).toBeGreaterThanOrEqual(10);
+
+    const CANARIOS = [
+      // El canario base: no depende de que la lista de ruido tenga entradas.
+      ...citasQueNombranArchivo.map((c) => ({
+        from: c.from,
+        cite: c.cite,
+        reason: 'canario sintético: esta entrada no existe en disco, sólo dentro de este assert',
+      })),
+      // Y uno por cada `reason` REAL de la lista, leído en runtime: es lo que
+      // hace que un filtro por `reason` no pueda esconder una entrada nueva.
+      ...SCANNER_FALSE_POSITIVES.flatMap((e) =>
+        citasQueNombranArchivo.map((c) => ({ from: c.from, cite: c.cite, reason: e.reason })),
+      ),
+    ];
+    const conCanarios = ruidoQueNombraArchivoTrackeado([...SCANNER_FALSE_POSITIVES, ...CANARIOS]);
+    expect(
+      conCanarios.length - hallazgosDelRuidoReal.length,
+      'EL CANDADO 2️⃣ DEJÓ DE APLICARSE AL REGISTRO REAL.\n' +
+        'Se metieron citas REALES de `CITED_LINES` en el barrido de `SCANNER_FALSE_POSITIVES` y el\n' +
+        'barrido NO las marcó. O `citeTargetIfTracked` dejó de resolver, o el bucle de arriba\n' +
+        'ganó un filtro que saltea entradas. `G-C11` puede seguir verde: prueba la REGLA, no su\n' +
+        'aplicación — que es exactamente el agujero que este assert existe para tapar.\n',
+    ).toBe(CANARIOS.length);
 
     // 3️⃣ `UNANCHORABLE_PROSE` es para prosa SIN forma sintáctica. Si el `quote`
     // contiene algo que el propio escáner sabe encontrar, entonces se puede
@@ -1249,6 +1392,17 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
   // quedaron siendo el interruptor de apagado. Estos dos controles prueban la
   // REGLA con fixtures en memoria y en las DOS direcciones — el caso malo tiene
   // que morir y el caso bueno tiene que seguir pasando.
+  //
+  // 🔴 Y EL MISMO ESTÁNDAR, APLICADO A ESTOS DOS: un testigo de la REGLA no es
+  // un testigo de su APLICACIÓN. Estos dos usan fixtures en memoria a propósito
+  // —es lo que los hace independientes del árbol—, y por eso mismo NO ven si el
+  // guardián sigue LLAMÁNDOLOS sobre el registro real. Se midieron dos arreglos
+  // truchos que dejaban a `G-C11` en verde con el candado apagado (un filtro
+  // adentro del barrido de `G-C8`; un `citeTargetIfTracked` que resuelve sólo
+  // los basenames que los fixtures de acá usan). Quien cubre eso es el testigo
+  // NEGATIVO que vive adentro de `G-C8`, sobre el registro real, y hacen falta
+  // los dos: el de acá dice qué responde la función, el de allá dice que se la
+  // sigue preguntando. Lo mismo vale para `G-C12` y su aplicación en `G-C9`.
   // ══════════════════════════════════════════════════════════════
 
   it('G-C11: el candado de `SCANNER_FALSE_POSITIVES` mata la cita real y deja pasar el ruido', () => {
@@ -1317,6 +1471,7 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
       'test/sdd-index-matches-folders.exceptions.ts',
       'src/services/discovery.ts',
       'test/otro-guardian.test.ts',
+      'test/dueno-de-comentario.test.ts',
     ]);
     const FUENTES: Record<string, string> = {
       'test/sdd-index-matches-folders.test.ts':
@@ -1324,6 +1479,14 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
       'test/sdd-index-matches-folders.exceptions.ts':
         "// citas a doc/sdd/_INDEX.md\nexport const CITED_INDEX_LINES = [];",
       'test/otro-guardian.test.ts': "it('X-01: no habla de ningún target delegado', () => {});",
+      // 🔴 El dueño REPURPOSADO: existe, corre, su control sigue escrito, y
+      // nombra el target… en un comentario. Es la forma exacta del exploit
+      // medido con `src/lib/money-invariants.fuzz.test.ts`.
+      'test/dueno-de-comentario.test.ts':
+        '/**\n * Invariantes del money-path sobre src/services/discovery.ts.\n */\n' +
+        "// también menciona src/services/discovery.ts acá\n" +
+        "it('X-02: un invariante que no verifica ninguna cita', () => {});\n" +
+        '// el control viejo era X-03, ya no existe\n',
     };
     const leer = (rel: string): string | null => FUENTES[rel] ?? null;
     const bueno: DelegatedTarget = {
@@ -1359,8 +1522,46 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
       ownedBy: 'G-F1 en test/sdd-index-matches-folders.test.ts',
     };
     expect(delegationFindings(noHablaDelTarget, tracked, leer)).toEqual([
-      expect.stringContaining('no declara este target'),
+      expect.stringContaining('EN CÓDIGO'),
     ]);
+
+    // 🔴 EL TERCER INTERRUPTOR, y el más barato de todos: el dueño REPURPOSADO.
+    // Existe, CORRE, su control sigue escrito, y nombra el target — pero lo
+    // nombra en un COMENTARIO. Con los `includes()` sobre el fuente crudo esto
+    // daba CERO hallazgos y sacaba N claves del universo de una vez; medido con
+    // `src/lib/money-invariants.fuzz.test.ts` sobre
+    // `src/lib/downstream-payment.ts`: 4 claves del módulo de liquidación del
+    // money-path, con el guardián en 12/12 VERDE.
+    const duenoDeComentario: DelegatedTarget = {
+      target: 'src/services/discovery.ts',
+      ownedBy: 'los invariantes de test/dueno-de-comentario.test.ts',
+      ownerFiles: ['test/dueno-de-comentario.test.ts'],
+      ownerControls: ["it('X-02"],
+      reason: 'x'.repeat(41),
+    };
+    expect(delegationFindings(duenoDeComentario, tracked, leer)).toEqual([
+      expect.stringContaining('EN CÓDIGO'),
+    ]);
+
+    // Y la otra mitad del mismo cambio: un `ownerControl` que sólo sobrevive en
+    // un comentario tampoco cuenta. Un control BORRADO cuyo nombre quedó en la
+    // prosa («el control viejo era X-03») es indistinguible de uno vivo si se
+    // mira el fuente crudo.
+    const controlSoloEnComentario: DelegatedTarget = {
+      ...duenoDeComentario,
+      ownerControls: ["it('X-02", 'X-03'],
+    };
+    expect(delegationFindings(controlSoloEnComentario, tracked, leer)).toEqual([
+      expect.stringContaining('X-03` ya NO existe en el CÓDIGO'),
+      expect.stringContaining('EN CÓDIGO'),
+    ]);
+
+    // ✅ LA CALIBRACIÓN DE ESTE MISMO CAMBIO: exigir CÓDIGO no puede romper al
+    // dueño real. El bueno de arriba nombra `doc/sdd/_INDEX.md` en una línea de
+    // código (`const INDEX_REL = …`) y sus tres controles son `it(`/`export
+    // const`, no prosa. Si `stripComments` borrara de más, este caso sería el
+    // primero en caerse.
+    expect(delegationFindings(bueno, tracked, leer)).toEqual([]);
 
     const duenoQueNoCorre: DelegatedTarget = {
       ...bueno,
@@ -1368,8 +1569,13 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
       ownerFiles: ['test/sdd-index-matches-folders.exceptions.ts'],
       ownerControls: ['export const CITED_INDEX_LINES'],
     };
+    // ⚠️ Dos hallazgos, no uno, y el segundo es la MEDICIÓN del cambio a
+    // código-y-no-prosa: este `ownerFiles` nombra `doc/sdd/_INDEX.md` sólo en su
+    // línea de comentario, así que además de no correr, tampoco declara el
+    // target en código. Con los `includes()` sobre el fuente crudo daba uno solo.
     expect(delegationFindings(duenoQueNoCorre, tracked, leer)).toEqual([
       expect.stringContaining('no CORRE'),
+      expect.stringContaining('EN CÓDIGO'),
     ]);
 
     const controlBorrado: DelegatedTarget = {

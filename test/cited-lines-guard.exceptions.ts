@@ -29,21 +29,43 @@
  * 2️⃣ `SCANNER_FALSE_POSITIVES` NO PUEDE NOMBRAR UN ARCHIVO TRACKEADO. Un token
  * que nombra un archivo que EXISTE en el índice de git no es ruido del escáner:
  * es una afirmación sobre el repo, y va a `CITED_LINES` o se corrige. `G-C8` lo
- * hace cumplir en runtime con `citeTargetIfTracked`, y `G-C11` prueba las dos
- * direcciones con fixtures en memoria.
+ * hace cumplir en runtime con `citeTargetIfTracked`; `G-C11` prueba la REGLA en
+ * las dos direcciones con fixtures en memoria, y `G-C8` prueba su APLICACIÓN al
+ * registro real metiendo citas declaradas adentro de su propio barrido y
+ * exigiendo que las marque (los dos hacen falta: se midieron dos arreglos
+ * truchos que dejaban `G-C11` verde y la aplicación apagada).
  * ⚠️ La regla NO es «ningún token con path», y la diferencia se midió:
  * `https://x.io:8443/y` produce un token P2 CON path (`x.io`) que es ruido
  * legítimo y tiene que poder declararse acá. Lo que lo separa de una cita es
  * que `x.io` no está en el índice de git.
  *
- * 🚧 Y ACOTAR NO ES CERRAR — lo que este candado NO alcanza, medido: un token
- * SIN archivo (P3/P4, un `:N` suelto) se puede seguir moviendo acá con una
- * excusa, porque nada mecánico distingue un `:336` que cita una línea de un
- * `:8443` que es un puerto — es la misma razón por la que el escáner los reporta
- * a propósito. Del registro de hoy, 31 de las 50 citas declaradas tienen archivo
- * en el token y quedan protegidas; las otras 19 dependen de que quien escriba la
- * excusa la escriba en serio, y de que quien revise la lea. El candado cierra la
- * puerta grande, no todas.
+ * 🚧 Y ACOTAR NO ES CERRAR — lo que este candado NO alcanza son DOS salidas,
+ * las dos medidas:
+ *
+ *   (a) UN TOKEN SIN ARCHIVO (P3/P4, un `:N` suelto) se puede seguir moviendo
+ *       acá con una excusa, porque nada mecánico distingue un `:336` que cita
+ *       una línea de un `:8443` que es un puerto — es la misma razón por la que
+ *       el escáner los reporta a propósito.
+ *   (b) UN TOKEN QUE SÍ NOMBRA UN ARCHIVO, PERO QUE NO ESTÁ EN EL ÍNDICE DE
+ *       GIT. `citeTargetIfTracked` pregunta por el índice, no por el disco: un
+ *       archivo que existe en el working tree y que nadie trackeó devuelve
+ *       `null` y también se puede declarar ruido. Repro medida: una cita a
+ *       `.nexus/project-context.md:6` en un archivo del Corte A, más su entrada
+ *       acá, deja el guardián en 12/12 VERDE.
+ *       🔴 La asimetría es lo que lo hace un defecto y no una elección: la MISMA
+ *       cita declarada en `CITED_LINES` pone el guardián ROJO
+ *       (`E-TARGET_MISSING`); declarada ruido acá, pasa en verde.
+ *       ⚠️ NO se cierra leyendo el disco, y es a propósito: el índice es lo que
+ *       un `checkout` trae, y un guardián que dependa de qué archivos sueltos
+ *       tenga cada quien en su working tree da distinto en CI que en local.
+ *       Población hoy dentro del Corte A: 0 — es una frase que faltaba, no un
+ *       agujero abierto. Queda con nombre: `TD-316-CITAS-PROJECT-CONTEXT`.
+ *
+ * Cuánto cubre el candado: `CITED_LINES.filter(citeNamesFile).length` sobre
+ * `CITED_LINES.length`. Al 2026-08-19 eran 31 de 50, y ese par es una FOTO: no
+ * lo cites, derivalo con `citeNamesFile` sobre `CITED_LINES`. Las otras dependen
+ * de que quien escriba la excusa la escriba en serio, y de que quien revise la
+ * lea. El candado cierra la puerta grande, no todas.
  *
  * 3️⃣ `UNANCHORABLE_PROSE` ES SÓLO PARA PROSA SIN FORMA SINTÁCTICA. Si el
  * `quote` contiene un token que el escáner sabe encontrar, entonces se puede
