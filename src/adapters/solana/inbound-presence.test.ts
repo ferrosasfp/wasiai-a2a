@@ -18,6 +18,7 @@
  * probada no se parsea).
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import {
   balanceEntry,
@@ -30,6 +31,9 @@ import {
   probeInboundProof,
   readInboundTerms,
 } from './inbound-presence.js';
+// El combinador es puro: se importa para poder afirmar la CONSECUENCIA de un veredicto
+// de presencia (quién le gana a quién), no sólo el veredicto suelto.
+import { combineInboundPresence } from './inbound-verify.js';
 
 const MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
 const PAY_TO = freshPubkey();
@@ -170,6 +174,48 @@ describe('WKH-314 · el techo de las llamadas al RPC', () => {
     expect(res.presence.state).toBe('finalized_ok');
     expect(res.binding.state).toBe('bound');
   });
+
+  /**
+   * T-RPCTO-04 — el docblock de `INBOUND_RPC_TIMEOUT_MS` afirma que el presupuesto de
+   * espera al RPC de este archivo entra dentro del techo de las rutas que lo invocan.
+   * Ese docblock ya fue falso una vez (decía "los 60 s de `/compose`" cuando `/compose`
+   * son 180 s y ninguna ruta del repo usa 60 s — CR de WKH-314, BLQ-BAJO-3), así que la
+   * afirmación se DERIVA de los tres archivos donde viven los números en vez de
+   * repetirse a mano. Si alguien baja un techo de ruta por debajo del presupuesto, este
+   * test se pone rojo y el comentario no envejece en silencio.
+   *
+   * No se lee a sí mismo: los tres `readFileSync` apuntan a OTROS archivos.
+   */
+  it('T-RPCTO-04 · el presupuesto de espera al RPC entra en el techo REAL de las rutas (derivado, no escrito a mano)', () => {
+    const read = (rel: string) =>
+      readFileSync(new URL(rel, import.meta.url), 'utf8');
+
+    const perCallMs = Number(
+      /const INBOUND_RPC_TIMEOUT_MS = ([\d_]+);/
+        .exec(read('./inbound-presence.ts'))?.[1]
+        ?.replace(/_/g, '') ?? Number.NaN,
+    );
+    expect(Number.isFinite(perCallMs)).toBe(true);
+    // 2 llamadas en serie × 2 proveedores. Es lo que ESTE archivo espera al RPC, no el
+    // peor caso del request (P0 y Postgres no están acotados por esta constante).
+    const rpcBudgetMs = perCallMs * 2 * 2;
+
+    const ceilings: Record<string, number> = {};
+    for (const [rel, envName] of [
+      ['../../routes/compose.ts', 'TIMEOUT_COMPOSE_MS'],
+      ['../../routes/orchestrate.ts', 'TIMEOUT_ORCHESTRATE_MS'],
+    ] as const) {
+      const m = new RegExp(`${envName} \\?\\? '(\\d+)'`).exec(read(rel));
+      expect(m, `${envName} no encontrado en ${rel}`).not.toBeNull();
+      ceilings[envName] = Number(m?.[1]);
+    }
+
+    for (const [envName, ceiling] of Object.entries(ceilings)) {
+      expect(ceiling, `${envName} default`).toBeGreaterThan(rpcBudgetMs);
+    }
+    // Y el número que el docblock nombra sigue siendo el que el código usa.
+    expect(rpcBudgetMs).toBe(32_000);
+  });
 });
 
 describe('WKH-314 · presencia y finalidad', () => {
@@ -246,7 +292,7 @@ describe('WKH-314 · presencia y finalidad', () => {
     });
   });
 
-  it('T-FAIL-01 · una tx que aterrizó y FALLO on-chain no movió nada', async () => {
+  it('T-FAIL-01 · GEMELO POSITIVO: una tx FINALIZADA que falló on-chain no movió nada', async () => {
     const { connection } = fakeConnection({
       status: statusValue({
         err: { InstructionError: [0, 1] },
@@ -255,6 +301,86 @@ describe('WKH-314 · presencia y finalidad', () => {
     });
     const res = await probeInboundProof(connection as never, ARGS);
     expect(res.presence.state).toBe('landed_failed');
+    // El veto FINALIZADO sigue siendo pegajoso: le gana a un `finalized_ok` del otro
+    // proveedor (tier 0 de `presenceRank`). El fix de BLQ-BAJO-1 acota QUIEN puede
+    // emitirlo, no debilita lo que hace una vez emitido.
+    expect(
+      combineInboundPresence(res.presence, {
+        state: 'finalized_ok',
+        creditedAtomic: '1000000',
+      }).state,
+    ).toBe('landed_failed');
+  });
+
+  it('T-FAIL-02 💰 · un `err` SIN finalidad ⇒ `unknown`, NUNCA `landed_failed` (CR BLQ-BAJO-1)', async () => {
+    for (const conf of ['processed', 'confirmed', undefined, null, 'rooted']) {
+      const { connection } = fakeConnection({
+        status: statusValue({
+          err: { InstructionError: [0, 1] },
+          ...(conf === undefined ? {} : { confirmationStatus: conf }),
+        }),
+      });
+      const res = await probeInboundProof(connection as never, ARGS);
+      // `landed_failed` es TIER 0 y le gana a `finalized_ok`: emitirlo sin finalidad
+      // deja a un veto descartable vetando una transferencia que sí se finalizó.
+      expect(res.presence.state, `conf=${String(conf)}`).toBe('unknown');
+    }
+  });
+
+  it('T-FAIL-03 💰 · el escenario del CR: primario `{err, processed}` contra fallback `{null, finalized}` ⇒ gana el FINALIZADO', async () => {
+    // Una tx incluida en una bifurcación que después se descarta: el primario la ve
+    // fallada a nivel `processed`, el fallback la ve finalizada y OK. Antes del fix el
+    // combinador daba `landed_failed` ⇒ `X402_SOLANA_TX_FAILED`, que no es reintentable.
+    const primary = await probeInboundProof(
+      fakeConnection({
+        status: statusValue({
+          err: { InstructionError: [0, 1] },
+          confirmationStatus: 'processed',
+        }),
+      }).connection as never,
+      ARGS,
+    );
+    const fallback = await probeInboundProof(
+      fakeConnection({
+        status: statusValue({ err: null, confirmationStatus: 'finalized' }),
+        parsed: parsedTx({
+          accountKeys: [REFERENCE],
+          version: 'legacy',
+          blockTime: 1_700_000_100,
+          meta: {
+            err: null,
+            preTokenBalances: [
+              balanceEntry({
+                accountIndex: 1,
+                mint: MINT,
+                owner: PAY_TO,
+                amount: '0',
+              }),
+            ],
+            postTokenBalances: [
+              balanceEntry({
+                accountIndex: 1,
+                mint: MINT,
+                owner: PAY_TO,
+                amount: '1000000',
+              }),
+            ],
+          },
+        }),
+      }).connection as never,
+      ARGS,
+    );
+    // Precondición MEDIDA del escenario, antes de asertar sobre el combinador.
+    expect(primary.presence.state).toBe('unknown');
+    expect(fallback.presence.state).toBe('finalized_ok');
+    // Y en los DOS órdenes: el resultado no puede depender de cuál proveedor contestó
+    // primero.
+    expect(
+      combineInboundPresence(primary.presence, fallback.presence).state,
+    ).toBe('finalized_ok');
+    expect(
+      combineInboundPresence(fallback.presence, primary.presence).state,
+    ).toBe('finalized_ok');
   });
 
   it('T-UNK-03 💰 · una respuesta de status sin forma usable ⇒ `unknown`', async () => {

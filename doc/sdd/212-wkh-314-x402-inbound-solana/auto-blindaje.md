@@ -118,20 +118,34 @@ la próxima HU no los repita.
 
 ## Fix-pack del AR (2026-08-19)
 
-### [2026-08-19] FIX — `cat`/`sed` bajo el hook `rtk` ELIDEN líneas y las citas se leen mal
+### [2026-08-19] CORREGIDA — la causa que escribí acá era FALSA: el hook no elide, corrompe el PIPE
 
-- **Error**: `cat -n src/adapters/solana/chain.ts` numeró 243 líneas; `wc -l` decía 303.
-  Con esa numeración, `looksLikeMainnetRpc` "estaba" en la 203 y el AR la citaba en la
-  261. Casi cierro el hallazgo diciendo que la cita del AR estaba mal.
-- **Causa raíz**: el hook reescribe `cat`/`sed` y el resultado colapsa líneas (las
-  vacías, entre otras). El comando **sale 0**: la pérdida es silenciosa, igual que la
-  del `git diff` truncado que ya estaba documentada en memoria.
-- **Fix**: `/usr/bin/cat -n` y `/usr/bin/sed` con ruta absoluta, siempre. El control que
-  lo detecta: `wc -l` contra el último número que imprime el visor. Si no coinciden, lo
-  que estás leyendo no es el archivo.
-- **Aplicar en**: TODA verificación de un `archivo:línea` — citas del AR, del CR, del F4,
-  y `test/cited-lines-guard.citations.ts`. Un número de línea leído con la herramienta
-  equivocada convierte una cita correcta en un falso hallazgo, y al revés.
+> ⚠️ Esta entrada decía *"el hook reescribe `cat`/`sed` y el resultado colapsa líneas"* y
+> *"el comando sale 0: la pérdida es silenciosa"*, **como cosa medida**. El CR de WKH-314
+> (MNR-7) intentó reproducirlo y no pudo; yo tampoco, re-midiendo. La conclusión operativa
+> no cambia; **la causa sí**, y dejarla mal escrita hacía que el próximo agente descartara
+> como artefacto conocido un desacuerdo que sería un hallazgo real.
+
+- **Error**: leí un archivo con el visor bajo el hook, conté menos líneas de las que tiene
+  y estuve por declarar mal una cita del AR sobre `chain.ts`.
+- **Causa raíz — MEDIDA HOY, y NO es la que estaba escrita**: el contenido del archivo
+  llega **intacto**. Control, sobre `chain.ts` (329 líneas): `/usr/bin/wc -l` = 329,
+  `cat -n` bajo el hook redirigido **a un archivo** = 329 líneas, y `diff` contra
+  `/usr/bin/cat -n` = IDENTICOS. Lo que **sí** se reproduce es lo que ya estaba en la
+  memoria del proyecto como `rtk-proxy-corrupts-redirected-output`: **la salida
+  encadenada por PIPE se corrompe**. Medido en la misma sesión:
+  `cat -n chain.ts | tail -1` bajo el hook devuelve **vacío con exit 0**, mientras
+  `/usr/bin/cat -n chain.ts | /usr/bin/tail -1` devuelve `329\t}`. (Y no es que el pipe
+  entregue nada: `cat -n chain.ts | wc -l` sí da 329. Se pierde según qué consumidor
+  haya del otro lado, lo cual es peor: la corrupción es **selectiva**.)
+- **Fix**: `/usr/bin/cat`, `/usr/bin/sed`, `/usr/bin/git` con ruta absoluta, y **escribir
+  a archivo en vez de encadenar por pipe**. El control que lo detecta: `/usr/bin/wc -l`
+  contra el último número que imprime el visor **leído del archivo, no del pipe**.
+- **Aplicar en**: TODA verificación de un `archivo:línea`, y —más importante— a toda
+  afirmación sobre el instrumento. **Un artefacto de herramienta se documenta con el
+  comando exacto que lo reproduce**, o el que venga después va a explicar con él un bug
+  de verdad. Regla operativa: si escribís "la herramienta X hace Y", pegá el control que
+  distingue Y de no-Y.
 
 ### [2026-08-19] FIX — El test que documentaba el bug con su razón escrita
 
@@ -175,3 +189,79 @@ la próxima HU no los repita.
   `nonce?: unknown`), así el compilador enumera todos los sitios.
 - **Aplicar en**: cualquier ampliación de un material firmado. Campo nuevo ⇒ obligatorio
   en el tipo de verificación, aunque después el guard lo rechace por forma.
+
+---
+
+## Fix-pack del CR (2026-08-19)
+
+### [2026-08-19] FIX — Reporté como MEDIDO un comportamiento de Fastify que no medí (MNR-1)
+
+- **Error**: el reporte del fix-pack del AR declaró como desviación 2 que *"con `return;`
+  en vez de `return reply;` el route handler habría corrido el trabajo pago"*. El CR lo
+  midió contra Fastify 5.9.0 (el del repo) y es **falso**: con `reply.sent === true` los
+  dos valores de retorno dan `status=504 handlerRan=false`. Lo que corta la cadena es el
+  `.send()` previo, no el valor devuelto.
+- **Causa raíz**: escribí la razón por la que el código está bien **razonando sobre la
+  API**, no ejecutándola. El código quedó igual y el comentario de `x402.ts` dice lo
+  correcto (habla del CONSUMO irreversible, no del lifecycle); lo que estaba mal era mi
+  justificación.
+- **Fix**: no se toca el código. Queda esta entrada, que es donde el reporte vive en
+  disco.
+- **Aplicar en**: toda afirmación sobre el comportamiento de una librería. Si no corriste
+  el snippet, se escribe *"no lo medí"*, no la conclusión. Un reporte con una razón falsa
+  y un veredicto correcto es peor que uno sin razón: parece verificado.
+
+### [2026-08-19] FIX — Al veto le pedía menos que al grant (BLQ-BAJO-1)
+
+- **Error**: `probeInboundLanding` devolvía `landed_failed` **en cuanto `status.err` era
+  truthy**, y recién después miraba `confirmationStatus`. Como el fix del AR había puesto
+  `landed_failed` en tier 0, un veto a nivel `processed` le ganaba a un `finalized_ok` del
+  otro proveedor ⇒ `X402_SOLANA_TX_FAILED`, que no es reintentable, sobre una
+  transferencia que sí se finalizó.
+- **Causa raíz**: el arreglo anterior subió la PRIORIDAD del estado sin revisar sus
+  PRECONDICIONES. El docblock que lo justificaba decía *"una aserción positiva sobre una
+  transacción inmutable"* — cierto para `finalized`, falso para `processed`/`confirmed`,
+  que es la definición misma de esos commitments. La razón escrita tapaba el agujero.
+- **Fix**: el veto exige el mismo estándar que el grant (`conf === INBOUND_FINALITY`); sin
+  finalidad el `err` es `unknown`, reintentable y sin consumo. Gemelos: `T-FAIL-01`
+  (positivo, sigue siendo pegajoso contra `finalized_ok`), `T-FAIL-02` (5 commitments sin
+  finalidad ⇒ `unknown`) y `T-FAIL-03` (el escenario de dos proveedores, en los dos
+  órdenes).
+- **Aplicar en**: cada vez que subas un estado de precedencia en una tabla de decisión,
+  releé qué hace falta para EMITIRLO. Un rank alto convierte cualquier laxitud de la
+  precondición en una decisión de dinero.
+
+### [2026-08-19] FIX — Rompí CINCO citas mías al insertar 113 líneas encima (BLQ-BAJO-2)
+
+- **Error**: `:1226`, `:1272`, `x402.ts:1217` y `x402.ts:1030-1033` quedaron apuntando a
+  `.status(400)`, a un `const` y a un comentario suelto. Y re-barriendo aparecieron tres
+  más que el CR no listó: `decodeXPayment (x402.ts:359-382)`, `x402.ts:476-478` y
+  `registry.ts:426` (×3), correctas contra `main` y corridas por las inserciones de esta
+  misma HU.
+- **Causa raíz**: verifiqué las citas **cuando las escribí** y no **después de la última
+  edición**, que es literalmente lo que pide CD-A1. Cada wave posterior insertó código
+  encima del destino.
+- **Fix**: se citan **símbolos y marcadores** (`requirePayment`, `DT-3 / CD-7`,
+  `Guard FST_ERR_REP_ALREADY_SENT`, `decodeXPayment`, `getPaymentAdapter`,
+  `NO toca el path prepago`), que sobreviven a la próxima inserción. Y un barrido
+  automático de las citas de las líneas AGREGADAS por el diff, resolviendo cada destino y
+  mostrando qué hay hoy en esa línea.
+- **Aplicar en**: preferir el símbolo al número **siempre** que exista uno estable. Y el
+  barrido no puede correr sobre `git diff main...HEAD` si tenés cambios sin commitear: eso
+  mide el commit, no tu árbol.
+
+### [2026-08-19] FIX — El denominador que justificaba un techo no existía (BLQ-BAJO-3)
+
+- **Error**: el docblock de `INBOUND_RPC_TIMEOUT_MS` decía que 32 s quedan *"por debajo de
+  los 60 s de `/compose`"*. `/compose` son **180 s** (`TIMEOUT_COMPOSE_MS`) y ninguna ruta
+  del repo usa 60 s: el número venía del encabezado histórico de `middleware/timeout.ts`.
+  Y *"el peor caso"* tampoco era 32 s: antes corre el preflight con tres sondas sin techo.
+- **Causa raíz**: copié un número de un encabezado viejo en vez de leer la ruta. Una
+  constante escrita a mano en un comentario no tiene quién la contradiga.
+- **Fix**: la frase se acota a *"las dos llamadas RPC de este archivo"*, el denominador se
+  corrige, y `T-RPCTO-04` **deriva** los tres números de los archivos donde viven
+  (`inbound-presence.ts`, `routes/compose.ts`, `routes/orchestrate.ts`) y afirma la
+  desigualdad. Calibrado: bajando el techo de `/compose` a 20 s el test se pone rojo.
+- **Aplicar en**: toda comparación contra un límite ajeno. Si el límite vive en otro
+  archivo, el test lo lee de ahí; si no, la afirmación envejece en silencio y nadie se
+  entera.

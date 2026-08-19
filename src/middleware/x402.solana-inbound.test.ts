@@ -223,7 +223,8 @@ function buildApp(): ReturnType<typeof Fastify> {
 
 /**
  * Un app cuya ruta calcula el precio DESDE EL BODY, que es lo que `/compose` hace en
- * producción: un preHandler setea `request.x402ChallengeAmountUsd` (`x402.ts:1030-1033`)
+ * producción: un preHandler setea `request.x402ChallengeAmountUsd` (el merge marcado
+ * `WKH money-path fix` al principio de `requirePayment`, en `x402.ts`)
  * ANTES de `requirePayment`. El `resource` sigue siendo `/charged` a secas, así que dos
  * requests con precios distintos comparten recurso — exactamente la condición de
  * BLQ-ALTO-1.
@@ -930,7 +931,8 @@ describe('WKH-314 · el sobre viejo y el sobre ajeno (fix-pack del AR)', () => {
 
   it('T-PRICE-03 · pagar de MAS sigue concediendo (`>=`, nunca `!==`)', async () => {
     // Nadie paga de más por error y se queda sin servicio. Es la misma postura que el
-    // guard EVM de `x402.ts:1217` (`BigInt(auth.value) < BigInt(requiredAmount)`).
+    // guard EVM de `requirePayment` marcado `DT-3 / CD-7` en `x402.ts`
+    // (`BigInt(auth.value) < BigInt(requiredAmount)`).
     const app = buildPricedApp();
     const expensive = await getChallenge(app, { priceUsd: 50 });
     const res = await present(app, envelope(expensive, signatureFixture(7)), {

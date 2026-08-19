@@ -36,8 +36,18 @@
  *    ignorancia. Que un segundo nodo conteste `finalized_ok` sobre la misma firma es la
  *    misma anomalía del punto 1, y resolverla como grant entregaría servicio contra una
  *    transferencia que **no transfirió**.
+ *    ⚠️ **Y "inmutable" ahí es una PRECONDICION que se paga río arriba, no un adjetivo**
+ *    (CR de WKH-314, BLQ-BAJO-1): una tx `processed`/`confirmed` **no** es inmutable —esa
+ *    es la definición misma de esos commitments— así que un `err` sin `finalized` NO
+ *    produce `landed_failed`. Los dos únicos productores del estado exigen finalidad
+ *    probada: el `if (status.err)` de `probeInboundLanding` la chequea, y
+ *    `readInboundTerms` sólo corre cuando el landing dio `proceed`, que es
+ *    `confirmationStatus === 'finalized'`. Sin esa precondición, este rank 0 sería un
+ *    veto no finalizado ganándole a una afirmación finalizada.
  *    *Esto sería falso si*: `landed_failed` tuviera rank > `finalized_ok` — ahí un solo
- *    nodo mintiendo (o el orden de los dos proveedores) decidiría el cobro.
+ *    nodo mintiendo (o el orden de los dos proveedores) decidiría el cobro. Y sería
+ *    igual de falso si `probeInboundLanding` emitiera `landed_failed` desde un status
+ *    `processed`: ahí el primario no finalizado vetaría al fallback finalizado.
  * 3. **Un `absent` solo, contradicho por un `unknown`, NO es una negativa.** Hacen
  *    falta DOS nodos que hayan buscado en su histórico y no la conozcan. Un nodo que
  *    no contesta no vota.
@@ -56,8 +66,10 @@ import type { SolanaInboundBinding, SolanaInboundPresence } from '../types.js';
  * dinero tomada por omisión.
  *
  * ⚠️ EL TIER 0 SON LAS NEGATIVAS MEDIDAS, y son DOS: `terms_mismatch` y
- * `landed_failed`. Las dos son aserciones positivas sobre una transacción inmutable, y
- * las dos ganan contra cualquier cosa —incluido `finalized_ok`— porque una
+ * `landed_failed`. Las dos son aserciones positivas sobre una transacción **finalizada**
+ * (y por eso inmutable — ver la regla 2: la finalidad la exige `probeInboundLanding`
+ * antes de emitir cualquiera de los dos estados), y las dos ganan contra cualquier
+ * cosa —incluido `finalized_ok`— porque una
  * contradicción sobre dinero se resuelve denegando. Empatan entre sí, y el desempate lo
  * gana el primario (`<=`): las dos deniegan, así que cuál de los dos mensajes sale no
  * cambia ninguna decisión.

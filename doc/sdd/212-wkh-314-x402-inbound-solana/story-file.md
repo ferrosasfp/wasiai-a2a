@@ -96,7 +96,7 @@ ninguna clave privada Solana en este camino.
 |---|---|---|
 | La pared A sigue en pie | `src/adapters/registry.ts:523` es literalmente `return bundle.payment.vmFamily === 'evm';` | `:510-512` ❌ |
 | El corte del middleware | `src/middleware/x402.ts:479-497` (guard) · `:490` header · `:512` eco de chain | `:479-497`, `:512` ✅ |
-| `getPaymentAdapter` lanza sobre non-EVM | `src/adapters/registry.ts:426` (firma `(chainKey?): EvmPaymentAdapter`) | `:414-422` ❌ |
+| `getPaymentAdapter` lanza sobre non-EVM | `src/adapters/registry.ts`, símbolo `getPaymentAdapter` (firma `(chainKey?): EvmPaymentAdapter`) | el `:426` del SDD ❌ |
 | El canal `unknown` | `src/middleware/x402.ts:674-730` (closure `emitInboundSettleUnknown`, `error_code` `X402_SETTLE_UNKNOWN` en `:680`) | `:674-730` ✅ |
 | El probe de presencia OUTBOUND | `src/adapters/solana/payment.ts:792` (`probeSettlementPresence`, **`private`**) + `:805` (`…Inner`) + `:814` (`searchTransactionHistory: true`) | `:572-644` ❌ |
 | `checkTerms` OUTBOUND | `src/adapters/solana/payment.ts:1382` (**`private`**), lee `preTokenBalances`/`postTokenBalances` en `:1414-1415` | `:1101-1130` ❌ |
@@ -278,7 +278,7 @@ Antes de escribir cada archivo, confirmá con `Read` (no de memoria, no del SDD)
       **no entra al conjunto** y ni el guardián ni `test/ownership-filter-guard.exceptions.ts` cambian.
       *Sería falso si le agregaras `owner_ref` a la tabla: ahí sí el guardián te va a exigir el filtro.*
 - [ ] **NO inventes un `error_code`** que no esté en la tabla de §8.3.
-- [ ] **NO uses `getPaymentAdapter()` en la rama Solana.** Lanza a propósito (`registry.ts:426`).
+- [ ] **NO uses `getPaymentAdapter()` en la rama Solana.** Lanza a propósito (símbolo `getPaymentAdapter` en `src/adapters/registry.ts`).
 - [ ] **NO toques `src/adapters/solana/payment.ts`.** Ni una línea. Ni un comentario.
 
 ---
@@ -548,9 +548,10 @@ unidades atómicas del mint, `payTo` base58, `reference` base58 (32 bytes), `exp
 sostiene: había DOS expresiones del monto —`requiredAmount`, que sólo alimentaba el challenge, y
 `presented.amountAtomic`, que salía del sobre del cliente y era el que viajaba hasta la cadena—, y
 divergían. Hoy el sobre se compara contra `requiredAmount` (monto, `payTo` y `mint`) en P2b, antes del
-peek, con el mismo `>=` en unidades atómicas que usa la rama EVM en `x402.ts:1226`.
+peek, con el mismo `>=` en unidades atómicas que usa la rama EVM en el guard `DT-3 / CD-7`
+de `requirePayment` (`src/middleware/x402.ts`, literal `BigInt(auth.value) < BigInt(requiredAmount)`).
 
-**X-PAYMENT (request):** el decoder **no se toca**. `decodeXPayment` (`src/middleware/x402.ts:359-382`)
+**X-PAYMENT (request):** el decoder **no se toca**. `decodeXPayment` (símbolo `decodeXPayment` en `src/middleware/x402.ts`; el `:359-382` que decía acá era correcto contra `main` y lo corrió esta misma HU al insertar la rama Solana encima — CR de WKH-314, BLQ-BAJO-2)
 sólo exige `authorization` objeto y `signature` string:
 
 ```
@@ -770,11 +771,11 @@ Solana, listo". **No es así.** Cada línea de acá es falsable con un comando.
    contrario.
 
 4. **El camino PREPAGO (a2a-key) sigue sin pasar por acá.** Con `x-a2a-key` presente,
-   `requirePaymentOrA2AKey` **nunca** delega en este handler (está escrito en `x402.ts:476-478`), y
+   `requirePaymentOrA2AKey` **nunca** delega en este handler (está escrito en el comentario `NO toca el path prepago` de `requirePayment`, en `src/middleware/x402.ts`), y
    resuelve la chain con su propio `resolveTargetChain`. El fondeo de esa clave en Solana lo entregó
    **WKH-315**, no esta HU.
 
-5. **Sigue habiendo un camino EVM-only, y es grande**: `getPaymentAdapter()` (`registry.ts:426`) sigue
+5. **Sigue habiendo un camino EVM-only, y es grande**: `getPaymentAdapter()` (símbolo homónimo en `src/adapters/registry.ts`) sigue
    siendo `EvmPaymentAdapter` y sigue lanzando sobre non-EVM. Todo el pipeline
    `buildX402Response → resolvePaymentRequirements → verify → settle → re-verify` **sigue siendo
    EVM-only**. Esta HU **bifurca antes** de tocarlo (DT-4) y **no lo generaliza**. Un adapter Solana

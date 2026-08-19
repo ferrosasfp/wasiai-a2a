@@ -90,8 +90,22 @@ const ATOMIC_AMOUNT_RE = /^\d+$/;
  * `AbortSignal` porque `Connection` de `@solana/web3.js` v1 no expone uno por llamada.
  *
  * Constante de módulo y NO una env, por el mismo criterio que `INBOUND_FINALITY`: una
- * env capaz de estirar esto es una env capaz de reabrir el agujero. 8 s × 2 llamadas en
- * serie × 2 proveedores deja el peor caso por debajo de los 60 s de `/compose`.
+ * env capaz de estirar esto es una env capaz de reabrir el agujero.
+ *
+ * ⚠️ LO QUE ESTE PRESUPUESTO ACOTA, Y LO QUE NO (CR de WKH-314, BLQ-BAJO-3). Acá decía
+ * *"deja el peor caso por debajo de los 60 s de `/compose`"* y las dos mitades eran
+ * falsas:
+ *   · **el denominador**: ninguna ruta del repo usa 60 s. `/compose` default a
+ *     `TIMEOUT_COMPOSE_MS ?? '180000'` (180 s) y `/orchestrate`, `/inbound` y
+ *     `/agent-links` a `TIMEOUT_ORCHESTRATE_MS ?? '120000'` (120 s). El 60 venía del
+ *     encabezado histórico de `middleware/timeout.ts`, que también está viejo.
+ *   · **"el peor caso"**: 8 s × 2 llamadas en serie × 2 proveedores = 32 s son **las dos
+ *     llamadas RPC de ESTE archivo**, no el camino del request. Antes corre
+ *     `ensureSolanaInboundReady` (P0) con tres sondas SIN techo, más el peek, el observe
+ *     y el consume contra Postgres. Nada de eso lo acota esta constante.
+ * *Esto sería falso si*: cualquiera de esos dos defaults bajara de 32 s. No hay que
+ * creerle a este comentario: lo mide `T-RPCTO-04`, que deriva los tres números de los
+ * archivos donde viven.
  */
 const INBOUND_RPC_TIMEOUT_MS = 8_000;
 
@@ -163,6 +177,9 @@ export interface InboundProviderVerdict {
  *   - `'finalized'`               ⇒ seguir (evidencia POSITIVA)
  *   - `'processed'`/`'confirmed'` ⇒ `not_finalized` (negativa MEDIDA, reintentable)
  *   - **ausente / desconocido**   ⇒ **`unknown`**, NO "todavía no".
+ *
+ * ⚠️ **Y ESO VALE TAMBIEN PARA EL `err`**: un status con error pero sin finalidad NO
+ * es `landed_failed`, es `unknown`. El detalle está en el comentario del `if (status.err)`.
  */
 async function probeInboundLanding(
   connection: Connection,
@@ -201,10 +218,36 @@ async function probeInboundLanding(
   // de que el endpoint retenga histórico la mide el preflight; acá no se re-implementa
   // ni se debilita.
   if (status === null || status === undefined) return { state: 'absent' };
-  if (status.err) {
-    return { state: 'landed_failed', detail: JSON.stringify(status.err) };
-  }
   const conf = status.confirmationStatus;
+  // ⚠️ AL VETO SE LE EXIGE LA MISMA FINALIDAD QUE AL GRANT (CR de WKH-314, BLQ-BAJO-1).
+  //
+  // `landed_failed` es TIER 0 en `combineInboundPresence` y le gana a `finalized_ok`.
+  // Emitirlo desde un status `processed`/`confirmed` ponía a un veto NO FINALIZADO a
+  // vetar una afirmación FINALIZADA — exactamente la asimetría que el resto de este
+  // archivo evita. Input concreto: primario `{err, confirmationStatus:'processed'}` (una
+  // tx incluida en una bifurcación que después se descarta, que en devnet no es
+  // exótico) contra fallback `{err:null, confirmationStatus:'finalized'}` ⇒ salía
+  // `X402_SOLANA_TX_FAILED`, que NO está en `SOLANA_RETRYABLE_CODES` y por lo tanto sale
+  // sin `Retry-After`, sobre una transferencia que sí se finalizó.
+  //
+  // Sin finalidad, un `err` es una IGNORANCIA, no una negativa: `unknown` (reintentable,
+  // no consume la prueba). No se pierde el caso terminal — si la tx realmente falló, el
+  // mismo `err` vuelve con `finalized` en el reintento y ahí sí es `landed_failed`.
+  // *Esto sería falso si*: un `err` sin finalidad devolviera `landed_failed` — ahí el
+  // fallback finalizado perdería contra el primario no finalizado (T-FAIL-02, T-FAIL-03).
+  if (status.err) {
+    if (conf === INBOUND_FINALITY) {
+      return { state: 'landed_failed', detail: JSON.stringify(status.err) };
+    }
+    return {
+      state: 'unknown',
+      detail: `the node reports an error for this signature at ${
+        conf === undefined || conf === null
+          ? 'an unstated'
+          : JSON.stringify(conf)
+      } commitment, not at ${INBOUND_FINALITY} — a non-finalized failure can still be dropped with its fork, so it cannot veto a finalized verdict`,
+    };
+  }
   if (conf === INBOUND_FINALITY) return { state: 'proceed' };
   if (conf === 'processed' || conf === 'confirmed') {
     return { state: 'not_finalized', confirmationStatus: conf };

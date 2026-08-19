@@ -615,12 +615,14 @@ function buildSolanaX402Response(
 }
 
 /**
- * EL HANDLER DEL COBRO INBOUND SOLANA. Implementa la secuencia P0..P9, **en ese
- * orden**, y el orden no es decorativo:
+ * EL HANDLER DEL COBRO INBOUND SOLANA. Implementa esta secuencia, **en ese orden**, y
+ * el orden no es decorativo (no hay P8: la numeración viene del SDD y saltea ese
+ * número):
  *
  *   P0 preflight (fail-closed)     · P1 forma del sobre       · P2 la referencia
- *   P3 peek del store              · P4 la cadena             · P5 el binding
- *   P6 persistir el veredicto      · P7 EL COBRO              · P9 conceder
+ *   P2b el precio de ESTE request  · P3 peek del store        · P4 la cadena
+ *   P5 el binding                  · P6 persistir el veredicto
+ *   P7 EL COBRO                    · P9 conceder
  *
  * · **P2 antes que P4** para que una referencia forjada se rechace SIN gastar una
  *   sola llamada al RPC. Es la defensa barata contra el que copia una firma del
@@ -796,8 +798,13 @@ async function handleSolanaInboundPayment(args: {
   // hasta `requiredAtomic` y la cadena se consultaba contra el monto del ATACANTE.
   // Repetible, y sin reembolso inbound en este camino (AR de WKH-314, BLQ-ALTO-1).
   //
-  // Es el mismo guard que la rama EVM tiene desde WKH-SEC-03 (`:1226` en este archivo),
-  // con sus mismas tres reglas: comparación en unidades ATOMICAS, `>=` (pagar de más
+  // Es el mismo guard que la rama EVM tiene desde WKH-SEC-03: el marcado `DT-3 / CD-7`
+  // dentro de `requirePayment`, en este mismo archivo. Se cita por MARCADOR y no por
+  // número de línea a propósito: acá había una cita por línea y este mismo fix-pack la
+  // corrió al insertar código encima, hasta dejarla apuntando a otra rama del archivo
+  // (CR de WKH-314, BLQ-BAJO-2). Un marcador sobrevive a la próxima inserción; un
+  // número, no.
+  // Comparte sus mismas tres reglas: comparación en unidades ATOMICAS, `>=` (pagar de más
   // concede — nadie paga de más por error y se queda sin servicio), y un `BigInt` que
   // no lanza puertas afuera.
   //
@@ -1056,7 +1063,9 @@ async function handleSolanaInboundPayment(args: {
   // Devolver `undefined` acá NO concede acceso: `paymentVerified` sigue sin setearse y
   // la respuesta que el cliente ve es la que ya se envió.
   //
-  // ⚠️ NO ES EL GUARD `FST_ERR_REP_ALREADY_SENT` de la rama EVM (`:1272`). Ese evita
+  // ⚠️ NO ES EL GUARD `FST_ERR_REP_ALREADY_SENT` de la rama EVM (el `if (reply.sent)`
+  // que está bajo el comentario `Guard FST_ERR_REP_ALREADY_SENT` dentro de
+  // `requirePayment`, greppable por ese literal). Ese evita
   // una EXCEPCION al mandar dos veces; el AR midió que con Fastify 5 el segundo
   // `.send()` no lanza. Lo que se evita acá es el CONSUMO IRREVERSIBLE, y por eso el
   // chequeo va antes de la escritura y no antes del `.send()`.

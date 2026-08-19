@@ -971,6 +971,17 @@ not only against the MAC. If the price of the call changed, or the recipient wal
 mint rotated, ask for a fresh 402. Your signature is not consumed by any of those
 rejections.
 
+> ⚠️ **"Not consumed" is about the proof, not about the money.** If you had already sent
+> the transfer when the rejection came back, that transfer is **stranded**: a fresh 402
+> carries a fresh `extra.nonce`, hence a fresh `reference`, and your old transaction does
+> not contain it — presenting it against the new challenge answers
+> `X402_SOLANA_REFERENCE_MISMATCH` forever. This is not an attacker scenario: the price of
+> `/compose` is computed from the request body, so a call that got more expensive between
+> your 402 and your presentation lands exactly here. **Quote and pay against the same
+> challenge, and present it before it expires.** The gateway does not refund inbound
+> transfers on this path; recovering a stranded transfer is an operator-side, manual
+> matter.
+
 **Finality is a precondition.** The gateway grants access only when the chain reports
 your transaction as `finalized`. Presenting it earlier answers
 `X402_SOLANA_NOT_FINALIZED` with a `Retry-After`, and **your proof is not consumed** —
@@ -986,9 +997,9 @@ Every one of these is HTTP `402`. **None of them consumes your proof** except
 | `X402_SOLANA_PROOF_MALFORMED` | The envelope is missing a field, or `signature` is not base58 of 64 bytes | no — fix the envelope | yes |
 | `X402_SOLANA_REFERENCE_MISMATCH` | The reference does not re-derive from our secret, or it is not among the accounts of that transaction | no — get a fresh challenge | yes |
 | `X402_SOLANA_CHALLENGE_EXPIRED` | The challenge expired, or the transaction landed outside its window | no — get a fresh challenge | yes |
-| `X402_SOLANA_AMOUNT_SHORT` | The recipient was credited **less** than required, or the challenge you presented was issued for a lower price than this call costs now | no — waiting will not help | yes |
+| `X402_SOLANA_AMOUNT_SHORT` | The recipient was credited **less** than required, or the challenge you presented was issued for a lower price than this call costs now | no — waiting will not help | yes, but see the stranded-transfer note above |
 | `X402_SOLANA_TERMS_MISMATCH` | Wrong mint, wrong recipient (including a challenge issued before the recipient wallet or the mint changed), or that signature is already recorded against a different charge | no | yes |
-| `X402_SOLANA_TX_FAILED` | The transaction landed and failed on-chain: nothing moved | no | yes |
+| `X402_SOLANA_TX_FAILED` | The transaction landed and failed on-chain: nothing moved. Only reported when the failure is `finalized`; a failure seen at `processed`/`confirmed` can still be dropped with its fork, so it answers `X402_SETTLE_UNKNOWN` (retryable) instead | no | yes |
 | `X402_SOLANA_NOT_FINALIZED` | Landed, not finalized yet | **yes** (`Retry-After`) | yes |
 | `X402_SOLANA_PROOF_ABSENT` | The node(s) we asked searched their history and do not know that signature. The message says how many actually searched: with a second RPC provider configured it takes **two** independent nodes, without one it is **a single opinion** | **yes** (`Retry-After`) | yes |
 | `X402_SOLANA_PROOF_REPLAY` | That signature already bought service | no | **no — already spent** |

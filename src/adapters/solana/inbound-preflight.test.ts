@@ -257,6 +257,51 @@ describe('WKH-314 · preflight inbound — los otros guards', () => {
     }
   });
 
+  it('T-PRE-06c 💰 · el MISMO nodo con un espacio al final también avisa (CR MNR-6)', async () => {
+    // `warnOnFallbackShape` trimeaba UNA sola punta (`SOLANA_RPC_URL_FALLBACK?.trim()`)
+    // y comparaba contra `getSolanaRpcUrl()`, que no trimea. Con este input las dos
+    // urls son el mismo nodo y el aviso no salía: el operador se quedaba creyendo que
+    // tenía dos opiniones cuando tenía una.
+    configure({
+      SOLANA_RPC_URL: 'https://devnet.example.com/rpc ',
+      SOLANA_RPC_URL_FALLBACK: 'https://devnet.example.com/rpc',
+    });
+    _resetSolanaInboundPreflight();
+    _resetSolanaChain();
+    try {
+      const v = await ensureSolanaInboundReady();
+      expect(v.ok).toBe(true);
+      const warned = logSpy.warn.mock.calls
+        .map((c) => JSON.stringify(c))
+        .join(' ');
+      expect(warned).toContain('SAME url');
+    } finally {
+      delete process.env.SOLANA_RPC_URL;
+      _resetSolanaChain();
+    }
+  });
+
+  it('T-PRE-06d · GEMELO POSITIVO: dos nodos DISTINTOS no disparan el aviso de "SAME url"', async () => {
+    // El control de que el trim no volvió al aviso indiscriminado.
+    configure({
+      SOLANA_RPC_URL: 'https://devnet-a.example.com/rpc',
+      SOLANA_RPC_URL_FALLBACK: 'https://devnet-b.example.com/rpc',
+    });
+    _resetSolanaInboundPreflight();
+    _resetSolanaChain();
+    try {
+      const v = await ensureSolanaInboundReady();
+      expect(v.ok).toBe(true);
+      const warned = logSpy.warn.mock.calls
+        .map((c) => JSON.stringify(c))
+        .join(' ');
+      expect(warned).not.toContain('SAME url');
+    } finally {
+      delete process.env.SOLANA_RPC_URL;
+      _resetSolanaChain();
+    }
+  });
+
   it('T-PRE-05 · la cuenta de token es una SEÑAL, no un guard: avisa y NO apaga', async () => {
     // DT-C3: el crédito se mide SUMANDO sobre todas las cuentas del destinatario, así
     // que dos cuentas son un caso que el código maneja bien. Apagar el rail por eso

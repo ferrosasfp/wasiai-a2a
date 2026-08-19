@@ -164,7 +164,12 @@ function warnOnFallbackShape(): void {
     );
     return;
   }
-  if (fallback === getSolanaRpcUrl()) {
+  // ⚠️ LAS DOS PUNTAS SE TRIMEAN (CR de WKH-314, MNR-6). `fallback` ya viene trimeado
+  // de arriba y `getSolanaRpcUrl()` NO trimea, así que `"https://x "` contra
+  // `"https://x"` no disparaba el aviso: el operador quedaba con dos veces el mismo
+  // nodo creyendo que tenía dos opiniones. El aviso no apaga nada; lo que no puede es
+  // medir otra cosa que la que dice medir.
+  if (fallback === getSolanaRpcUrl().trim()) {
     log.warn(
       'solana inbound preflight: SOLANA_RPC_URL_FALLBACK is the SAME url as SOLANA_RPC_URL. Two calls to the same node are not two opinions — DT-10 buys nothing in this configuration. Point it at a different devnet provider.',
     );

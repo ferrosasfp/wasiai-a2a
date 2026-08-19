@@ -127,8 +127,13 @@ describe('WKH-314 · combinador de dos proveedores', () => {
 
   it('T-UNK-08b · dos negativas MEDIDAS empatan, y las dos deniegan', () => {
     // `terms_mismatch` y `landed_failed` comparten tier: el orden decide cuál MENSAJE
-    // sale, y ninguno de los dos concede. Lo que se fija acá es la propiedad que
-    // importa (nunca `finalized_ok`), no cuál de los dos strings gana.
+    // sale, y ninguno de los dos concede. La propiedad que importa es que nunca sale
+    // `finalized_ok`; el desempate por el PRIMARIO (`<=` en `combineInboundPresence`) es
+    // secundario y sin embargo las dos aserciones de abajo lo fijan, así que este test
+    // es más estricto de lo que la propiedad pide: cambiar el `<=` por `<` lo pone rojo
+    // aunque las dos ramas sigan denegando (CR de WKH-314, MNR-5). Se deja así a
+    // propósito —un desempate que cambia solo es un cambio de mensaje no declarado—,
+    // pero queda escrito cuál de las dos cosas se está midiendo en cada línea.
     expect(combineInboundPresence(MISMATCH, FAILED).state).toBe(
       'terms_mismatch',
     );
