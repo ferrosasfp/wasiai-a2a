@@ -58,6 +58,7 @@ function envelopeOf(c: ReturnType<typeof issued>) {
     mint: c.mint,
     issuedAt: c.issuedAt,
     expiresAt: c.expiresAt,
+    nonce: c.nonce,
   };
 }
 
@@ -80,21 +81,45 @@ describe('WKH-314 · challenge Solana del 402', () => {
     // `expiresAt` es ABSOLUTO (un instante), no una duración.
     expect(c.expiresAt).toBe(NOW + SOLANA_CHALLENGE_TTL_SECONDS);
     expect(c.issuedAt).toBe(NOW);
+    // El nonce se PUBLICA (el pagador tiene que eco-repetirlo) y es base58 de 16 bytes.
+    expect(base58DecodeToBytes(c.nonce)).toHaveLength(16);
   });
 
   it('T-CHAL-02 · la referencia cambia entre dos 402 emitidos en instantes distintos', () => {
     expect(issued(NOW).reference).not.toBe(issued(NOW + 1).reference);
   });
 
-  it('T-CHAL-02b · DECLARADO: dos 402 del mismo segundo, recurso y monto dan la MISMA referencia', () => {
-    // No es un descuido: el material del MAC es exactamente
-    // `resource|payTo|amount|mint|caip2|issuedAt|expiresAt` y no lleva entropía por
-    // request. La consecuencia está medida y es inofensiva: la referencia ata la
-    // transacción al CHALLENGE, no al pagador, y el uso único vive en la FIRMA (que es
-    // distinta por definición para dos pagos distintos). Dos pagadores que reciban la
-    // misma referencia consumen dos filas distintas y los dos reciben servicio, que es
-    // lo correcto: los dos pagaron.
-    expect(issued(NOW).reference).toBe(issued(NOW).reference);
+  it('T-CHAL-02b 💰 · dos 402 del MISMO segundo, recurso y monto dan referencias DISTINTAS', () => {
+    // ⚠️ ESTE TEST AFIRMABA LO CONTRARIO, Y LA RAZON QUE LO SOSTENIA ERA FALSA. Decía
+    // que la colisión era "inofensiva porque el uso único vive en la FIRMA". El AR de
+    // WKH-314 (BLQ-ALTO-2) midió que **el ledger de uso único no puede distinguir a los
+    // dos callers**: los cinco términos que compara el store
+    // —`reference, resource, pay_to, amount_atomic, mint`— salen byte-idénticos, y la
+    // firma de la víctima es pública desde que aterriza. El atacante presentaba la firma
+    // ajena con SU sobre y se llevaba el servicio; la víctima recibía `PROOF_REPLAY`
+    // sobre USDC que ya había transferido.
+    // Por eso el material del MAC lleva un `nonce` por emisión.
+    const a = issued(NOW);
+    const b = issued(NOW);
+    // La PRECONDICION: todo lo demás es idéntico, medido y no supuesto.
+    expect(a.issuedAt).toBe(b.issuedAt);
+    expect(a.maxAmountRequired).toBe(b.maxAmountRequired);
+    expect(a.payTo).toBe(b.payTo);
+    expect(a.mint).toBe(b.mint);
+    expect(a.resource).toBe(b.resource);
+    // Y lo único que cambia, que es lo que rompe el ataque.
+    expect(a.nonce).not.toBe(b.nonce);
+    expect(a.reference).not.toBe(b.reference);
+  });
+
+  it('T-CHAL-02c · el `nonce` tiene entropía de verdad: 200 emisiones, 200 valores', () => {
+    // Un "nonce" derivado del reloj, de un contador o de `Math.random` pasaría T-CHAL-02b
+    // y seguiría siendo reproducible por el atacante. Acá se mide la propiedad que
+    // importa: que no se repita, y que no sea el instante.
+    const nonces = new Set<string>();
+    for (let i = 0; i < 200; i++) nonces.add(issued(NOW).nonce);
+    expect(nonces.size).toBe(200);
+    expect([...nonces].every((n) => !n.includes(String(NOW)))).toBe(true);
   });
 
   it('T-CHAL-03 · el monto entra al MAC: dos montos distintos ⇒ referencias distintas', () => {
@@ -213,6 +238,9 @@ describe('WKH-314 · challenge Solana del 402', () => {
       { ...envelopeOf(c), amountAtomic: 1000000 },
       { ...envelopeOf(c), issuedAt: '1700000000' },
       { ...envelopeOf(c), expiresAt: undefined },
+      // El `nonce` es tan obligatorio como el resto: sin él no hay nada que re-derivar.
+      { ...envelopeOf(c), nonce: undefined },
+      { ...envelopeOf(c), nonce: 7 },
     ]) {
       const v = verifySolanaChallengeReference({
         presented: broken as never,

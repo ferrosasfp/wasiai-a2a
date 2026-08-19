@@ -115,7 +115,12 @@ vi.mock('../adapters/solana/inbound-preflight.js', () => ({
   warmSolanaInboundPreflight: vi.fn(),
 }));
 
-const probeMock = vi.hoisted(() => vi.fn(async (): Promise<Loose> => ({})));
+/** El doble del RPC declara sus DOS parámetros a propósito: T-STEAL-02 modela una
+ * cadena que sólo conoce la referencia que de verdad viaja en la transacción, y sin el
+ * `args` declarado `mockImplementation` no compila. */
+const probeMock = vi.hoisted(() =>
+  vi.fn(async (_connection?: unknown, _args?: Loose): Promise<Loose> => ({})),
+);
 vi.mock('../adapters/solana/inbound-presence.js', () => ({
   probeInboundProof: probeMock,
 }));
@@ -167,7 +172,9 @@ import {
   initAdapters,
 } from '../adapters/registry.js';
 import { base58Encode } from '../adapters/solana/base58.js';
+import { _resetSolanaChain } from '../adapters/solana/chain.js';
 import { registerErrorBoundary } from './error-boundary.js';
+import { createTimeoutHandler } from './timeout.js';
 import { requirePayment } from './x402.js';
 
 const MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
@@ -188,7 +195,13 @@ interface Accepts {
   payTo: string;
   asset: string;
   resource: string;
-  extra: { reference: string; issuedAt: number; expiresAt: number };
+  extra: {
+    reference: string;
+    issuedAt: number;
+    expiresAt: number;
+    /** Entropía por EMISION (fix BLQ-ALTO-2). El pagador la eco-repite. */
+    nonce?: string;
+  };
 }
 interface Body402 {
   error: string;
@@ -208,13 +221,45 @@ function buildApp(): ReturnType<typeof Fastify> {
   return app;
 }
 
+/**
+ * Un app cuya ruta calcula el precio DESDE EL BODY, que es lo que `/compose` hace en
+ * producción: un preHandler setea `request.x402ChallengeAmountUsd` (`x402.ts:1030-1033`)
+ * ANTES de `requirePayment`. El `resource` sigue siendo `/charged` a secas, así que dos
+ * requests con precios distintos comparten recurso — exactamente la condición de
+ * BLQ-ALTO-1.
+ */
+function buildPricedApp(): ReturnType<typeof Fastify> {
+  const app = Fastify();
+  registerErrorBoundary(app);
+  app.post(
+    '/charged',
+    {
+      preHandler: [
+        async (req: FastifyRequest) => {
+          const body = req.body as { priceUsd?: number } | undefined;
+          if (typeof body?.priceUsd === 'number') {
+            req.x402ChallengeAmountUsd = body.priceUsd;
+          }
+        },
+        ...requirePayment({ description: 'test' }),
+      ],
+    },
+    async (_req: FastifyRequest, reply: FastifyReply) =>
+      reply.send({ ok: true }),
+  );
+  return app;
+}
+
 /** El 402 inicial: de acá salen la referencia y la ventana REALES. */
-async function getChallenge(app: ReturnType<typeof Fastify>): Promise<Accepts> {
+async function getChallenge(
+  app: ReturnType<typeof Fastify>,
+  payload: Record<string, unknown> = {},
+): Promise<Accepts> {
   const res = await app.inject({
     method: 'POST',
     url: '/charged',
     headers: { 'x-payment-chain': 'solana-devnet' },
-    payload: {},
+    payload,
   });
   const body = res.json() as Body402;
   const first = body.accepts[0];
@@ -236,6 +281,7 @@ function envelope(
         mint: c.asset,
         issuedAt: c.extra.issuedAt,
         expiresAt: c.extra.expiresAt,
+        nonce: c.extra.nonce,
         ...over,
       },
       signature,
@@ -247,6 +293,7 @@ function envelope(
 async function present(
   app: ReturnType<typeof Fastify>,
   header: string,
+  payload: Record<string, unknown> = {},
 ): Promise<{
   status: number;
   body: Body402 & { ok?: boolean };
@@ -256,7 +303,7 @@ async function present(
     method: 'POST',
     url: '/charged',
     headers: { 'x-payment-chain': 'solana-devnet', 'x-payment': header },
-    payload: {},
+    payload,
   });
   const out: {
     status: number;
@@ -598,7 +645,11 @@ describe('WKH-314 · los rechazos con su motivo exacto (AC-4, AC-5, AC-6)', () =
     expect(res.body.error_code).toBe('X402_SETTLE_UNKNOWN');
   });
 
-  it('T-ABSX-01 💰 · dos nodos que buscaron y no la conocen ⇒ PROOF_ABSENT, reintentable', async () => {
+  it('T-ABSX-01 💰 · un nodo que buscó y no la conoce ⇒ PROOF_ABSENT, y el mensaje dice UNO', async () => {
+    // ⚠️ ESTE TEST SE LLAMABA "dos nodos" Y MEDIA UNO: `SOLANA_RPC_URL_FALLBACK` está
+    // borrada en el `beforeEach`, así que `combineInboundPresence` devuelve el veredicto
+    // del primario tal cual. El mensaje afirmaba "two independent nodes searched" igual
+    // (AR de WKH-314, BLQ-BAJO-1). El gemelo de dos nodos es T-ABSX-02.
     probeMock.mockResolvedValue({
       presence: { state: 'absent' },
       binding: { state: 'unknown', detail: 'x' },
@@ -608,6 +659,30 @@ describe('WKH-314 · los rechazos con su motivo exacto (AC-4, AC-5, AC-6)', () =
     const res = await present(app, envelope(c, signatureFixture()));
     expect(res.body.error_code).toBe('X402_SOLANA_PROOF_ABSENT');
     expect(res.retryAfter).toBeDefined();
+    expect(res.body.error).toContain('one node searched');
+    expect(res.body.error).not.toContain('two independent nodes');
+    expect(probeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-ABSX-02 💰 · GEMELO: con segundo proveedor y los DOS `absent`, ahí sí son dos', async () => {
+    process.env.SOLANA_RPC_URL_FALLBACK = 'https://devnet.example/rpc';
+    _resetSolanaChain();
+    try {
+      probeMock.mockResolvedValue({
+        presence: { state: 'absent' },
+        binding: { state: 'unknown', detail: 'x' },
+      });
+      const app = buildApp();
+      const c = await getChallenge(app);
+      const res = await present(app, envelope(c, signatureFixture()));
+      expect(res.body.error_code).toBe('X402_SOLANA_PROOF_ABSENT');
+      expect(res.body.error).toContain('two independent nodes');
+      // La prueba de que de verdad se le preguntó a los dos.
+      expect(probeMock).toHaveBeenCalledTimes(2);
+    } finally {
+      delete process.env.SOLANA_RPC_URL_FALLBACK;
+      _resetSolanaChain();
+    }
   });
 
   it('T-FINAL-03 💰 · `confirmed` pero no `finalized` ⇒ NOT_FINALIZED, con Retry-After y SIN consumir', async () => {
@@ -795,5 +870,235 @@ describe('WKH-314 · las invariantes transversales', () => {
     // El gateway es TESTIGO, no tesorero: no firma nada en este camino.
     expect(operatorKeypairSpy).not.toHaveBeenCalled();
     expect(sendRawTransactionSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * ─── LOS DOS AGUJEROS QUE EL AR ENCONTRO, Y QUE NINGUN MUTANTE PODIA CAZAR ───
+ *
+ * MNR-3 del AR, textual: *"los 29 `it()` derivan siempre el sobre del challenge del
+ * mismo request. No hay un test con sobre emitido a **otro precio**, ni con **dos
+ * callers** compartiendo referencia. Los 20 mutantes muertos no lo tocan porque ningún
+ * mutante puede introducir un test que no existe."*
+ *
+ * Los dos de acá son exactamente esos dos, y por eso NO derivan el sobre del challenge
+ * del request que atacan:
+ *   · T-PRICE-01 emite el sobre en un request BARATO y lo presenta en uno CARO.
+ *   · T-STEAL-01/02 emiten DOS challenges con términos idénticos en el MISMO segundo.
+ */
+describe('WKH-314 · el sobre viejo y el sobre ajeno (fix-pack del AR)', () => {
+  it('T-PRICE-01 💰 · un sobre emitido a OTRO precio no paga ESTE request', async () => {
+    // BLQ-ALTO-1. El precio del mismo `resource` varía por request (el body manda),
+    // pero el MAC sólo prueba "este sobre lo emitimos nosotros", NO "este es el precio
+    // de ahora". Sin el guard, 1 unidad atómica (0,000001 USDC) compra un pipeline de
+    // 50 USDC, repetible, y sin reembolso inbound posible.
+    const app = buildPricedApp();
+    const cheap = await getChallenge(app, { priceUsd: 0.000001 });
+    expect(cheap.maxAmountRequired).toBe('1');
+
+    // El atacante transfirió DE VERDAD esa unidad atómica: la cadena lo confirma.
+    probeMock.mockResolvedValue({
+      presence: { state: 'finalized_ok', creditedAtomic: '1' },
+      binding: { state: 'bound', blockTime: cheap.extra.issuedAt + 1 },
+    });
+    const res = await present(app, envelope(cheap, signatureFixture(7)), {
+      priceUsd: 50,
+    });
+
+    expect(res.status).toBe(402);
+    expect(res.body.error_code).toBe('X402_SOLANA_AMOUNT_SHORT');
+    // Y el precio de ESTE request es el que manda: el sobre traía '1'.
+    expect(res.body.accepts[0]?.maxAmountRequired).toBe('50000000');
+    // Ni se gastó la cadena ni se cobró nada: el guard corta ANTES de P3.
+    expect(probeMock).not.toHaveBeenCalled();
+    expect(peekMock).not.toHaveBeenCalled();
+    expect(consumeMock).not.toHaveBeenCalled();
+  });
+
+  it('T-PRICE-02 · el sobre del MISMO precio sigue cobrando (el guard no deniega todo)', async () => {
+    // El control positivo del anterior: un guard que rechaza cualquier sobre también
+    // pondría T-PRICE-01 en verde.
+    const app = buildPricedApp();
+    const c = await getChallenge(app, { priceUsd: 50 });
+    expect(c.maxAmountRequired).toBe('50000000');
+    const res = await present(app, envelope(c, signatureFixture(7)), {
+      priceUsd: 50,
+    });
+    expect(res.status).toBe(200);
+    expect(consumeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-PRICE-03 · pagar de MAS sigue concediendo (`>=`, nunca `!==`)', async () => {
+    // Nadie paga de más por error y se queda sin servicio. Es la misma postura que el
+    // guard EVM de `x402.ts:1217` (`BigInt(auth.value) < BigInt(requiredAmount)`).
+    const app = buildPricedApp();
+    const expensive = await getChallenge(app, { priceUsd: 50 });
+    const res = await present(app, envelope(expensive, signatureFixture(7)), {
+      priceUsd: 1,
+    });
+    expect(res.status).toBe(200);
+    expect(consumeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-PRICE-04 💰 · un sobre emitido ANTES de rotar la wallet (o el mint) no cobra', async () => {
+    // La otra mitad de BLQ-ALTO-1, y la que menos se ve: el MAC firma los términos que
+    // el servidor emitió EN SU MOMENTO. Rotar `SOLANA_X402_INBOUND_PAY_TO` (o el mint)
+    // dejaba 900 s de ventana en la que un sobre viejo seguía mandando el dinero a la
+    // dirección anterior y el gateway lo aceptaba como pago.
+    const app = buildApp();
+    const beforeRotation = await getChallenge(app);
+
+    const NEW_WALLET = Keypair.generate().publicKey.toBase58();
+    process.env.SOLANA_X402_INBOUND_PAY_TO = NEW_WALLET;
+    const rotated = await present(
+      app,
+      envelope(beforeRotation, signatureFixture(11)),
+    );
+    expect(rotated.status).toBe(402);
+    expect(rotated.body.error_code).toBe('X402_SOLANA_TERMS_MISMATCH');
+    expect(consumeMock).not.toHaveBeenCalled();
+
+    // Y el mint, por el mismo camino.
+    process.env.SOLANA_X402_INBOUND_PAY_TO = PAY_TO;
+    const beforeMintChange = await getChallenge(app);
+    process.env.SOLANA_USDC_MINT_DEVNET =
+      Keypair.generate().publicKey.toBase58();
+    const mintChanged = await present(
+      app,
+      envelope(beforeMintChange, signatureFixture(12)),
+    );
+    expect(mintChanged.body.error_code).toBe('X402_SOLANA_TERMS_MISMATCH');
+    expect(consumeMock).not.toHaveBeenCalled();
+    // GEMELO POSITIVO: sin rotación, el mismo sobre cobra.
+    process.env.SOLANA_USDC_MINT_DEVNET = MINT;
+    const c = await getChallenge(app);
+    expect((await present(app, envelope(c, signatureFixture(13)))).status).toBe(
+      200,
+    );
+  });
+
+  it('T-STEAL-01 💰 · dos callers, mismos términos, MISMO segundo ⇒ referencias DISTINTAS', async () => {
+    // BLQ-ALTO-2. El reloj se congela para MEDIR la premisa del ataque en vez de
+    // esperar que ocurra: sin entropía por emisión, `issuedAt` idéntico ⇒ material del
+    // MAC idéntico ⇒ referencia idéntica.
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    const app = buildApp();
+    const victim = await getChallenge(app);
+    const attacker = await getChallenge(app);
+    // La PRECONDICION del ataque, medida y no supuesta.
+    expect(attacker.extra.issuedAt).toBe(victim.extra.issuedAt);
+    expect(attacker.maxAmountRequired).toBe(victim.maxAmountRequired);
+    expect(attacker.payTo).toBe(victim.payTo);
+    expect(attacker.asset).toBe(victim.asset);
+    // Y lo que NO puede pasar aun así.
+    expect(attacker.extra.reference).not.toBe(victim.extra.reference);
+  });
+
+  it('T-STEAL-02 💰 · el sobre del ATACANTE no cobra la transferencia de la VICTIMA', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    const app = buildApp();
+    const victim = await getChallenge(app);
+    const attacker = await getChallenge(app);
+    const victimSignature = signatureFixture(21);
+
+    // La cadena modela la transferencia REAL de la víctima: la tx lleva la referencia
+    // de la víctima y ninguna otra. Es lo único que el atacante no puede copiar — la
+    // firma sí es pública desde que aterriza.
+    probeMock.mockImplementation(
+      async (_connection?: unknown, args?: Loose): Promise<Loose> =>
+        args?.reference === victim.extra.reference
+          ? FINALIZED_OK
+          : {
+              presence: { state: 'finalized_ok', creditedAtomic: '1000000' },
+              binding: {
+                state: 'reference_absent',
+                detail: 'the reference is not among the accounts',
+              },
+            },
+    );
+
+    const stolen = await present(app, envelope(attacker, victimSignature));
+    expect(stolen.status).toBe(402);
+    expect(stolen.body.error_code).toBe('X402_SOLANA_REFERENCE_MISMATCH');
+    expect(consumeMock).not.toHaveBeenCalled();
+
+    // Y la víctima sigue pudiendo cobrar SU pago: la prueba no se consumió.
+    const own = await present(app, envelope(victim, victimSignature));
+    expect(own.status).toBe(200);
+    expect(consumeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-504-01 💰 · si el 504 ya salió, la prueba NO se quema', async () => {
+    // BLQ-MED-2. `createTimeoutHandler` manda el 504 desde FUERA del lifecycle: puede
+    // salir mientras el handler está colgado del peek o del RPC. Sin el guard, el
+    // handler seguía caminando hasta P7 y CONSUMIA la prueba — el pagador transfirió
+    // USDC, recibió un 504, y su reintento le contesta `PROOF_REPLAY`. Pagó y no tiene
+    // nada.
+    //
+    // La carrera se hace DETERMINISTA con un peek que no resuelve hasta que el test lo
+    // suelta: el 504 sale seguro ANTES, no "probablemente antes".
+    let releasePeek: () => void = () => {};
+    const peekBlocked = new Promise<void>((resolve) => {
+      releasePeek = resolve;
+    });
+    peekMock.mockImplementation(async () => {
+      await peekBlocked;
+      return { state: 'none' };
+    });
+
+    const app = Fastify();
+    registerErrorBoundary(app);
+    app.post(
+      '/charged',
+      {
+        preHandler: [
+          createTimeoutHandler(5),
+          ...requirePayment({ description: 'test' }),
+        ],
+      },
+      async (_req: FastifyRequest, reply: FastifyReply) =>
+        reply.send({ ok: true }),
+    );
+
+    // El challenge se pide con el peek ya liberado (el 402 inicial no lo toca).
+    const c = await getChallenge(app);
+    const injected = app.inject({
+      method: 'POST',
+      url: '/charged',
+      headers: {
+        'x-payment-chain': 'solana-devnet',
+        'x-payment': envelope(c, signatureFixture(31)),
+      },
+      payload: {},
+    });
+    const res = await injected;
+    expect(res.statusCode).toBe(504);
+
+    // Ahora el handler sigue caminando. Se lo deja terminar y se mide qué hizo.
+    releasePeek();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(peekMock).toHaveBeenCalled();
+    // LA aserción: la prueba sigue gastable.
+    expect(consumeMock).not.toHaveBeenCalled();
+  });
+
+  it('T-STEAL-03 · el sobre sin `nonce` (o con otro) NO re-deriva, y cada caso con su código', async () => {
+    // Los dos son denegaciones sin consumir, pero NO son el mismo error: sin el campo
+    // el sobre no se puede ni re-derivar (malformed); con otro valor sí se re-deriva y
+    // da otra referencia (mismatch). Colapsarlos mandaría al pagador a arreglar la cosa
+    // equivocada.
+    const app = buildApp();
+    const c = await getChallenge(app);
+    const cases: [Record<string, unknown>, string][] = [
+      [{ nonce: undefined }, 'X402_SOLANA_PROOF_MALFORMED'],
+      [{ nonce: 'otro' }, 'X402_SOLANA_REFERENCE_MISMATCH'],
+    ];
+    for (const [over, code] of cases) {
+      const res = await present(app, envelope(c, signatureFixture(5), over));
+      expect(res.status).toBe(402);
+      expect(res.body.error_code).toBe(code);
+    }
+    expect(probeMock).not.toHaveBeenCalled();
+    expect(consumeMock).not.toHaveBeenCalled();
   });
 });

@@ -113,3 +113,65 @@ la próxima HU no los repita.
   declarado** en los dobles cuyos argumentos se assertean.
 - **Aplicar en**: vitest verde **no** implica `tsc` verde. Las tres puertas, siempre, y
   por separado.
+
+---
+
+## Fix-pack del AR (2026-08-19)
+
+### [2026-08-19] FIX — `cat`/`sed` bajo el hook `rtk` ELIDEN líneas y las citas se leen mal
+
+- **Error**: `cat -n src/adapters/solana/chain.ts` numeró 243 líneas; `wc -l` decía 303.
+  Con esa numeración, `looksLikeMainnetRpc` "estaba" en la 203 y el AR la citaba en la
+  261. Casi cierro el hallazgo diciendo que la cita del AR estaba mal.
+- **Causa raíz**: el hook reescribe `cat`/`sed` y el resultado colapsa líneas (las
+  vacías, entre otras). El comando **sale 0**: la pérdida es silenciosa, igual que la
+  del `git diff` truncado que ya estaba documentada en memoria.
+- **Fix**: `/usr/bin/cat -n` y `/usr/bin/sed` con ruta absoluta, siempre. El control que
+  lo detecta: `wc -l` contra el último número que imprime el visor. Si no coinciden, lo
+  que estás leyendo no es el archivo.
+- **Aplicar en**: TODA verificación de un `archivo:línea` — citas del AR, del CR, del F4,
+  y `test/cited-lines-guard.citations.ts`. Un número de línea leído con la herramienta
+  equivocada convierte una cita correcta en un falso hallazgo, y al revés.
+
+### [2026-08-19] FIX — El test que documentaba el bug con su razón escrita
+
+- **Error**: `T-CHAL-02b` afirmaba `expect(issued(NOW).reference).toBe(issued(NOW).reference)`
+  con un comentario de siete líneas explicando por qué la colisión era *"inofensiva
+  porque el uso único vive en la FIRMA"*. Era el agujero BLQ-ALTO-2, verde y declarado.
+- **Causa raíz**: la razón se escribió sin ejecutar el escenario del atacante. El uso
+  único **sí** vive en la firma, y esa parte era cierta; lo que no se probó nunca es que
+  el store pudiera distinguir a los dos callers — no puede: los cinco términos que
+  compara salen byte-idénticos.
+- **Fix**: entropía por emisión dentro del MAC, y el test invertido con la precondición
+  MEDIDA (`issuedAt`, monto, `payTo`, `mint` y `resource` iguales) antes de la aserción.
+- **Aplicar en**: cualquier test cuyo nombre empiece con "DECLARADO" o "inofensivo". Un
+  comentario que explica por qué algo no importa es un lugar donde **nadie corrió el
+  escenario**. La regla operativa: si la razón dice "X protege esto", escribí el test
+  que ataca **con X puesto**.
+
+### [2026-08-19] FIX — Un mutante que ningún mutante podía cazar (MNR-3)
+
+- **Error**: el F3 reportó 20/20 mutantes muertos y los dos BLQ-ALTO pasaron igual.
+- **Causa raíz**: los 29 `it()` derivaban el sobre del challenge del **mismo request**.
+  Ningún mutante puede introducir un test que no existe, así que un barrido de mutación
+  sobre esa suite mide la robustez de lo que ya se ejercita y **no dice nada** sobre lo
+  que no.
+- **Fix**: los dos tests se escribieron ANTES del arreglo y se midió que iban rojos
+  (T-PRICE-01: `expected 200 to be 402`; T-STEAL-01: dos referencias idénticas literales;
+  T-STEAL-02: `expected 200 to be 402` con la firma de la víctima).
+- **Aplicar en**: antes de reportar un score de mutación, listar qué INPUTS no aparecen
+  en ningún fixture de la suite. Acá eran dos: un sobre de otro precio y dos callers. El
+  score no los podía nombrar.
+
+### [2026-08-19] FIX — El fixture positivo también se rompe al agregar un campo al MAC
+
+- **Error**: agregar `nonce` al material del HMAC dejó `tsc` con 8 errores en
+  `solana-x402-challenge.test.ts`, todos en el helper `envelopeOf`.
+- **Causa raíz**: el helper construye el sobre a mano, campo por campo. Es lo correcto
+  (un sobre derivado del tipo no probaría nada), pero significa que **todo campo nuevo
+  del MAC obliga a tocar el helper**, y si el campo fuera opcional el compilador no
+  avisaría: los tests seguirían verdes probando un sobre viejo.
+- **Fix**: el campo entra al tipo `presented` como **obligatorio** (`nonce: unknown`, no
+  `nonce?: unknown`), así el compilador enumera todos los sitios.
+- **Aplicar en**: cualquier ampliación de un material firmado. Campo nuevo ⇒ obligatorio
+  en el tipo de verificación, aunque después el guard lo rechace por forma.

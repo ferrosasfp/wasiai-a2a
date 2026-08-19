@@ -263,6 +263,32 @@ function looksLikeMainnetRpc(url: string): boolean {
 }
 
 /**
+ * ¿El RPC **PRIMARIO** se declara de mainnet? Devuelve el motivo, o `null` si no.
+ *
+ * ⚠️ POR QUE EXISTE, Y POR QUE NO VIVE EN `getSolanaConnection()` (AR de WKH-314,
+ * BLQ-MED-3). `looksLikeMainnetRpc` tenía UN solo call-site —el fallback, que es
+ * OPCIONAL— mientras `SOLANA_RPC_URL` (obligatoria, la que construye la `Connection`
+ * primaria en `getSolanaConnection`) no se validaba en ningún lado. Con
+ * `SOLANA_RPC_URL=https://api.mainnet-beta.solana.com` el preflight pasaba, el rail
+ * arrancaba, y **toda la verificación de cobros se hacía contra mainnet**.
+ *
+ * No se mete el chequeo dentro de `getSolanaConnection()` a propósito: esa `Connection`
+ * la comparte el leg de SALIDA (`payment.ts`, `facilitator-settle.ts`), que es
+ * money-path recién shipeado y no se toca en esta HU. Hacerla lanzar sería cambiarle el
+ * comportamiento a un camino que nadie pidió tocar. El guard lo aplica **quien tiene la
+ * política**: el preflight del cobro inbound (`inbound-preflight.ts`), fail-closed.
+ *
+ * ⚠️ Y ACOTA, NO CIERRA — igual que `looksLikeMainnetRpc`, del que es un envoltorio: un
+ * endpoint de mainnet con hostname opaco (la red en el api-key) pasa. Lo que esta
+ * función afirma es *"la URL no se DECLARA de mainnet"*, no *"la URL es devnet"*.
+ */
+export function inboundPrimaryRpcMainnetViolation(): string | null {
+  const url = getSolanaRpcUrl();
+  if (!looksLikeMainnetRpc(url)) return null;
+  return 'SOLANA_RPC_URL looks like a MAINNET endpoint — this rail is devnet-only (CD-5). It is the PRIMARY provider: every inbound payment would be verified against another ledger, so a signature that never existed on devnet could be honoured (or a real one denied). Point SOLANA_RPC_URL at a devnet endpoint.';
+}
+
+/**
  * El SEGUNDO proveedor de RPC (DT-10), cacheado por proceso. `null` cuando no hay
  * `SOLANA_RPC_URL_FALLBACK` configurada.
  *

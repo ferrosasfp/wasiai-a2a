@@ -540,15 +540,21 @@ que importa: **con la config incompleta el valor publicado es `false` y el camin
 ### 8.2 El sobre y el challenge
 
 **402 (respuesta):** `network` = CAIP-2 (`solana:<genesis>`), `mint` base58, `maxAmountRequired` en
-unidades atómicas del mint, `payTo` base58, `reference` base58 (32 bytes), `expiresAt` **absoluto**.
+unidades atómicas del mint, `payTo` base58, `reference` base58 (32 bytes), `expiresAt` **absoluto**,
+`extra.nonce` base58 (entropía por emisión).
 **El monto sale de UNA sola resolución** reusada por el challenge y por el binding (CD-11), igual que
 `resolvePaymentRequirements` hace en EVM.
+⚠️ **Esa frase fue FALSA hasta el fix-pack del AR** (BLQ-ALTO-1) y conviene que se lea con lo que la
+sostiene: había DOS expresiones del monto —`requiredAmount`, que sólo alimentaba el challenge, y
+`presented.amountAtomic`, que salía del sobre del cliente y era el que viajaba hasta la cadena—, y
+divergían. Hoy el sobre se compara contra `requiredAmount` (monto, `payTo` y `mint`) en P2b, antes del
+peek, con el mismo `>=` en unidades atómicas que usa la rama EVM en `x402.ts:1226`.
 
 **X-PAYMENT (request):** el decoder **no se toca**. `decodeXPayment` (`src/middleware/x402.ts:359-382`)
 sólo exige `authorization` objeto y `signature` string:
 
 ```
-{ authorization: { reference, payTo, amountAtomic, mint, issuedAt, expiresAt },
+{ authorization: { reference, payTo, amountAtomic, mint, issuedAt, expiresAt, nonce },
   signature: '<txid base58>',
   network: 'solana:<genesis>' }
 ```
@@ -752,8 +758,16 @@ Solana, listo". **No es así.** Cada línea de acá es falsable con un comando.
    `solanaPayoutRoute: {"state":"rail_off"}` (2026-08-19). Esta HU **no lo enciende** y no toca esa
    bandera: es del leg de **salida** (`src/adapters/solana/facilitator-settle.ts`).
 
-3. **NO hay mainnet.** CD-5, sin slug `-mainnet`, sin RPC de mainnet, y la validación anti-mainnet del
-   fallback falla cerrada.
+3. **NO hay mainnet, y ahora hay mecanismo para las DOS variables de RPC.** CD-5, sin slug `-mainnet`.
+   La validación anti-mainnet existía **sólo para el fallback**, que es opcional, mientras `SOLANA_RPC_URL`
+   —obligatoria, y la que construye la `Connection` primaria— no se validaba en ningún lado: con ella
+   apuntando a mainnet el preflight pasaba y todos los cobros se verificaban contra otro ledger (AR,
+   BLQ-MED-3). El preflight inbound ahora falla cerrado con `primary_rpc_is_mainnet`.
+   *Falsable con*: `SOLANA_RPC_URL=https://api.mainnet-beta.solana.com` + las 4 envs del inbound ⇒ el
+   preflight devuelve `{ok:false, failure:'primary_rpc_is_mainnet'}` (T-PRE-04c) y el rail queda apagado.
+   ⚠️ **Y ACOTA, NO CIERRA**: el guard mira si la URL se DECLARA de mainnet. Un endpoint de mainnet con
+   hostname opaco (la red dentro del api-key) pasa los dos guards, y ninguna de estas frases afirma lo
+   contrario.
 
 4. **El camino PREPAGO (a2a-key) sigue sin pasar por acá.** Con `x-a2a-key` presente,
    `requirePaymentOrA2AKey` **nunca** delega en este handler (está escrito en `x402.ts:476-478`), y

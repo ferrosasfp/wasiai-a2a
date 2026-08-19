@@ -73,6 +73,56 @@ const INBOUND_TERMS_READ = 'confirmed' as const;
 /** El RPC de Solana manda SIEMPRE un entero decimal en base 10 como string. */
 const ATOMIC_AMOUNT_RE = /^\d+$/;
 
+/**
+ * Cuánto se espera a UNA llamada al RPC antes de llamarla `unknown`.
+ *
+ * ⚠️ POR QUE EXISTE (AR de WKH-314, BLQ-MED-2). Las dos llamadas de acá corren EN SERIE
+ * y no tenían techo. El 504 de `createTimeoutHandler` (`middleware/timeout.ts`) sale
+ * desde FUERA del lifecycle: si vence mientras estamos colgados del nodo, la respuesta
+ * ya salió y el handler sigue caminando hasta **consumir la prueba** — el pagador
+ * transfirió USDC, recibió un 504, y su reintento le contesta `PROOF_REPLAY`. El techo
+ * de acá es la mitad de ese arreglo; la otra mitad es el `if (reply.sent) return` antes
+ * de P7. Ninguna de las dos sola alcanza.
+ *
+ * ⚠️ Y ES UN TECHO DE ESPERA, NO DE TRABAJO — y decirlo importa. `Promise.race` NO
+ * cancela el `fetch` del SDK: el nodo va a contestar igual y esa respuesta se descarta.
+ * Lo que el techo garantiza es que este camino no se queda esperándola. No se usa
+ * `AbortSignal` porque `Connection` de `@solana/web3.js` v1 no expone uno por llamada.
+ *
+ * Constante de módulo y NO una env, por el mismo criterio que `INBOUND_FINALITY`: una
+ * env capaz de estirar esto es una env capaz de reabrir el agujero. 8 s × 2 llamadas en
+ * serie × 2 proveedores deja el peor caso por debajo de los 60 s de `/compose`.
+ */
+const INBOUND_RPC_TIMEOUT_MS = 8_000;
+
+/** Marca interna del vencimiento. No se exporta: nunca sale de este archivo. */
+const RPC_TIMED_OUT = Symbol('rpc-timed-out');
+
+/**
+ * Le pone techo a UNA llamada al RPC. Devuelve el símbolo `RPC_TIMED_OUT` cuando vence.
+ *
+ * El `clearTimeout` en el `finally` no es cosmético: sin él, cada llamada rápida
+ * dejaría un timer vivo hasta 8 s (y en los tests, el proceso sin salir).
+ */
+async function withRpcTimeout<T>(
+  work: Promise<T>,
+): Promise<T | typeof RPC_TIMED_OUT> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<typeof RPC_TIMED_OUT>((resolve) => {
+        timer = setTimeout(
+          () => resolve(RPC_TIMED_OUT),
+          INBOUND_RPC_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -122,9 +172,18 @@ async function probeInboundLanding(
     ReturnType<typeof connection.getSignatureStatuses>
   > | null = null;
   try {
-    statuses = await connection.getSignatureStatuses([signature], {
-      searchTransactionHistory: true,
-    });
+    const raced = await withRpcTimeout(
+      connection.getSignatureStatuses([signature], {
+        searchTransactionHistory: true,
+      }),
+    );
+    if (raced === RPC_TIMED_OUT) {
+      return {
+        state: 'unknown',
+        detail: `getSignatureStatuses did not answer within ${INBOUND_RPC_TIMEOUT_MS}ms`,
+      };
+    }
+    statuses = raced;
   } catch (err) {
     return { state: 'unknown', detail: errText(err) };
   }
@@ -366,10 +425,22 @@ export async function probeInboundProof(
 
   let parsed: Awaited<ReturnType<typeof connection.getParsedTransaction>>;
   try {
-    parsed = await connection.getParsedTransaction(args.signature, {
-      commitment: INBOUND_TERMS_READ,
-      maxSupportedTransactionVersion: 0,
-    });
+    const raced = await withRpcTimeout(
+      connection.getParsedTransaction(args.signature, {
+        commitment: INBOUND_TERMS_READ,
+        maxSupportedTransactionVersion: 0,
+      }),
+    );
+    if (raced === RPC_TIMED_OUT) {
+      const detail = `getParsedTransaction did not answer within ${INBOUND_RPC_TIMEOUT_MS}ms`;
+      // El vencimiento es una IGNORANCIA, no una negativa: `unknown` en las dos
+      // dimensiones. Nunca `reference_absent` — no leímos ninguna cuenta.
+      return {
+        presence: { state: 'unknown', detail },
+        binding: { state: 'unknown', detail },
+      };
+    }
+    parsed = raced;
   } catch (err) {
     return {
       presence: { state: 'unknown', detail: errText(err) },

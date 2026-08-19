@@ -419,7 +419,13 @@ total**, pero tampoco desapareció, y la diferencia importa:
   siendo EVM-only. Esta HU **bifurca antes** de tocarlo; no lo generaliza. Un adapter de
   pago Solana en ese pipeline sigue sin escribirse.
 
-**Sigue apagado por default y es devnet-only.** `acceptsInboundPayment` para Solana pasa
+**Sigue apagado por default, y "devnet-only" tiene mecanismo detrás — con su límite
+escrito.** El preflight inbound falla cerrado si `SOLANA_RPC_URL` **o**
+`SOLANA_RPC_URL_FALLBACK` se declaran de mainnet (hasta el AR de WKH-314 sólo se
+validaba la segunda, que es la opcional). ⚠️ El guard es textual: caza el caso
+ETIQUETADO —`api.mainnet-beta.solana.com`, `?cluster=mainnet`— que es como este error se
+comete de verdad, y **no puede** cazar un proveedor de mainnet con hostname opaco. Acota,
+no cierra. `acceptsInboundPayment` para Solana pasa
 a ser `isSolanaX402InboundConfigured()`, que exige **las cuatro cosas juntas**:
 `SOLANA_ADAPTER_ENABLED='true'` **Y** `SOLANA_X402_INBOUND_ENABLED='true'` **Y** una
 `SOLANA_X402_INBOUND_PAY_TO` que sea pubkey base58 de 32 bytes **Y** un
@@ -432,7 +438,8 @@ lo servible no puedan divergir.
 | `SOLANA_X402_INBOUND_ENABLED` | Gate del cobro entrante, comparación literal contra `'true'`. Propio y ANDeado con `SOLANA_ADAPTER_ENABLED`, por el mismo criterio que `A2A_DEPOSIT_ENABLED_SOLANA`. | `false` |
 | `SOLANA_X402_INBOUND_PAY_TO` | **Pubkey** base58 de la wallet que recibe. Nunca una clave privada, nunca derivada de `SOLANA_OPERATOR_PRIVATE_KEY`. **Debe ser distinta de la cuenta de depósito** (ver abajo). | vacía |
 | `SOLANA_X402_INBOUND_CHALLENGE_SECRET` | Secreto del HMAC con el que se deriva la `reference` de cada challenge. | vacía |
-| `SOLANA_RPC_URL_FALLBACK` | Ya existía y **no la leía nadie**; este camino la enciende como SEGUNDO proveedor. Una URL que se declara de mainnet hace **fallar el preflight**. | vacía |
+| `SOLANA_RPC_URL_FALLBACK` | Ya existía y **no la leía nadie**; este camino la enciende como SEGUNDO proveedor. Una URL que se declara de mainnet hace **fallar el preflight**. Ausente, o igual a `SOLANA_RPC_URL`, **no** apaga el rail: avisa al arrancar (un solo proveedor falla en la dirección segura). | vacía |
+| `SOLANA_RPC_URL` | Ya existía. El proveedor **PRIMARIO**, y el que decide todos los veredictos. Una URL que se declara de mainnet hace **fallar el preflight inbound** con `primary_rpc_is_mainnet`. | `https://api.devnet.solana.com` |
 
 **El cobro doble que este camino habilitaría si se configura mal.** WKH-315 acredita
 saldo cuando una firma transfiere USDC a la ATA de depósito, con su propio uso único en

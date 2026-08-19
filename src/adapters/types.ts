@@ -537,6 +537,21 @@ export interface SolanaInboundChallenge {
   readonly resource: string;
   readonly issuedAt: number;
   readonly expiresAt: number;
+  /**
+   * ENTROPIA POR EMISION. Entra al MAC y se publica en el 402 para que el pagador la
+   * eco-repita en su sobre.
+   *
+   * ⚠️ Sin esto, dos callers que piden un 402 por el MISMO recurso, al MISMO precio y
+   * en el MISMO segundo reciben la MISMA `reference` (medido: AR de WKH-314,
+   * BLQ-ALTO-2). La firma de la víctima es pública desde que aterriza, así que el
+   * atacante podía presentarla con SU sobre —términos byte-idénticos para el store— y
+   * quedarse con el servicio, dejando a la víctima con un `PROOF_REPLAY` sobre USDC que
+   * ya transfirió. El uso único NO alcanza: no puede distinguir a los dos callers.
+   *
+   * **No agrega estado en el servidor**: el MAC la cubre, así que se verifica
+   * re-derivando, igual que todo el resto del sobre.
+   */
+  readonly nonce: string;
 }
 
 /**

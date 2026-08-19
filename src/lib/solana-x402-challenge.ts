@@ -7,7 +7,7 @@
  *
  * ── LA REFERENCIA ES UN MAC, NO UNA FILA (DT-13) ────────────────────────────
  *
- * `reference = HMAC-SHA256(secreto, resource|payTo|amountAtomic|mint|caip2|issuedAt|expiresAt)`
+ * `reference = HMAC-SHA256(secreto, resource|payTo|amountAtomic|mint|caip2|issuedAt|expiresAt|nonce)`
  * codificado en base58 — o sea **una clave pública válida de 32 bytes**, usable como
  * cuenta de la transacción del pagador (que es lo que la hace enlazable con la tx).
  *
@@ -28,9 +28,19 @@
  *    pagador se auto-extienda el challenge para siempre.
  *    *Esto sería falso si*: la derivación no incluyera `expiresAt` — ahí un sobre con
  *    `expiresAt: 9999999999` pasaría con una referencia legítima de hace un mes.
+ * 3. **PROHIBIDO emitir dos challenges con la MISMA referencia** (WKH-314 · AR
+ *    BLQ-ALTO-2). Los siete campos anteriores son todos DETERMINISTICOS: dos callers
+ *    que piden un 402 por el mismo recurso, al mismo precio y en el mismo segundo
+ *    recibían la misma referencia, byte a byte (medido). Y como la firma que aterriza
+ *    es pública, el atacante presentaba la firma de la víctima con SU sobre y se
+ *    llevaba el servicio: el ledger de uso único **no puede distinguir a los dos
+ *    callers**, porque los cinco términos que compara son idénticos. Por eso hay un
+ *    `nonce` CRIPTOGRAFICO por emisión, dentro del MAC.
+ *    *Esto sería falso si*: el nonce saliera de un contador, del reloj, o de cualquier
+ *    cosa que el atacante pueda reproducir pidiendo su propio 402.
  */
 
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { base58Encode } from '../adapters/solana/base58.js';
 import {
   getSolanaCaip2,
@@ -91,6 +101,7 @@ function referenceMaterial(c: {
   network: string;
   issuedAt: number;
   expiresAt: number;
+  nonce: string;
 }): string {
   return [
     c.resource,
@@ -100,7 +111,28 @@ function referenceMaterial(c: {
     c.network,
     String(c.issuedAt),
     String(c.expiresAt),
+    c.nonce,
   ].join('|');
+}
+
+/**
+ * Bytes de entropía por emisión. 16 bytes = 128 bits: la probabilidad de que dos
+ * challenges colisionen es despreciable frente a la de que colisione el HMAC mismo, y
+ * la referencia sigue siendo la salida de SHA-256 (32 bytes), así que su forma no
+ * cambia.
+ */
+const CHALLENGE_NONCE_BYTES = 16;
+
+/**
+ * El nonce del challenge. `randomBytes` (CSPRNG del sistema), **nunca** `Math.random`,
+ * ni un contador, ni el reloj: lo único que este valor tiene que garantizar es que el
+ * atacante no pueda reproducirlo pidiendo su propio 402.
+ *
+ * Se codifica en base58 por la misma razón que la referencia: el material del MAC se
+ * junta con `|`, y el alfabeto base58 no lo contiene.
+ */
+function newChallengeNonce(): string {
+  return base58Encode(new Uint8Array(randomBytes(CHALLENGE_NONCE_BYTES)));
 }
 
 /** HMAC-SHA256 → 32 bytes → base58. El resultado ES una pubkey válida. */
@@ -147,6 +179,9 @@ export function buildSolanaChallenge(args: {
     resource: args.resource,
     issuedAt,
     expiresAt,
+    // La ÚNICA parte no determinística del challenge, y la que hace que dos callers
+    // simultáneos con términos idénticos no compartan referencia (ver regla 3).
+    nonce: newChallengeNonce(),
   };
   return {
     ok: true,
@@ -179,6 +214,8 @@ export function verifySolanaChallengeReference(args: {
     mint: unknown;
     issuedAt: unknown;
     expiresAt: unknown;
+    /** El eco del `extra.nonce` que publicó el 402. Entra al MAC como todo lo demás. */
+    nonce: unknown;
   };
   resource: string;
   network: string;
@@ -198,13 +235,14 @@ export function verifySolanaChallengeReference(args: {
     typeof p.payTo !== 'string' ||
     typeof p.amountAtomic !== 'string' ||
     typeof p.mint !== 'string' ||
+    typeof p.nonce !== 'string' ||
     !Number.isInteger(p.issuedAt) ||
     !Number.isInteger(p.expiresAt)
   ) {
     return {
       state: 'malformed',
       detail:
-        'the payment envelope is missing a field needed to re-derive the reference (reference/payTo/amountAtomic/mint must be strings, issuedAt/expiresAt integers)',
+        'the payment envelope is missing a field needed to re-derive the reference (reference/payTo/amountAtomic/mint/nonce must be strings, issuedAt/expiresAt integers)',
     };
   }
   const expected = deriveReference(
@@ -217,6 +255,7 @@ export function verifySolanaChallengeReference(args: {
       network: args.network,
       issuedAt: p.issuedAt as number,
       expiresAt: p.expiresAt as number,
+      nonce: p.nonce,
     }),
   );
   if (!constantTimeEquals(expected, p.reference)) {

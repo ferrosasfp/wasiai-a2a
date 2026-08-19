@@ -33,6 +33,7 @@ import {
   getSolanaFallbackConnection,
   getSolanaInboundPayTo,
   getSolanaUsdcDecimals,
+  getSolanaUsdcMint,
 } from '../adapters/solana/chain.js';
 import { ensureSolanaInboundReady } from '../adapters/solana/inbound-preflight.js';
 import { probeInboundProof } from '../adapters/solana/inbound-presence.js';
@@ -596,6 +597,10 @@ function buildSolanaX402Response(
       issuedAt: challenge.issuedAt,
       expiresAt: challenge.expiresAt,
       mint: challenge.mint,
+      // Entropía por EMISION (AR BLQ-ALTO-2). Se publica para que el pagador la
+      // eco-repita en `authorization.nonce`: está dentro del MAC, así que el servidor
+      // no guarda nada, y sin ella dos callers simultáneos compartirían referencia.
+      nonce: challenge.nonce,
     },
     // Sale del ADAPTER del bundle (`getMerchantName()`), igual que en la rama EVM.
     // No se re-lee la env acá: sería una segunda definición del mismo valor.
@@ -622,10 +627,15 @@ function buildSolanaX402Response(
  *   explorer y contra el que quiere que le paguemos el rate-limit del nodo.
  * · **P3 antes que P4** porque un reintento cuya fila ya está `observed` salta la
  *   cadena entera: la incertidumbre se paga UNA vez en la vida del pago.
- * · **P7 lo más tarde posible** porque es irreversible. Residuo DECLARADO: si la
- *   respuesta HTTP se pierde después del consumo, el pagador queda cobrado sin
- *   servicio y su reintento da `replay`. Es la misma postura que el camino EVM tiene
- *   hoy; no se resuelve acá, se mitiga poniendo el consumo pegado al grant.
+ * · **P7 lo más tarde posible** porque es irreversible, y **no se intenta siquiera si
+ *   `reply.sent`**: el 504 de `middleware/timeout.ts` sale desde fuera del lifecycle y
+ *   puede haber salido durante el peek, el RPC o el observe. Quemar la prueba después
+ *   de eso dejaba al pagador cobrado, con un 504 en la mano y un `replay` en el
+ *   reintento (AR de WKH-314, BLQ-MED-2).
+ *   Residuo que QUEDA declarado, porque el guard no lo cierra: si la respuesta HTTP se
+ *   pierde en la red DESPUES del consumo, el pagador queda cobrado sin servicio. Eso es
+ *   la misma postura que el camino EVM tiene hoy; se mitiga poniendo el consumo pegado
+ *   al grant, no se resuelve acá.
  *
  * ⚠️ LA INVARIANTE QUE NINGUN CAMINO DE ACA PUEDE ROMPER:
  * **ningún estado que no sea `finalized_ok` con términos cumplidos concede acceso, y
@@ -748,6 +758,7 @@ async function handleSolanaInboundPayment(args: {
       mint: auth.mint,
       issuedAt: auth.issuedAt,
       expiresAt: auth.expiresAt,
+      nonce: auth.nonce,
     },
     resource,
     network: caip2,
@@ -774,6 +785,67 @@ async function handleSolanaInboundPayment(args: {
     issuedAt: Number(auth.issuedAt),
     expiresAt: Number(auth.expiresAt),
   };
+  // ── P2b. EL BINDING CONTRA EL PRECIO DE **ESTE** REQUEST ────────────────
+  //
+  // ⚠️ EL MAC PRUEBA "ESTE SOBRE LO EMITIMOS NOSOTROS", **NO** "ESTE ES EL PRECIO DE
+  // AHORA". Y son dos cosas distintas porque el precio del MISMO `resource` varía por
+  // request: `resource` es `protocol://hostname + request.url` (o sea `/compose` a
+  // secas) mientras el total lo calcula el body (`routes/compose.ts`). Sin este guard,
+  // un sobre emitido por un pipeline de 0,000001 USDC seguía siendo un sobre VALIDO
+  // durante 900 s y pagaba un pipeline de 50 USDC: `presented.amountAtomic` viajaba
+  // hasta `requiredAtomic` y la cadena se consultaba contra el monto del ATACANTE.
+  // Repetible, y sin reembolso inbound en este camino (AR de WKH-314, BLQ-ALTO-1).
+  //
+  // Es el mismo guard que la rama EVM tiene desde WKH-SEC-03 (`:1226` en este archivo),
+  // con sus mismas tres reglas: comparación en unidades ATOMICAS, `>=` (pagar de más
+  // concede — nadie paga de más por error y se queda sin servicio), y un `BigInt` que
+  // no lanza puertas afuera.
+  //
+  // Y `payTo`/`mint` van en el mismo lote porque tienen el mismo agujero: una rotación
+  // de wallet o un cambio de mint dejaban 900 s de ventana en los que un sobre viejo
+  // seguía mandando el dinero a la dirección anterior.
+  // *Esto sería falso si*: alcanzara con el MAC — no alcanza, el MAC firma los términos
+  // que el servidor emitió EN SU MOMENTO, y este request tiene los suyos.
+  const serverMint = getSolanaUsdcMint();
+  if (presented.payTo !== payTo || presented.mint !== serverMint) {
+    request.log.warn(
+      {
+        error_code: 'X402_SOLANA_TERMS_MISMATCH',
+        received: { payTo: presented.payTo, mint: presented.mint },
+        expected: { payTo, mint: serverMint },
+      },
+      'x402 solana inbound rejected: stale challenge recipient/mint',
+    );
+    return deny(
+      'X402_SOLANA_TERMS_MISMATCH',
+      'that challenge was issued for a different recipient or a different mint than the one this endpoint charges in now. Ask for a fresh 402: your signature has NOT been consumed.',
+      challenge,
+    );
+  }
+  let quotedCoversPrice: boolean;
+  try {
+    quotedCoversPrice =
+      BigInt(presented.amountAtomic) >= BigInt(requiredAmount);
+  } catch {
+    // Un monto no parseable es un mismatch, no un crash (DT-7 de la rama EVM).
+    quotedCoversPrice = false;
+  }
+  if (!quotedCoversPrice) {
+    request.log.warn(
+      {
+        error_code: 'X402_SOLANA_AMOUNT_SHORT',
+        received: { amountAtomic: presented.amountAtomic },
+        expected: { requiredAmount },
+      },
+      'x402 solana inbound rejected: challenge amount below the price of this request',
+    );
+    return deny(
+      'X402_SOLANA_AMOUNT_SHORT',
+      `that challenge was issued for ${presented.amountAtomic} atomic units and this request costs ${requiredAmount}. A challenge is valid for the price it quoted, not for a later one. Ask for a fresh 402: your signature has NOT been consumed.`,
+      challenge,
+    );
+  }
+
   const proofArgs = {
     caip2,
     signature,
@@ -898,9 +970,18 @@ async function handleSolanaInboundPayment(args: {
           challenge,
         );
       case 'absent':
+        // ⚠️ EL MENSAJE DICE CUANTOS NODOS BUSCARON DE VERDAD (AR de WKH-314,
+        // BLQ-BAJO-1). Acá se afirmaba "two independent nodes searched" SIEMPRE, y sin
+        // `SOLANA_RPC_URL_FALLBACK` había buscado UNO: `combineInboundPresence`
+        // devuelve el veredicto del primario tal cual cuando no hay segundo proveedor.
+        // El conteo se deriva de `fallback`, que es lo único que sabe si se preguntó, y
+        // llegar acá con fallback presente implica que los DOS dijeron `absent` (un
+        // `absent` contradicho por cualquier otra cosa se degrada a `unknown`).
         return deny(
           'X402_SOLANA_PROOF_ABSENT',
-          'two independent nodes searched their transaction history and do not know that signature.',
+          fallback === null
+            ? 'one node searched its transaction history and does not know that signature. This gateway has no second RPC provider configured, so that is ONE opinion, not a corroborated absence — if you are sure the transaction landed, retry: your proof has NOT been consumed.'
+            : 'two independent nodes searched their transaction history and do not know that signature.',
           challenge,
         );
       case 'unknown':
@@ -966,6 +1047,20 @@ async function handleSolanaInboundPayment(args: {
   }
 
   // ── P7. EL COBRO. Escritura condicional atómica, exactamente un ganador ──
+  //
+  // ⚠️ EL CONSUMO NO SE INTENTA SI LA RESPUESTA YA SALIO (AR de WKH-314, BLQ-MED-2).
+  // `createTimeoutHandler` (`middleware/timeout.ts`) manda el 504 desde FUERA del
+  // lifecycle: puede haber salido mientras estábamos en el peek, en el RPC o en el
+  // observe. Consumir después de eso es quemar la prueba de un pagador que ya recibió
+  // un error — transfirió USDC y su reintento le va a contestar `PROOF_REPLAY`.
+  // Devolver `undefined` acá NO concede acceso: `paymentVerified` sigue sin setearse y
+  // la respuesta que el cliente ve es la que ya se envió.
+  //
+  // ⚠️ NO ES EL GUARD `FST_ERR_REP_ALREADY_SENT` de la rama EVM (`:1272`). Ese evita
+  // una EXCEPCION al mandar dos veces; el AR midió que con Fastify 5 el segundo
+  // `.send()` no lanza. Lo que se evita acá es el CONSUMO IRREVERSIBLE, y por eso el
+  // chequeo va antes de la escritura y no antes del `.send()`.
+  if (reply.sent) return reply;
   const consumed = await consumeInboundProof(proofArgs);
   switch (consumed.outcome) {
     case 'replay':
@@ -982,9 +1077,15 @@ async function handleSolanaInboundPayment(args: {
       );
     case 'store_unavailable':
       emitUnknown(`inbound proof consume failed: ${consumed.detail}`);
+      // ⚠️ ACA NO SE PUEDE AFIRMAR "la prueba NO se consumió", y antes se afirmaba
+      // (MNR-2 del AR). Este es el ÚNICO camino donde el consumo ya se intentó: si la
+      // escritura commiteó y se perdió la respuesta del store
+      // (`solana-inbound-proof.ts:310`), la fila quedó consumida y este mensaje sería
+      // falso. Lo que sí se garantiza —y es lo que se escribe— es que NO se concede
+      // acceso a nadie, y que el reintento es la acción correcta.
       return deny(
         'X402_SETTLE_UNKNOWN',
-        'the single-use ledger did not confirm the consumption of this proof, so access cannot be granted. The proof was NOT consumed: retrying later is safe.',
+        'the single-use ledger did not confirm the consumption of this proof, so access is NOT granted. Retry: if the consumption never landed you will be served, and if it landed but its acknowledgement was lost you will get X402_SOLANA_PROOF_REPLAY instead of silence.',
         challenge,
       );
     case 'consumed':

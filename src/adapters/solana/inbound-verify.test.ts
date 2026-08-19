@@ -79,11 +79,19 @@ describe('WKH-314 · combinador de dos proveedores', () => {
 
   it('T-UNK-08 · la precedencia completa, en los DOS órdenes', () => {
     const cases: [SolanaInboundPresence, SolanaInboundPresence, string][] = [
-      [OK, FAILED, 'finalized_ok'],
+      // ⚠️ ESTA LINEA DECIA `'finalized_ok'`, Y ERA EL BUG. Un `landed_failed` es una
+      // aserción POSITIVA sobre una transacción inmutable —aterrizó y no movió nada—,
+      // así que un nodo que lo reporta contradice al que dice `finalized_ok`, y una
+      // contradicción sobre dinero se resuelve DENEGANDO (AR de WKH-314, BLQ-MED-1).
+      // Con la precedencia vieja se entregaba servicio contra una transferencia que
+      // nunca transfirió, y bastaba UN nodo mintiendo.
+      [OK, FAILED, 'landed_failed'],
       [OK, PENDING, 'finalized_ok'],
       [OK, UNKNOWN, 'finalized_ok'],
       [OK, ABSENT, 'finalized_ok'],
-      [MISMATCH, FAILED, 'terms_mismatch'],
+      // `MISMATCH` + `FAILED` NO entra en esta tabla simétrica: las dos son negativas
+      // MEDIDAS y empatan en el tier 0, así que el desempate lo gana el primario y el
+      // resultado depende del orden. Su caso está abajo, explícito.
       [MISMATCH, UNKNOWN, 'terms_mismatch'],
       [FAILED, PENDING, 'landed_failed'],
       [FAILED, UNKNOWN, 'landed_failed'],
@@ -99,6 +107,34 @@ describe('WKH-314 · combinador de dos proveedores', () => {
         expected,
       );
     }
+  });
+
+  it('T-UNK-06b 💰 · `landed_failed` LE GANA a `finalized_ok`, en los dos órdenes', () => {
+    // El gemelo de T-UNK-06 para la otra negativa MEDIDA. Sin esto, el orden de los dos
+    // proveedores decidía si un cobro contra una tx fallida se concedía o no.
+    expect(combineInboundPresence(OK, FAILED).state).toBe('landed_failed');
+    expect(combineInboundPresence(FAILED, OK).state).toBe('landed_failed');
+  });
+
+  it('T-UNK-06c · GEMELO POSITIVO: `finalized_ok` sigue ganando contra las IGNORANCIAS', () => {
+    // El control de que el fix no denegó todo: contra un nodo que no supo contestar
+    // (`unknown`), que va atrasado (`not_finalized`) o que no la encontró (`absent`), un
+    // `finalized_ok` sigue concediendo. Sólo pierde contra las negativas MEDIDAS.
+    expect(combineInboundPresence(OK, UNKNOWN).state).toBe('finalized_ok');
+    expect(combineInboundPresence(OK, PENDING).state).toBe('finalized_ok');
+    expect(combineInboundPresence(OK, ABSENT).state).toBe('finalized_ok');
+  });
+
+  it('T-UNK-08b · dos negativas MEDIDAS empatan, y las dos deniegan', () => {
+    // `terms_mismatch` y `landed_failed` comparten tier: el orden decide cuál MENSAJE
+    // sale, y ninguno de los dos concede. Lo que se fija acá es la propiedad que
+    // importa (nunca `finalized_ok`), no cuál de los dos strings gana.
+    expect(combineInboundPresence(MISMATCH, FAILED).state).toBe(
+      'terms_mismatch',
+    );
+    expect(combineInboundPresence(FAILED, MISMATCH).state).toBe(
+      'landed_failed',
+    );
   });
 
   it('T-UNK-09 · el combinador NUNCA inventa un `finalized_ok` que nadie reportó', () => {

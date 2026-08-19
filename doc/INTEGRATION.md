@@ -925,7 +925,8 @@ header. The `402` carries the tuple you need:
       "extra": {
         "reference": "<base58 32-byte pubkey>",
         "issuedAt": 1755600000,
-        "expiresAt": 1755600900
+        "expiresAt": 1755600900,
+        "nonce": "<base58, per-issuance>"
       }
     }
   ]
@@ -951,15 +952,24 @@ nothing we can attribute.
     "amountAtomic": "<maxAmountRequired>",
     "mint": "<asset>",
     "issuedAt": 1755600000,
-    "expiresAt": 1755600900
+    "expiresAt": 1755600900,
+    "nonce": "<from extra.nonce>"
   },
   "signature": "<your transaction signature, base58>",
   "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
 }
 ```
 
-Echo the six `authorization` fields **exactly as they came**: they are covered by a MAC,
-so changing any of them —including `expiresAt`— invalidates the reference.
+Echo the seven `authorization` fields **exactly as they came**: they are covered by a
+MAC, so changing any of them —including `expiresAt` and `nonce`— invalidates the
+reference.
+
+**A challenge is valid for the price it quoted.** `extra.nonce` is fresh entropy on every
+402, so two challenges are never interchangeable even when every other field matches, and
+the amount, recipient and mint are checked against what this endpoint charges **now** —
+not only against the MAC. If the price of the call changed, or the recipient wallet or the
+mint rotated, ask for a fresh 402. Your signature is not consumed by any of those
+rejections.
 
 **Finality is a precondition.** The gateway grants access only when the chain reports
 your transaction as `finalized`. Presenting it earlier answers
@@ -976,11 +986,11 @@ Every one of these is HTTP `402`. **None of them consumes your proof** except
 | `X402_SOLANA_PROOF_MALFORMED` | The envelope is missing a field, or `signature` is not base58 of 64 bytes | no — fix the envelope | yes |
 | `X402_SOLANA_REFERENCE_MISMATCH` | The reference does not re-derive from our secret, or it is not among the accounts of that transaction | no — get a fresh challenge | yes |
 | `X402_SOLANA_CHALLENGE_EXPIRED` | The challenge expired, or the transaction landed outside its window | no — get a fresh challenge | yes |
-| `X402_SOLANA_AMOUNT_SHORT` | The recipient was credited **less** than required | no — waiting will not help | yes |
-| `X402_SOLANA_TERMS_MISMATCH` | Wrong mint, wrong recipient, or that signature is already recorded against a different charge | no | yes |
+| `X402_SOLANA_AMOUNT_SHORT` | The recipient was credited **less** than required, or the challenge you presented was issued for a lower price than this call costs now | no — waiting will not help | yes |
+| `X402_SOLANA_TERMS_MISMATCH` | Wrong mint, wrong recipient (including a challenge issued before the recipient wallet or the mint changed), or that signature is already recorded against a different charge | no | yes |
 | `X402_SOLANA_TX_FAILED` | The transaction landed and failed on-chain: nothing moved | no | yes |
 | `X402_SOLANA_NOT_FINALIZED` | Landed, not finalized yet | **yes** (`Retry-After`) | yes |
-| `X402_SOLANA_PROOF_ABSENT` | Two independent nodes searched their history and do not know that signature | **yes** (`Retry-After`) | yes |
+| `X402_SOLANA_PROOF_ABSENT` | The node(s) we asked searched their history and do not know that signature. The message says how many actually searched: with a second RPC provider configured it takes **two** independent nodes, without one it is **a single opinion** | **yes** (`Retry-After`) | yes |
 | `X402_SOLANA_PROOF_REPLAY` | That signature already bought service | no | **no — already spent** |
 | `X402_SETTLE_UNKNOWN` | We could not ask the chain or our own ledger. Not a verdict about your payment | **yes** (`Retry-After`) | yes |
 
@@ -991,8 +1001,16 @@ naive one:
   on-chain stops you from presenting the same landed transaction again — it is already
   written, there is nothing left to spend. The single-use ledger lives in the gateway,
   and it is keyed on `(chain, signature)`.
-- **`X402_SETTLE_UNKNOWN` is not "no".** It means the question could not be answered. We
-  do not consume your proof on that path precisely so that retrying is safe.
+- **`X402_SETTLE_UNKNOWN` is not "no".** It means the question could not be answered:
+  about the chain, or about our own single-use ledger. No path that returns it grants
+  access, and no path that returns it *intends* to consume your proof — retrying is the
+  right move.
+  **One honest caveat**, because "we never consume it" would be a stronger claim than the
+  code can make: if the consuming write commits and its acknowledgement is lost in
+  transit, we report `X402_SETTLE_UNKNOWN` without knowing whether the ledger recorded the
+  consumption. In that narrow case your retry can come back as
+  `X402_SOLANA_PROOF_REPLAY`. It is the residue of a single-use ledger over an unreliable
+  network, it is not silent, and it never grants access to anyone else.
 
 ---
 

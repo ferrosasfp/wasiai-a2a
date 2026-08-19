@@ -76,6 +76,102 @@ const ARGS = {
   ...WINDOW,
 };
 
+/**
+ * ⚠️ EL TECHO DE LAS DOS LLAMADAS AL RPC (AR de WKH-314, BLQ-MED-2).
+ *
+ * Los dos tests de acá usan RELOJ FALSO porque el techo son 8 s reales: esperarlos
+ * dos veces sumaría 16 s a cada `npm test`. Lo que se mide NO es el número —eso lo
+ * fija una constante de módulo— sino la propiedad: **una llamada que no vuelve NUNCA
+ * se resuelve como `unknown`, jamás como `absent` ni como un grant**, y en las dos
+ * llamadas, no sólo en la primera.
+ */
+describe('WKH-314 · el techo de las llamadas al RPC', () => {
+  /** Una `Connection` cuyo método bajo prueba nunca resuelve. */
+  function hangingConnection(which: 'status' | 'parsed') {
+    return {
+      getSignatureStatuses: vi.fn(async () =>
+        which === 'status'
+          ? await new Promise(() => {})
+          : statusValue({ err: null, confirmationStatus: 'finalized' }),
+      ),
+      getParsedTransaction: vi.fn(async () =>
+        which === 'parsed' ? await new Promise(() => {}) : null,
+      ),
+    };
+  }
+
+  it('T-RPCTO-01 💰 · un `getSignatureStatuses` que no vuelve ⇒ `unknown`, NUNCA `absent`', async () => {
+    vi.useFakeTimers();
+    try {
+      const verdict = probeInboundProof(
+        hangingConnection('status') as never,
+        ARGS,
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      const res = await verdict;
+      expect(res.presence.state).toBe('unknown');
+      // La distinción que cuesta plata: un vencimiento no es una prueba de ausencia.
+      expect(res.presence.state).not.toBe('absent');
+      expect(res.binding.state).toBe('unknown');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('T-RPCTO-02 💰 · un `getParsedTransaction` que no vuelve ⇒ `unknown` en presencia Y binding', async () => {
+    vi.useFakeTimers();
+    try {
+      const verdict = probeInboundProof(
+        hangingConnection('parsed') as never,
+        ARGS,
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      const res = await verdict;
+      // La finalidad YA estaba probada acá: aun así no se concede nada, porque los
+      // términos no se leyeron.
+      expect(res.presence.state).toBe('unknown');
+      expect(res.binding.state).toBe('unknown');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('T-RPCTO-03 · GEMELO POSITIVO: una llamada que responde a tiempo NO se corta', async () => {
+    // El control de que el techo no denegó todo: sin él, `unknown` sería el veredicto
+    // de siempre y los dos tests de arriba pasarían igual.
+    const { connection } = fakeConnection({
+      status: statusValue({ err: null, confirmationStatus: 'finalized' }),
+      parsed: parsedTx({
+        accountKeys: [REFERENCE],
+        version: 'legacy',
+        blockTime: WINDOW.issuedAt + 10,
+        meta: {
+          err: null,
+          preTokenBalances: [
+            balanceEntry({
+              accountIndex: 1,
+              mint: MINT,
+              owner: PAY_TO,
+              amount: '0',
+            }),
+          ],
+          postTokenBalances: [
+            balanceEntry({
+              accountIndex: 1,
+              mint: MINT,
+              owner: PAY_TO,
+              amount: '1000000',
+            }),
+          ],
+        },
+      }),
+    });
+    const res = await probeInboundProof(connection as never, ARGS);
+    expect(res.presence.state).toBe('finalized_ok');
+    expect(res.binding.state).toBe('bound');
+  });
+});
+
 describe('WKH-314 · presencia y finalidad', () => {
   it('T-FINAL-00 · GEMELO POSITIVO: `finalized` + términos cumplidos ⇒ grant', async () => {
     const { connection } = fakeConnection({

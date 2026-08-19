@@ -180,6 +180,83 @@ describe('WKH-314 · preflight inbound — los otros guards', () => {
     expect(v.ok).toBe(true);
   });
 
+  it('T-PRE-04c 💰 · el RPC **PRIMARIO** declarado de mainnet falla cerrado (CD-5)', async () => {
+    // ⚠️ ESTE ERA EL AGUJERO (AR de WKH-314, BLQ-MED-3). El guard anti-mainnet existía
+    // sólo para el fallback, que es OPCIONAL. `SOLANA_RPC_URL` es OBLIGATORIA y es la
+    // que construye la `Connection` primaria: con ella apuntando a mainnet, el preflight
+    // pasaba, el rail arrancaba, y toda la verificación de cobros se hacía contra otro
+    // ledger. El fallback ni siquiera hace falta para tener el problema.
+    configure({ SOLANA_RPC_URL: 'https://api.mainnet-beta.solana.com' });
+    _resetSolanaInboundPreflight();
+    _resetSolanaChain();
+    try {
+      const v = await ensureSolanaInboundReady();
+      expect(v.ok).toBe(false);
+      if (v.ok) return;
+      expect(v.failure).toBe('primary_rpc_is_mainnet');
+      expect(v.detail).toContain('SOLANA_RPC_URL');
+      // Y corta ANTES de gastar la base y el RPC: si midiéramos contra otra red, un
+      // "ok" de esos probes no significaría nada.
+      expect(storeProbe).not.toHaveBeenCalled();
+      expect(historyProbe).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.SOLANA_RPC_URL;
+      _resetSolanaChain();
+    }
+  });
+
+  it('T-PRE-04d · GEMELO POSITIVO: el default de devnet (y una URL de devnet) pasan', async () => {
+    // El control de que el guard no apagó el rail entero.
+    configure();
+    _resetSolanaInboundPreflight();
+    _resetSolanaChain();
+    expect((await ensureSolanaInboundReady()).ok).toBe(true);
+
+    configure({ SOLANA_RPC_URL: 'https://api.devnet.solana.com' });
+    _resetSolanaInboundPreflight();
+    _resetSolanaChain();
+    try {
+      expect((await ensureSolanaInboundReady()).ok).toBe(true);
+    } finally {
+      delete process.env.SOLANA_RPC_URL;
+      _resetSolanaChain();
+    }
+  });
+
+  it('T-PRE-06 · sin `SOLANA_RPC_URL_FALLBACK` el rail arranca, pero AVISA (MNR-1)', async () => {
+    // No apaga nada: un solo proveedor es una config válida que falla en la dirección
+    // segura. Lo que no puede ser es que la degradación de DT-10 sea silenciosa.
+    configure({ SOLANA_RPC_URL_FALLBACK: undefined });
+    _resetSolanaInboundPreflight();
+    _resetSolanaChain();
+    const v = await ensureSolanaInboundReady();
+    expect(v.ok).toBe(true);
+    const warned = logSpy.warn.mock.calls
+      .map((c) => JSON.stringify(c))
+      .join(' ');
+    expect(warned).toContain('SOLANA_RPC_URL_FALLBACK is not set');
+  });
+
+  it('T-PRE-06b 💰 · un fallback IGUAL al primario avisa: no son dos opiniones', async () => {
+    configure({
+      SOLANA_RPC_URL: 'https://devnet.example.com/rpc',
+      SOLANA_RPC_URL_FALLBACK: 'https://devnet.example.com/rpc',
+    });
+    _resetSolanaInboundPreflight();
+    _resetSolanaChain();
+    try {
+      const v = await ensureSolanaInboundReady();
+      expect(v.ok).toBe(true);
+      const warned = logSpy.warn.mock.calls
+        .map((c) => JSON.stringify(c))
+        .join(' ');
+      expect(warned).toContain('SAME url');
+    } finally {
+      delete process.env.SOLANA_RPC_URL;
+      _resetSolanaChain();
+    }
+  });
+
   it('T-PRE-05 · la cuenta de token es una SEÑAL, no un guard: avisa y NO apaga', async () => {
     // DT-C3: el crédito se mide SUMANDO sobre todas las cuentas del destinatario, así
     // que dos cuentas son un caso que el código maneja bien. Apagar el rail por eso

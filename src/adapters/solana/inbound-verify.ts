@@ -5,11 +5,23 @@
  * leyeron los proveedores y decide. Que sea puro es lo que hace testeable la tabla de
  * precedencia entera sin un solo mock de RPC.
  *
- * ── POR QUE DOS PROVEEDORES (DT-10) ─────────────────────────────────────────
+ * ── QUE COMPRA EL SEGUNDO PROVEEDOR, Y QUE NO (DT-10) ───────────────────────
  *
- * Un `unknown` tiene que ser CARO de provocar. Con un solo nodo, cualquiera que pueda
- * tirar abajo (o simplemente saturar) ese endpoint convierte todos los cobros en
- * `unknown`. Con dos, hace falta voltear los dos.
+ * **Lo que compra**: un `unknown` caro de provocar. Con un solo nodo, cualquiera que
+ * pueda tirar abajo (o simplemente saturar) ese endpoint convierte todos los cobros en
+ * `unknown`. Y también compra la detección de CONTRADICCIONES: dos parseos de una
+ * transacción inmutable no pueden discrepar legítimamente, así que cuando discrepan se
+ * deniega (reglas 1 y 2).
+ *
+ * ⚠️ **LO QUE NO COMPRA, Y ACA ESTABA ESCRITO AL REVES.** Este docblock decía *"con
+ * dos, hace falta voltear los dos"*, y es **FALSO** — lo midió el AR de WKH-314
+ * (BLQ-MED-1). Para fabricar un GRANT alcanza con UN nodo: `finalized_ok` le gana a
+ * `not_finalized`, a `absent` y a `unknown`, que es lo único que un nodo honesto puede
+ * contestar cuando no vio la transacción. El segundo proveedor sube el costo de
+ * DENEGAR (el DoS) y caza las afirmaciones positivas contradictorias; **no** convierte
+ * el grant en una decisión de quórum. Un `finalized_ok` fabricado por el proveedor
+ * primario se concede, y decirlo es la única forma de que alguien decida si eso es
+ * aceptable.
  * ⚠️ Y por eso el runbook exige que el fallback sea **un proveedor distinto**: dos
  * llamadas al mismo nodo caído no son dos opiniones, son la misma.
  *
@@ -19,12 +31,19 @@
  *    MISMA firma no pueden discrepar legítimamente sobre los números: la transacción
  *    es inmutable. Si discrepan, es una anomalía —un nodo mintiendo, un nodo con datos
  *    corruptos— y ante una anomalía sobre dinero se deniega.
- * 2. **Un `absent` solo, contradicho por un `unknown`, NO es una negativa.** Hacen
+ * 2. **`landed_failed` es PEGAJOSO POR EL MISMO MOTIVO.** Es una aserción POSITIVA
+ *    sobre una transacción inmutable —*"aterrizó y falló, no se movió nada"*— y no una
+ *    ignorancia. Que un segundo nodo conteste `finalized_ok` sobre la misma firma es la
+ *    misma anomalía del punto 1, y resolverla como grant entregaría servicio contra una
+ *    transferencia que **no transfirió**.
+ *    *Esto sería falso si*: `landed_failed` tuviera rank > `finalized_ok` — ahí un solo
+ *    nodo mintiendo (o el orden de los dos proveedores) decidiría el cobro.
+ * 3. **Un `absent` solo, contradicho por un `unknown`, NO es una negativa.** Hacen
  *    falta DOS nodos que hayan buscado en su histórico y no la conozcan. Un nodo que
  *    no contesta no vota.
- * 3. **La ausencia de fallback nunca convierte un `unknown` en un grant.** Sin
+ * 4. **La ausencia de fallback nunca convierte un `unknown` en un grant.** Sin
  *    `SOLANA_RPC_URL_FALLBACK`, el veredicto del primario se usa TAL CUAL.
- * 4. El monto se compara en unidades ATOMICAS y con `>=` (eso vive en
+ * 5. El monto se compara en unidades ATOMICAS y con `>=` (eso vive en
  *    `inbound-presence.ts`, que es quien mide).
  */
 
@@ -35,21 +54,28 @@ import type { SolanaInboundBinding, SolanaInboundPresence } from '../types.js';
  * agregar un estado a `SolanaInboundPresence` sin decidir dónde entra **no compila**.
  * Un estado nuevo que cayera por default en cualquier lado sería una decisión de
  * dinero tomada por omisión.
+ *
+ * ⚠️ EL TIER 0 SON LAS NEGATIVAS MEDIDAS, y son DOS: `terms_mismatch` y
+ * `landed_failed`. Las dos son aserciones positivas sobre una transacción inmutable, y
+ * las dos ganan contra cualquier cosa —incluido `finalized_ok`— porque una
+ * contradicción sobre dinero se resuelve denegando. Empatan entre sí, y el desempate lo
+ * gana el primario (`<=`): las dos deniegan, así que cuál de los dos mensajes sale no
+ * cambia ninguna decisión.
  */
 function presenceRank(state: SolanaInboundPresence['state']): number {
   switch (state) {
     case 'terms_mismatch':
       return 0;
+    case 'landed_failed':
+      return 0;
     case 'finalized_ok':
       return 1;
-    case 'landed_failed':
-      return 2;
     case 'not_finalized':
-      return 3;
+      return 2;
     case 'absent':
-      return 4;
+      return 3;
     case 'unknown':
-      return 5;
+      return 4;
   }
 }
 
