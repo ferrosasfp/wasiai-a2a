@@ -31,6 +31,7 @@ import {
 import type { Database, Json } from '../types/database.types.js';
 import type {
   Agent,
+  AgentPaymentSpecInput,
   PublishAgentInput,
   UpdateAgentInput,
 } from '../types/index.js';
@@ -73,6 +74,13 @@ export interface PublishedAgentRecord {
   discoverable: boolean;
   inputSchema?: Record<string, unknown>;
   outputSchema?: Record<string, unknown>;
+  /**
+   * WKH-316: bloque `payment` tal como quedó PERSISTIDO en `metadata.payment`
+   * (las 4 keys del input, sin los derivados). Presente sólo si la fila tiene
+   * bloque — nunca `null`. El `Agent.payment` de discovery es otra cosa: lo
+   * produce `readPaymentSpec` y trae además `resolvedChain`/`network`.
+   */
+  payment?: AgentPaymentSpecInput;
   createdAt: string;
 }
 
