@@ -332,3 +332,27 @@ la próxima HU no los repita.
   = true`), que es el momento en que el primer `unknown` real puede aparecer. Alcance
   propuesto por el F4: parametrizar el mensaje por productor (EVM/facilitator vs Solana/
   testigo) y evaluar dedup por `(caip2, signature)`.
+
+### [2026-08-19] FIX F4 (2da vuelta) — Arreglé el mensaje y el README seguía diciendo la frase vieja
+
+- **Error**: el fix-pack corrigió `inboundPaymentUnsupportedMessage` y **dejó intacta la misma
+  frase falsa en `README.md:35` y `README.es.md:35`**: *"Inbound charging over x402 is still EVM,
+  because that leg needs an EIP-3009 style signed authorization that the Solana adapter does not
+  implement"*. Es el **primer bloque** del documento, el repo es **público**, y el mismo README se
+  contradecía a sí mismo en `:214` / `:248` (*"implemented (WKH-314), off in the deployment that is
+  up"*). Misma clase en `doc/INTEGRATION.md:7`.
+- **Causa raíz**: el F4 §6.1 declaró *"los 6 README condicionados — ✅ ciertos en los dos estados"*.
+  Cierto **de los 6 bloques que la HU editó**; el barrido nunca salió de ellos. Un documento no se
+  verifica revisando el diff: la frase vieja no está en el diff **porque nadie la tocó**. El mismo
+  patrón que ya tiene entrada propia acá arriba (las citas que se rompen por lo que **no** editás),
+  aplicado a prosa en vez de a números de línea.
+- **Fix**: las tres afirmaciones pasan a ser de **configuración** con el condicional DENTRO
+  (*"exists in the code since WKH-314 and is off in the deployment that is up right now"*), y
+  mandan a leer `chains[].acceptsInboundPayment` en vez de creerle al párrafo.
+  `README.md:97` / `README.es.md:105` pasan de *"the two ways out"* a **tres**. `:214` / `:248`
+  **no se tocan** (son los que el F4 midió contra el gateway vivo) y ahora `:35` coincide con
+  ellos en vez de contradecirlos. Ediciones línea-neutras (444 / 478 / 1398).
+- **Aplicar en**: cuando una HU cambia lo que algo SIGNIFICA, el barrido de docs se hace por
+  **frase**, no por diff — grepear la afirmación vieja en todo el repo, incluidos los archivos que
+  la HU no abrió. Y cuando un doc dice A arriba y no-A abajo, el que suele estar podrido es el de
+  **arriba**: se escribió antes y nadie vuelve a leer el intro.
