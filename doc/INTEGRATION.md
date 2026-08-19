@@ -184,6 +184,8 @@ Single scannable reference. "Auth" column legend:
 | `PATCH` | `/tasks/:id` | Key required | Append messages/artifacts to a task — **costs $1** |
 | `GET` | `/gasless/status` | Public | Gasless module status (`funding_state` field) |
 | `POST` | `/gasless/transfer` | Public | Execute gasless EIP-3009 transfer (503 when not operational) |
+| `POST` | `/agents` | Key required | Publish one agent of your own (free, no debit) |
+| `PATCH` | `/agents/:slug` | Key required | Update your own agent (free, no debit) |
 | `POST` | `/mcp` | MCP token | JSON-RPC 2.0 tool dispatcher for MCP clients |
 
 Notes:
@@ -213,6 +215,118 @@ avoid polling.
 
 `POST /tasks` (create) and the two `PATCH` routes (mutate) keep costing **$1**
 each: they write state. Only the reads changed.
+
+### Declaring where your agent gets paid (`payment`)
+
+`POST /agents` and `PATCH /agents/:slug` accept an optional `payment` block. It is
+what the gateway later exposes as `agent.payment` in `/discover`, and it is how a
+third party says which chain and which wallet its agent charges on. Omit it and
+nothing changes: the agent is published exactly as before and gets paid on the
+gateway's default rail.
+
+```json
+{
+  "name": "My FX Agent",
+  "agentUrl": "https://api.example.com/agent",
+  "capabilities": ["fx"],
+  "payment": {
+    "method": "x402",
+    "chain": "solana-devnet",
+    "contract": "YourBase58PubkeyHere11111111111111111111111",
+    "asset": "USDC"
+  }
+}
+```
+
+| Field | Required | What it means |
+|---|---|---|
+| `method` | yes | Must be exactly `"x402"`. Not trimmed, not lowercased: `"X402"` and `" x402 "` are rejected. |
+| `chain` | yes | A chain slug this gateway knows **and** has active in this deployment. |
+| `contract` | yes | See the warning below. This is a **wallet**, not a token. |
+| `asset` | no | A label. Checked against the token the rail settles, then stored as you sent it. |
+
+#### `contract` is the wallet that gets paid, not a token address
+
+The name is misleading and it has already caused a false alarm in this codebase.
+`contract` is the `payTo` of the outbound transfer: the address that receives the
+money. It is **not** the mint, and it is **not** the address of a token contract.
+Putting a token address there sends your earnings to the token contract.
+
+The token is decided by the rail, never by your agent card. `asset` does not choose
+it either; `asset` is a label that no money path reads.
+
+The format has to match the chain family of `chain`: an EVM `0x...` address for an
+EVM chain, a base58 pubkey for Solana. Crossing them is rejected. Letter case is
+preserved byte for byte and never normalized, because base58 is case sensitive and
+lowercasing a Solana pubkey produces a different, valid looking wallet.
+
+#### Deleting the block
+
+On `PATCH`, send `"payment": null` to remove the block. The key is deleted from the
+agent's metadata and every other field is left untouched. Omitting `payment`
+entirely means "leave it as it is", which is a different thing.
+
+On `POST` there is nothing to delete, so `"payment": null` is rejected with
+`INVALID_PAYMENT_BLOCK` rather than being silently read as "no payment block". To
+publish without one, leave the key out.
+
+#### What comes back
+
+The `201` (or `200` for `PATCH`) response echoes the block under `payment`, with the
+four fields above and nothing else. Two fields you may have seen in `/discover`,
+`resolvedChain` and `network`, are derived by the gateway on every read: they are
+rejected on the way in and are never stored.
+
+#### Rejections
+
+All eight are `422`, and all of them are checked before anything is written, so a
+rejected request never touches your agent row.
+
+| `error_code` | `field` | When |
+|---|---|---|
+| `INVALID_PAYMENT_BLOCK` | `payment` | Not an object, or one of the three required strings is missing or blank |
+| `UNSUPPORTED_PAYMENT_METHOD` | `payment.method` | `method` is not exactly `"x402"` |
+| `INVALID_PAYMENT_CHAIN` | `payment.chain` | The gateway does not know that chain slug |
+| `PAYMENT_CHAIN_NOT_INITIALIZED` | `payment.chain` | Known slug, but that rail is not active here. The response adds `initializedChains` with the ones that are |
+| `INVALID_PAYMENT_PAYTO_FORMAT` | `payment.contract` | Not a valid address for the chain's family |
+| `ZERO_PAYMENT_PAYTO` | `payment.contract` | The zero address, or the all zero Solana pubkey `11111111111111111111111111111111` |
+| `PAYTO_IS_OPERATOR` | `payment.contract` | The address is the gateway's own operator address |
+| `PAYMENT_ASSET_MISMATCH` | `payment.asset` | The label does not match the token that rail settles |
+
+Error bodies never echo the value you sent. That detail is logged server side.
+
+#### `asset` is checked strictly, and that has a consequence worth knowing
+
+`asset` is compared case insensitively against the symbol the resolved chain's
+payment adapter declares. It is a label, so rejecting it cannot move a cent; the
+check exists so the public catalog does not advertise a token the rail does not
+actually settle.
+
+The consequence is that the right value depends on the rail, and it is not always
+`USDC`. Measured in this tree:
+
+| Chain | Symbol the adapter declares | Source |
+|---|---|---|
+| `solana-devnet` | `USDC` | `src/adapters/solana/payment.ts:82` |
+| `avalanche-fuji`, `avalanche-mainnet` | `USDC` | `src/adapters/avalanche/payment.ts:56` |
+| `kite-ozone-testnet` | `X402_TOKEN_SYMBOL` if set, otherwise `PYUSD` | `src/adapters/kite-ozone/payment.ts:253` and `:164` |
+| `kite-mainnet` | `X402_TOKEN_SYMBOL` if set, otherwise `USDC.e` | `src/adapters/kite-ozone/payment.ts:253` and `:165` |
+| `tempo-testnet` | `AlphaUSD` | `src/adapters/tempo/payment.ts:61` |
+
+So `"asset": "USDC"` is correct on Solana and Avalanche and is a `422` on Kite
+testnet today. If you do not want to track this, leave `asset` out: it is optional
+and nothing depends on it.
+
+#### What this does not do
+
+Publishing a `payment` block does not prove you control that wallet. The gateway
+checks the format, the chain, and that the address is not its own; it does not ask
+you to sign anything. Declaring someone else's wallet gives them your earnings, so
+the damage is to you, not to them.
+
+Nothing is migrated either. Agents that already have a `payment` block keep it
+exactly as stored, and this write path never rewrites, normalizes or re-validates a
+block it did not just receive.
 
 ### `/discover` response contract
 

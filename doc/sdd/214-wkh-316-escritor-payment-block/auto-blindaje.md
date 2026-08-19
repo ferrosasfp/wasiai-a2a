@@ -206,3 +206,57 @@
 - **Aplicar en**: cuando un Story File te pida una firma que permite el error que él mismo prohíbe,
   la salida no es elegir uno de los dos: es implementar el invariante en el tipo y **declarar la
   desviación**.
+
+---
+
+### [2026-08-19 00:44] Wave 4 — El barrido CD-A1 encontró citas rotas por MI diff en archivos que NO puedo tocar
+
+- **Error**: el barrido de cierre (re-abrir toda cita `archivo:línea` del diff con `sed -n`) encontró
+  que mi diff dejó en falso **7 citas de código VIVO** que yo nunca escribí. Mis edits cambiaron el
+  largo de `src/services/agent.ts` (+~150 líneas) y `src/routes/agents.ts` (+~65), y hay módulos que
+  las citan por número.
+- **Causa raíz**: exactamente CD-A1 en su forma difícil. Un barrido natural mira **lo que
+  escribiste**; estas citas las **desplazaste**. No aparecen en tu diff, no las toca ningún guardián
+  mecánico (el de ownership sólo mira su propio campo `line`), y envejecen en silencio.
+- **Qué encontré, medido contra `main` = `8242b16` y contra el árbol final**:
+
+  | Archivo que cita | Cita | Ahora es | ¿Lo arreglé? |
+  |---|---|---|---|
+  | `src/routes/agents.ownership.test.ts:17` | `services/agent.ts:701` | `:808` | ✅ sí (Scope IN) |
+  | `src/routes/agents.ownership.test.ts:18` | `services/agent.ts:715` | `:822` | ✅ sí (Scope IN) |
+  | `src/routes/agents.ownership.test.ts:25` | `:184` (T-143B-06, del propio archivo) | `:211` | ✅ sí (Scope IN) |
+  | `src/services/agent.ownership.test.ts:6` | `services/agent.ts:549` y `:715` | `:761` y `:822` | ❌ **NO** — fuera de Scope IN |
+  | `src/services/discovery.ts:255` | `services/agent.ts:429-440` | `:469-480` | ❌ **NO** — **CD-6 prohíbe tocar `discovery.ts`** |
+  | `src/services/orchestrate.ts:1160` | `services/agent.ts:526` | `:599` | ❌ **NO** — fuera de Scope IN |
+  | `src/lib/self-published-auth.ts:29` | `routes/agents.ts:265` | `:330` | ❌ **NO** — fuera de Scope IN |
+
+- **Hallazgo aparte, PRE-EXISTENTE (no es mío, y está medido)**: `src/types/index.ts` afirma
+  *"`publish` la escribe `true` (`services/agent.ts:399`)"*, y en **`main`** la línea 399 de ese
+  archivo está **VACÍA**. El ancla real (`enabled: true,`) estaba en `main:454` y ahora está en
+  `:462`. O sea que esa cita ya estaba rota **antes** de esta HU, por ~55 líneas. No la corregí a
+  propósito, para que el diff de WKH-316 siga siendo auditable como "lo que cambió esta HU"; va al
+  reporte para que la resuelva quien corresponda.
+- **Fix**: arreglé las 3 que caen dentro del Scope IN y **reporté las 4 que no**, con su valor nuevo
+  ya medido, en vez de arreglarlas en silencio. Las ~100 citas restantes viven en `doc/sdd/` de HUs
+  **cerradas**: son registros congelados de lo que se midió ese día y re-apuntarlas los falsearía.
+- **Aplicar en**: **toda HU que cambie el largo de un archivo muy citado.** El barrido correcto no es
+  "releé tus citas": es `git ls-files | grep -oE '<archivo>\.ts:[0-9]+'` sobre el repo entero, y
+  después separar en tres pilas — código vivo dentro de scope (arreglar), código vivo fuera de scope
+  (reportar con el número nuevo ya medido), documentos históricos (no tocar).
+
+---
+
+### [2026-08-19 00:45] Wave 4 — Mi propio harness de mutación dio un falso "ABORT" cuando el reemplazo CONTIENE al original
+
+- **Error**: `mutate.py` abortó en M24 con `ABORT: el original sigue presente`, pese a que la
+  mutación **sí** se había aplicado (el test se puso rojo por el motivo correcto y el `md5` de
+  restauración coincidió).
+- **Causa raíz**: mi control de "la sustitución ocurrió de verdad" es `assert old not in <texto
+  nuevo>`, y M24 era una mutación **aditiva**: le agregué una línea ARRIBA del bloque original sin
+  borrarlo, así que el original sigue presente por construcción. El control estaba escrito asumiendo
+  que toda mutación reemplaza.
+- **Fix**: se leyó el resultado real (test rojo + `md5` restaurado a
+  `0c19614ecf91c4669bd4802cb3fcd3ad`) en vez de creerle al assert. M24 cuenta como KILLED.
+- **Aplicar en**: cuando un instrumento de verificación contradice a la medición, **primero verificá
+  el instrumento** — que es justamente lo que este `ABORT` obligó a hacer. El control correcto para
+  una mutación aditiva no es "el original desapareció" sino "el md5 cambió y volvió".

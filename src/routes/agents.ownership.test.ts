@@ -14,15 +14,15 @@
  * devuelven `state.row` sin importar qué columna ni qué valor se filtró.
  *
  * `T-PUB-08` y `T-PUB-09` pasan por el **pre-chequeo en JS** de
- * `src/services/agent.ts:701`, no por el filtro de la consulta. Verificado por
- * mutación: borrando `src/services/agent.ts:715` (el `.eq('owner_ref', …)` del
+ * `src/services/agent.ts:808`, no por el filtro de la consulta. Verificado por
+ * mutación: borrando `src/services/agent.ts:822` (el `.eq('owner_ref', …)` del
  * DELETE) este archivo queda **VERDE, 9/9**.
  *
  * El aislamiento por filtro de `publishedAgentService` se prueba en
  * **`src/services/agent.ownership.test.ts`**, con un falso que aplica los
  * filtros pedidos sobre una tabla con dos dueños.
  *
- * `T-143B-06` (`:184`) sí es un espía de argumento sobre el UPDATE, y ese sitio
+ * `T-143B-06` (`:211`) sí es un espía de argumento sobre el UPDATE, y ese sitio
  * no necesita más: es la razón por la que la línea del UPDATE de `agent.ts` no
  * estaba entre los sitios sin cobertura.
  *
