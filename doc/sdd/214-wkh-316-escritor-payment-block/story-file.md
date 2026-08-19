@@ -76,6 +76,15 @@ fuera del repo después de que se escribiera ese texto.
 WKH-314**. 👉 **PROHIBIDO** repetir la justificación del KYC en cualquier docblock, comentario,
 README o mensaje de commit de este diff (CD-A2).
 
+> 🔴 **CALIBRACIÓN DEL DEV (2026-08-19, W0), a pedido del orquestador — "desbloquea WKH-314" hay que
+> calificarlo.** Lo que 314 espera de esta HU es **documentación**, no mecanismo. Medido en el árbol:
+> `readPaymentSpec` tiene exactamente **dos** consumidores de producción —`src/services/discovery.ts:1380`
+> y `src/services/agent.ts:164` (`:156` antes de mi diff de W0)— y **ninguno de los dos está en el
+> camino de `requirePayment`**. La intersección real de Scope IN entre las dos HUs es **un solo
+> archivo: `doc/INTEGRATION.md`**.
+> 👉 **PROHIBIDO escribir "esto bloquea a WKH-314" sin calificar** en cualquier docblock, README o
+> mensaje de commit de este diff. Lo que se bloquea es la wave de docs. Es el mismo CD-A2 de arriba.
+
 **2. El conjunto a migrar está VACÍO. No hay backfill, no hay wave de migración.**
 `GET /discover?limit=200` → **25 de 25 agentes con bloque `payment`**, de los cuales sólo **3 son
 `self-published`** (los únicos que este escritor alcanza: los otros 22 son federados de `wasiai-v2`
@@ -200,10 +209,33 @@ Re-verificalas con `sed -n 'Np'` antes de citarlas en cualquier docblock (CD-A1)
 | 11 | `doc/INTEGRATION.md` | Modificar | Subsección nueva en §3 (`:151`) — `POST /agents` **no está documentado en ninguna parte hoy**, verificado | tabla de skip-codes (`:634-644`) |
 | 12 | `README.md` | Modificar | Una línea en la fila de `/agents` (`:287`) apuntando a la subsección nueva de INTEGRATION | la propia tabla (`:280-293`) |
 
-**NO se toca nada más.** En particular: cero DDL, cero migración,
-`test/ownership-filter-guard.exceptions.ts` **no se toca** (esta HU no agrega ni una cadena
-`supabase.from(...)` nueva), y la fila `214` de `doc/sdd/_INDEX.md` **ya existe** (`:181`) — no la
-reescribas (eso es F4/DONE).
+**NO se toca nada más.** En particular: cero DDL, cero migración, y la fila `214` de
+`doc/sdd/_INDEX.md` **ya existe** (`:181`) — no la reescribas (eso es F4/DONE).
+
+| # | Archivo | Acción | Qué hacer | Exemplar |
+|---|---------|--------|-----------|----------|
+| 13 | `test/ownership-filter-guard.exceptions.ts` | Modificar (**sólo re-apuntar**) | Correr el `line` de las entradas de `src/services/agent.ts` por el desplazamiento que produzca este diff, y las citas de prosa **dentro de esas mismas entradas** que apunten a `src/services/agent.ts` | las propias entradas |
+
+> 🔴 **CORRECCIÓN DEL DEV (2026-08-19, W0) — esta fila la agregó el Dev, no el Architect.**
+> El Story File decía *"`test/ownership-filter-guard.exceptions.ts` **no se toca** (esta HU no
+> agrega ni una cadena `supabase.from(...)` nueva)"*. **La premisa es cierta y la conclusión no se
+> sigue**, y está medido: agregar 8 líneas a `src/services/agent.ts` (1 de import + 7 del campo
+> `PublishedAgentRecord.payment`) dejó `npm test` en **2 failed | 5622 passed** —
+> `test/ownership-filter-guard.test.ts` G-08 y G-09—, **sin una sola query nueva**. El motivo es
+> que ese archivo fija cada excepción por `{ file, line }`: lo que lo rompe es el
+> **desplazamiento**, no la cadena.
+>
+> **Alcance permitido de esta fila, y nada más:** correr el número de línea de entradas que YA
+> existen, y las citas de prosa que este diff desplazó dentro de esas mismas entradas.
+> ⛔ **PROHIBIDO agregar una entrada nueva, reescribir un motivo, o tocar entradas de otros
+> archivos.** Si tu diff necesita una entrada NUEVA, eso significa que agregaste una cadena
+> `supabase.from(...)` sin filtro de dueño: **parás y escalás** (CD-5, BLOQUEANTE en AR).
+> ⛔ Y las líneas nuevas se obtienen **leyendo el código** (`sed -n 'Np'`), nunca volcando la salida
+> del escáner — lo exige el `CLAUDE.md` del repo para este archivo en particular.
+>
+> Cambio de W0 (auditable): `318→326`, `343→351`, `454→462`, `494→502`, `527→535` (todas `+8`), y
+> dentro de esas 5 entradas `:330-335→:338-343`, `:450→:458`, `:580→:588`, `:701→:709`, `:407→:415`.
+> **Se vuelve a correr en W3B**, que edita el mismo archivo.
 
 ---
 
