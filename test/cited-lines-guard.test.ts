@@ -165,30 +165,43 @@
  *     frágil que este guardián existe para no volver a guardar.
  * 14. 🎯 LOS 4 ARCHIVOS DE ESTE GUARDIÁN. No están en `CORTE_A_PATHS`, y son los
  *     citadores más densos que este commit agregó al repo: medido con
- *     `scanSource` sobre ellos mismos, **247 tokens** (`test` 64 · `citations`
- *     100 · `exceptions` 46 · `scanner` 37) contra 57 en TODO el Corte A. O sea
+ *     `scanSource` sobre ellos mismos, **260 tokens** (`test` 76 · `citations`
+ *     100 · `exceptions` 46 · `scanner` 38) contra 57 en TODO el Corte A. O sea
  *     que el guardián más que cuadruplicó la población de citas del repo en
- *     archivos que él mismo no mira. (Foto del 2026-08-19, RE-DERIVADA después
- *     del fix-pack del re-AR —eran 243— corriendo `scanSource` sobre los cuatro
- *     paths. Que este número se mueva cada vez que alguien escribe una línea de
- *     prosa acá es exactamente lo que el ítem denuncia.)
+ *     archivos que él mismo no mira. (Foto del 2026-08-19, RE-DERIVADA tres
+ *     veces —243 antes del fix-pack del re-AR, 247 después, 260 después del
+ *     fix-pack de prosa del CR— corriendo `scanSource` sobre los cuatro paths.
+ *     Que este número se mueva cada vez que alguien escribe una línea de prosa
+ *     acá es exactamente lo que el ítem denuncia, y las tres fotos lo prueban.)
  *     **Se decidió declararlo y NO incluirlos, y la razón es medida, no de
- *     esfuerzo** — el desglose de los 247:
- *       · **88** son literalmente el valor del campo `cite` de una entrada de
+ *     esfuerzo** — el desglose de los 260:
+ *       · **89** son literalmente el valor del campo `cite` de una entrada de
  *         `CITED_LINES`. Ésos YA tienen testigo, y mejor que el de acá: `G-C5`
  *         verifica esa misma cita contra el archivo apuntado y `G-C7` se pone
  *         rojo si el token desaparece de su citador.
- *       · **97** son `:N` sueltos (P3/P4) sin archivo: números de línea citados
+ *       · **101** son `:N` sueltos (P3/P4) sin archivo: números de línea citados
  *         dentro de la prosa que explica el algoritmo.
- *       · **26** nombran archivos que el ÍNDICE DE GIT no tiene: 21 son los
- *         fixtures en memoria de `G-C2`/`G-C3` (`a.ts:1`, `b.ts:2`, `foo.ts:42`,
- *         `./splash.tsx:245`), que no existen ni pueden existir, y 5 son
- *         `.nexus/project-context.md:6` — que SÍ existe en disco y no está
- *         trackeado. Ese par es, literalmente, el ejemplo de la segunda salida
- *         de emergencia que el candado 2️⃣ declara y no cierra. Declararlos a
- *         todos exigiría una excusa escrita por cada fixture, o sea llenar el
- *         archivo de excusas de ruido para poder verificar otra cosa.
- *       · **36** nombran un archivo trackeado; de ésos, 9 son el token
+ *       · **29** nombran archivos que el ÍNDICE DE GIT no tiene, y son TRES
+ *         grupos, no dos. (Re-derivado el 2026-08-19 — la versión anterior
+ *         decía «21 fixtures» y «5 son `.nexus/project-context.md:6`», y las
+ *         dos estaban mal contadas: CR `MNR-cr-5`.)
+ *           — **16** son fixtures en memoria de `G-C2`/`G-C3`
+ *             (`./splash.tsx:245` ×5, `foo.ts:42` ×3, `a.ts:1` ×2, `b.ts:2` ×2,
+ *             `../../lib/fixture.ts:3` ×2, `./no/existe.ts:1` ×2): ésos no
+ *             existen ni pueden existir.
+ *           — **8** son `x.io:8443`, que NO es un archivo: es el host y el
+ *             puerto de la URL de calibración. La propia HU lo declara ruido
+ *             legítimo CON path (ver el barrido de `G-C11`), así que llamarlo
+ *             «un archivo que no existe ni puede existir» era generalizar.
+ *           — **5** nombran `.nexus/project-context.md`, y son DOS tokens
+ *             distintos: 4 × `:6` + 1 × `:6-12`. Ese archivo SÍ existe en disco
+ *             y NO está trackeado, así que es —literalmente— el ejemplo de la
+ *             segunda salida de emergencia que el candado 2️⃣ declara y no
+ *             cierra (`TD-316-CITAS-PROJECT-CONTEXT`).
+ *         Declararlos a todos exigiría una excusa escrita por cada fixture, o
+ *         sea llenar el archivo de excusas de ruido para poder verificar otra
+ *         cosa.
+ *       · **41** nombran un archivo trackeado; de ésos, 9 son el token
  *         HISTÓRICO `.gitignore:172` —el bug que esta HU arregló, citado como
  *         ejemplo de lo que estaba mal—, que por construcción ya no describe esa
  *         línea. Meter los 4 archivos al corte convertiría cada mención del bug
@@ -200,9 +213,19 @@
  *     `return settlement;`, `:335` NO menciona `priorTx`, con
  *     `git status --porcelain src/` vacío ⇒ disco = `HEAD`). El segundo
  *     fix-pack (el del re-AR) NO agregó ningún token nuevo que nombre un archivo
- *     trackeado —el conteo de esa categoría quedó en 36, igual que antes—: sus
- *     tokens nuevos son un `cite` ya declarado y tres del ejemplo que ilustra la
- *     segunda salida de emergencia, que por definición no resuelve. Lo que no tienen es
+ *     trackeado —esa categoría quedó en 36—: sus tokens nuevos son un `cite` ya
+ *     declarado y tres del ejemplo que ilustra la segunda salida de emergencia,
+ *     que por definición no resuelve.
+ *     🪞 EL TERCERO —el fix-pack de prosa del CR, que escribió estas mismas
+ *     líneas— SÍ agregó dos, y se declaran acá porque callarlos sería el defecto
+ *     que esta HU persigue: `test/readme-parity.test.ts:105` y
+ *     `test/scripts-imported-by-tests-are-tracked.test.ts:61`. Las dos se
+ *     abrieron al escribirlas y las dos son ciertas (`:105` es el string
+ *     `'src/lib/downstream-payment.ts:186-194'` dentro de una línea de código;
+ *     `:61` es `function stripComments(source: string): string`). Corregir una
+ *     afirmación falsa de este archivo SUBE la deuda de este mismo ítem: 36 → 41
+ *     trackeados, 247 → 260 tokens — y el salto necesitó DOS pasadas, porque
+ *     escribir el número lo movió. Lo que no tienen es
  *     testigo MECÁNICO, y ésa es la diferencia que este ítem declara: cada vez
  *     que este archivo crece, crece la prosa que nadie confronta. Queda como
  *     `TD-224-CITAS-DEL-PROPIO-GUARDIAN`, y su arreglo NO es agregar los paths:
@@ -349,11 +372,31 @@ function isDelegated(c: FoundCite): boolean {
  * `test/payment-guards-live-in-one-place.test.ts` (Corte A, fuera de scope: no
  * se tocó ni se importó de ahí).
  *
- * ⚠️ Lo que ESTO tampoco cierra, con esas palabras: un dueño puede seguir
- * nombrando el target en una línea de CÓDIGO que no lo vigile (`const X =
- * 'src/lib/downstream-payment.ts';` sin usarla). El costo subió de «escribir un
- * comentario» a «escribir código muerto que alguien va a ver en el diff»; no
- * bajó a cero. `G-C12` mide las dos direcciones de este cambio.
+ * ⚠️ Lo que ESTO tampoco cierra, con esas palabras — y acá el costo está
+ * MEDIDO, no estimado. La versión anterior de este párrafo decía que el costo
+ * «subió de escribir un comentario a escribir código muerto que alguien va a
+ * ver en el diff; no bajó a cero». Eso es FALSO, y falso en el sentido
+ * peligroso: dice que cuesta MÁS de lo que cuesta (CR `MNR-cr-1`).
+ *
+ * 1. `stripComments` borra los bloques y las líneas que son SÓLO comentario.
+ *    **NO borra el comentario al final de una línea de código.** Medido
+ *    llamando a la función: `// <target>` y un bloque que nombre el target se
+ *    BORRAN; `const _C = 1; // cubre <target>` SOBREVIVE. O sea que el costo
+ *    de esta excusa no es «código muerto»: es **un comentario**, sólo que
+ *    pegado al final de una línea de código.
+ * 2. Y hay un escalón más abajo: **CERO líneas escritas**. Hoy, en `main`,
+ *    `test/readme-parity.test.ts:105` ya nombra `src/lib/downstream-payment.ts`
+ *    dentro de un string de una línea de CÓDIGO —sobrevive `stripComments`— y
+ *    es un `*.test.ts` que corre. Pero no verifica una sola cita: compara qué
+ *    archivos nombran los dos README. Delegarle ese target saca sus 4 claves
+ *    del universo sin escribir nada en ningún lado.
+ *
+ * O sea: la delegación sigue siendo **el interruptor más barato del guardián**
+ * —una entrada saca N claves de una vez, contra 1 de `SCANNER_FALSE_POSITIVES`—
+ * y su candado sigue siendo de PRESENCIA, no mecánico. Queda ABIERTO y con
+ * nombre: `TD-224-DELEGACION-CUESTA-CERO`, y su costo real, medido, es CERO
+ * líneas. `G-C12` mide que `stripComments` se APLIQUE; no mide que apagar la
+ * delegación sea caro.
  */
 function delegationFindings(
   d: DelegatedTarget,
@@ -1183,7 +1226,26 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // Lo que este testigo NO cierra, con esas palabras: un mutante que
     // discrimine por el CONTENIDO del token (por ejemplo, ignorar exactamente
     // el único token que se quiere apagar) sigue pasando. Lo que dejó de ser
-    // posible es apagar el candado ENTERO o por un campo de la entrada.
+    // posible es apagar el candado ENTERO, o filtrarlo por `reason`.
+    //
+    // 🔴 Y SÓLO por `reason`. Este párrafo decía «o por un campo de la
+    // entrada», y eso era FALSO para el campo `from` (CR `MNR-cr-2`). El
+    // testigo emite un canario por cada `reason` REAL, pero los canarios
+    // llevan el `from` de las citas que siguen en `CITED_LINES`: una cita que
+    // el atacante SACA de `CITED_LINES` deja de aportar su `from`. Repro
+    // medida, 12/12 VERDE: mover `src/services/agent.payment.test.ts ::
+    // downstream-payment.ts:247` —la FIRMA de `settleSolanaLeg`, money-path—
+    // a `SCANNER_FALSE_POSITIVES` con una excusa larga, más una línea en el
+    // barrido de arriba: `if (e.from === 'src/services/agent.payment.test.ts')
+    // return [];`. Cuesta exactamente lo mismo que el TRUCHO A que este
+    // testigo acaba de cerrar. Funciona porque ese citador aporta EXACTAMENTE
+    // 1 canario, y derivado hoy 3 de los 11 citadores están así:
+    // `src/services/agent.ts`, `src/services/agent.payment.test.ts` y
+    // `src/routes/agents.publish.test.ts` (FOTO del 2026-08-19 — derivala
+    // agrupando `citasQueNombranArchivo` por `from`).
+    // El arreglo —emitir también un canario por cada `from` real, el mismo
+    // patrón que ya se usa para `reason`— NO se hizo en esta HU: queda
+    // ABIERTO como `TD-224-CANARIOS-POR-FROM`.
     const citasQueNombranArchivo = CITED_LINES.filter(
       (c) =>
         citeNamesFile(c.cite) &&
@@ -1222,6 +1284,20 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
         'ganó un filtro que saltea entradas. `G-C11` puede seguir verde: prueba la REGLA, no su\n' +
         'aplicación — que es exactamente el agujero que este assert existe para tapar.\n',
     ).toBe(CANARIOS.length);
+    // 🚧 LO QUE ESTE TESTIGO NO SE APLICA A SÍ MISMO — declarado, NO cerrado.
+    // El esperado (`CANARIOS.length`) se deriva del PROPIO conjunto de
+    // canarios. Eso lo hace inmortal a los cambios del registro —que es para
+    // lo que se eligió— y CIEGO a que el conjunto se achique. Repro medida
+    // (CR `MNR-cr-3`), 12/12 VERDE: borrar las 5 líneas del bloque de canarios
+    // por `reason` de acá arriba —las que un comentario declara como lo que
+    // mata el filtro por `reason`— deja el guardián en 12/12 sin que nada se
+    // ponga rojo; y con ese bloque borrado, el TRUCHO A vuelve a pasar. El
+    // único piso es el `toBeGreaterThanOrEqual(10)` de arriba, que cubre SÓLO
+    // los canarios base y no dice nada de los canarios por `reason`.
+    // Es un RESIDUAL, no un agujero: exige editar el guardián. Se declara y no
+    // se arregla A PROPÓSITO — cerrar el meta-nivel (un assert de armado del
+    // propio testigo, derivado, del estilo del que ya existe en `G-C11`) es la
+    // HU siguiente, no ésta. Queda con nombre: `TD-224-QUIEN-VIGILA-AL-TESTIGO`.
 
     // 3️⃣ `UNANCHORABLE_PROSE` es para prosa SIN forma sintáctica. Si el `quote`
     // contiene algo que el propio escáner sabe encontrar, entonces se puede

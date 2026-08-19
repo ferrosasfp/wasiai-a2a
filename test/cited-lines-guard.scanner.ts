@@ -333,13 +333,37 @@ export function citeMatchesTarget(fromFile: string, token: string, target: strin
  * Corte A y está fuera del scope de esta HU, así que NO se tocó ni se importó
  * de ahí: se re-escribió como función PURA sobre un string, porque
  * `delegationFindings` recibe el fuente por un lector inyectado y no lee disco.
- * La duplicación es deliberada y está declarada; si algún día los dos criterios
- * divergen, el que manda es el del guard del camino del dinero.
+ * La duplicación es deliberada y está declarada; si algún día los tres
+ * criterios divergen, el que manda es el del guard del camino del dinero
+ * (`codeOnly`), y los otros dos se alinean a él.
  *
- * Límite, con esas palabras: es textual, no un parser. Un `/*` adentro de un
- * string literal se come lo que sigue hasta el próximo `*\/`. El efecto es
- * BORRAR de más, o sea degradar hacia el rojo (un control que existe se
- * declararía ausente), que es el lado seguro para un guardián.
+ * 🔴 SON TRES, NO DOS — y las dos razones de arriba no cubren al tercero (CR
+ * `MNR-cr-4`). `test/scripts-imported-by-tests-are-tracked.test.ts:61` ya
+ * declara `function stripComments(source: string): string`: mismo nombre, misma
+ * semántica, función PURA sobre un string (o sea SIN el problema del disco) y
+ * fuera de `CORTE_A_PATHS` (o sea SIN el problema de scope). Hoy el repo tiene
+ * TRES limpiadores de comentarios JS/TS, dos con el mismo nombre. Es homónimo,
+ * no colisión: aquél es local a su archivo. Y nada mecánico detecta que
+ * diverjan — si mañana alguien arregla uno para template literals, los otros se
+ * quedan con el criterio viejo y todo sigue verde. Eso es exactamente lo que la
+ * delegación de `_INDEX.md` describe en `cited-lines-guard.citations.ts` como
+ * «dos criterios que coinciden el día que se escriben y divergen en la próxima
+ * corrección de borde». Queda ABIERTO: `TD-224-TRES-STRIPCOMMENTS`.
+ *
+ * Límite, con esas palabras — y son DOS direcciones, no una. La versión
+ * anterior de este párrafo decía que el único modo de fallo era «BORRAR de
+ * más … degradar hacia el rojo, que es el lado seguro»; eso está incompleto.
+ *   (a) HACIA EL ROJO (seguro): es textual, no un parser. Un `/*` adentro de un
+ *       string literal se come lo que sigue hasta el próximo `*\/`, así que un
+ *       control que existe se declararía ausente.
+ *   (b) HACIA EL VERDE (inseguro): borra de MENOS. El filtro sólo descarta la
+ *       línea cuyo texto ARRANCA con `//`, `*` o `/*`, así que **el comentario
+ *       al final de una línea de código SOBREVIVE**. Medido:
+ *       `const _C = 1; // cubre <target>` pasa entero. Esa es la dirección que
+ *       abarata la delegación, y está declarada en el docblock de
+ *       `delegationFindings` (`TD-224-DELEGACION-CUESTA-CERO`).
+ * El docblock de `codeOnly` no comete este error: dice sólo «las líneas que son
+ * SÓLO comentario», sin prometer una dirección.
  */
 export function stripComments(src: string): string {
   return src
