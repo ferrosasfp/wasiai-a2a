@@ -240,3 +240,207 @@
   (el corte de mayor valor de seguridad del repo: cada una justifica una lectura cross-tenant
   citando un gate de admin, y eso hoy no lo vigila nada); C = el resto de `src`+`test`;
   D = `doc/**`, que es un programa, no una HU.
+
+---
+
+# FIX-PACK post-AR — [2026-08-19]
+
+> AR **RECHAZADO**: 1 `BLQ-ALTO` + 1 `BLQ-MED` + 2 `BLQ-BAJO` + 5 MENORes.
+> Contrato del fix-pack: `doc/sdd/224-citas-archivo-linea-sin-testigo/ar-report.md`.
+> Nada de esto toca `src/`: el diff son 4 archivos de `test/`.
+
+### [2026-08-19] FIX — el candado se construyó sobre la lista equivocada (`BLQ-ALTO-1`)
+
+- **Error**: CD-14 dice «PROHIBIDO que `exceptions.ts` exceptúe algo distinto de la unicidad».
+  Lo implementé sobre `UNICITY_EXCEPTIONS` —que resiste: el AR le tiró 4 mutantes y los 4
+  murieron— y dejé `SCANNER_FALSE_POSITIVES` **exceptuando TODO sin ninguna restricción de
+  forma**. La clave desaparece del conjunto de huérfanas de `G-C4` Y del invariante estricto.
+- **Causa raíz**: leí CD-14 como una regla sobre *una lista* en vez de como una regla sobre
+  *el archivo*. Hay TRES listas en `exceptions.ts` y escribí el candado para la primera. Es la
+  misma clase de error que el CLAUDE.md documenta para el guardián de ownership («la regla no
+  es sólo sobre `a2a_agent_keys`»): **el criterio se cumplió para el ejemplo, no para el
+  conjunto**.
+- **Medido ANTES (reproducción del AR, re-corrida por mí en un worktree en `5af987e`)**: mover
+  `CLAUDE.md :: src/types/database.types.ts:2567` —cita real, P1, normativa— de `CITED_LINES` a
+  `SCANNER_FALSE_POSITIVES` con una excusa de 40+ caracteres ⇒ **exit 0, 10/10 passed**.
+- **Fix**: `citeTargetIfTracked()` en `cited-lines-guard.scanner.ts` (función pura, misma
+  resolución que `citeMatchesTarget`) + su aplicación en `G-C8` + `G-C11` como testigo.
+  La regla es **«ningún token que nombre un archivo TRACKEADO POR GIT»**, no «ningún token con
+  path»: la trampa del fix obvio la dejó medida el AR y la re-medí — `https://x.io:8443/y`
+  produce un token **P2 con path** (`x.io`) que es ruido legítimo y **tiene que poder seguir
+  declarándose** (mutante M2, verde).
+- **Medido DESPUÉS**: el mismo mutante ⇒ **rojo en `G-C8`** con el path resuelto en el mensaje.
+- **🚧 Acotar no es cerrar, y va escrito en el código**: un `:N` suelto (P3/P4) se puede seguir
+  moviendo a esa lista, porque nada mecánico separa un `:336` de un puerto. Medido: **31 de las
+  50** citas declaradas tienen archivo en el token y quedan protegidas; **19 no**.
+- **Aplicar en**: cualquier archivo de excepciones con más de una lista. La pregunta correcta
+  no es «¿la lista que arreglé resiste?» sino «¿cuál de las listas de este archivo es la MÁS
+  débil, y qué le pasa a la que exceptúa TODO?».
+
+### [2026-08-19] FIX — el segundo interruptor: el dueño de la delegación era prosa (`BLQ-MED-1`)
+
+- **Error**: `G-C9` pedía dos cosas por entrada (target trackeado + motivo de 40 chars) y
+  verificaba el dueño con **tres literales hardcodeados** de la única entrada que existía
+  (`it('G-F1`, `it('G-F2`, `CITED_INDEX_LINES`). Ninguna entrada NUEVA se miraba.
+- **Causa raíz**: escribí el control mirando el dato que tenía delante en vez de la propiedad.
+  Un control que enumera los literales del caso de hoy no es un control: es una copia del caso
+  de hoy. (Y `isDelegated` corre ANTES de todo, así que `OCCURRENCES` y `DECLARED` bajan a la
+  par y el invariante estricto queda balanceado: el silencio es total.)
+- **Medido ANTES**: entrada `{target: 'src/services/discovery.ts', ownedBy: 'NADIE. No existe
+  ningún guardián que verifique estas citas.'}` + borrado de las 3 entradas de `discovery.ts`
+  ⇒ **exit 0, 10/10 passed**. Radio: `downstream-payment.ts` saca 4 claves, `discovery.ts` 3.
+- **Fix**: `DelegatedTarget` gana `ownerFiles` + `ownerControls`, y `delegationFindings()`
+  —función pura, con el índice de git y el lector INYECTADOS— verifica por entrada: target
+  trackeado · motivo · los `ownerFiles` existen y son legibles · **al menos uno es un
+  `*.test.ts`** (un dueño que no corre no es un dueño) · `ownedBy` NOMBRA a alguno de ellos
+  (prosa y máquina de acuerdo) · cada `ownerControl` sigue escrito · **alguno de los archivos
+  del dueño NOMBRA este target**. `G-C12` la prueba con 1 caso bueno y 6 malos en memoria.
+- **Medido DESPUÉS**: el mismo mutante ⇒ **rojo en `G-C9`**, con `no declara este target`.
+- **⚠️ Lo que NO cierra, escrito en el docblock**: verifica que el dueño EXISTA, CORRA y NOMBRE
+  al target; **no** que efectivamente lo VERIFIQUE. Es «presencia, no valor», la misma frontera
+  que el guardián de ownership declara en el CLAUDE.md.
+
+### [2026-08-19] FIX — la prosa prometía un rojo que no ocurre (`BLQ-BAJO-1`)
+
+- **Error**: `citations.ts` afirmaba «hoy no hay dos tokens `cite` IGUALES dentro de un mismo
+  citador» y «si mañana aparece un duplicado, `G-C4` se pone rojo y pide un campo `nth`».
+  **Las dos mitades falsas**: hay 3 claves con duplicado HOY (`:00`×2, `.gitignore:185`×3,
+  `.gitignore:190-193`×2 — las 4 ocurrencias del `57 − 53`, derivadas agrupando `FOUND`), y
+  duplicar un token a propósito deja el guardián **verde** (mutante M5, re-corrido: 12/12).
+- **Causa raíz**: escribí el modo de falla **por diseño esperado**, sin ejercitarlo. Y el mismo
+  commit documentaba lo contrario en el ítem 13 de la no-cobertura.
+- **Fix**: se corrige la PROSA (no el comportamiento): una declaración cubre todas las
+  ocurrencias a propósito, el `nth` no se implementa a propósito, y el conteo de duplicados se
+  marca como FOTO con la receta para derivarlo. Se elige corregir la frase y no hacer cierto el
+  rojo porque el `nth` es «volver a guardar un número de posición», que es el defecto que la HU
+  existe para no repetir.
+- **Aplicar en**: toda frase con forma «si pasa X, el test se pone rojo». **Si no la corriste,
+  no la escribas.** Es la tercera vez en esta HU que una promesa de rojo no se ejercitó.
+
+### [2026-08-19] FIX — dos cabeceras decían «vacío»/«0» con 3 entradas debajo (`BLQ-BAJO-2`)
+
+- **Error**: `exceptions.ts` decía «Nace VACÍO… las **45** citas se pudieron anclar con
+  conjunción única» con `UNICITY_EXCEPTIONS` de 3 entradas 2 líneas más abajo (y el 45 ya
+  desmentido: son 57); y «Población hoy: **0**» con `SCANNER_FALSE_POSITIVES` de 3 entradas
+  1 línea más abajo. Un tercer sitio con el mismo defecto: `UNANCHORABLE_PROSE` repetía «45».
+- **Causa raíz**: escribí las cabeceras cuando las listas estaban vacías y no las releí después
+  de llenarlas. **Es exactamente el fenómeno que la HU vigila, dentro de la HU, por tercera y
+  cuarta vez** (W5 ya lo había registrado para el desglose por forma).
+- **Fix**: las tres cabeceras dicen ahora la fuente que no envejece (`LISTA.length`), y el
+  número va con fecha y la palabra FOTO.
+- **Aplicar en**: ninguna cabecera de un archivo-registro escribe su propia población sin
+  fecha. La regla operativa que faltaba: **releer la cabecera cada vez que se toca el cuerpo**.
+
+### [2026-08-19] 🪞 HALLAZGO PROPIO, más grave que el `MNR-3` que lo destapó
+
+- **Qué encontré**: yendo a des-clavar los dos porcentajes de `G-C10` (`MNR-3`), medí el
+  candado antes de tocarlo — y **`expect(self.includes('<literal>')).toBe(true)` NO PUEDE
+  PONERSE ROJO NUNCA**, porque `self` es el archivo entero y el literal buscado está escrito
+  en la misma línea que lo busca. **Medido** (mutante M10, en el worktree de `5af987e`):
+  reemplacé el literal por `ZZ-LITERAL-QUE-NO-EXISTE-EN-NINGUN-LADO` ⇒ **10/10 verde**.
+  O sea: los tres controles del docblock de `G-C10` estaban **vacuos**, no sólo pudriéndose.
+- **Causa raíz**: un guardián que se compara CONTRA SÍ MISMO. El AC-10 pedía «que el docblock
+  declare», y lo verifiqué sobre el texto que incluye el verificador.
+- **Fix**: `G-C10` recorta la CABECERA (`self.slice(0, indexOf('\nimport {'))`) y evalúa los
+  `includes` contra la prosa, no contra el assert. Y los dos porcentajes se verifican por
+  FORMA (`/\d+,\d+ %/` ≥ 2 dentro del bloque de cobertura + la advertencia «LOS DOS PISOS»),
+  no por dígitos: `TD-316-CITAS-DOTFILE-EN-OTROS-CORTES` se compromete a re-derivar el
+  denominador, y clavar los dígitos era un candado que se pudría solo.
+- **Medido DESPUÉS**: borrar del docblock la declaración de la frase prohibida ⇒ **rojo**
+  (antes: verde). Re-derivar los dos porcentajes en el docblock ⇒ **verde** (no rompe nada).
+- **Aplicar en**: todo control que lea su propio archivo. `readTracked(self)` + `includes` es
+  un patrón que se auto-satisface salvo que se recorte la región. Buscar el resto de este
+  patrón en el repo es deuda: **`TD-224-CONTROLES-QUE-SE-LEEN-A-SI-MISMOS`**.
+
+---
+
+## Los 5 MENORes: qué entró, qué no, y por qué
+
+| # | Decisión | Razón medida |
+|---|---|---|
+| `MNR-1` sexta forma ciega (`Dockerfile:12`) | **ENTRA, declarado (ítem `(h)` del escáner), NO arreglado** | Degrada **ruidoso**: lo verifiqué yo, no lo heredé — agregar `Dockerfile:12` a un archivo del Corte A pone **`G-C4` en rojo** (mutante M4). Población hoy en el Corte A: **0**, medida por mí barriendo los 14 paths con `Dockerfile\|Makefile\|Procfile\|LICENSE\|CHANGELOG\|Justfile` seguidos de `:N`. Arreglar el regex tiene contraindicación: aceptar segmentos sin punto convierte cualquier `foo:12` de la prosa en cita con archivo, o sea cambia un fallo ruidoso por ruido de fondo. |
+| `MNR-2` criterio inconsistente en `fee-split.ts:316` | **ENTRA**: la vara queda escrita donde vive la escalera (`exceptions.ts`) | Verifiqué las tres líneas contra el disco con `git status --porcelain src/` vacío: `:316` = `const failed = chargeable.find(…'failed')`, `:320` = `return settlement;`, `:335` **no** menciona `priorTx`, `:336` sí. La vara: **la línea citada tiene que contener el SUJETO de la afirmación, o la línea que lo DECIDE**; y el desempate es **no tocar**, porque corregir de más deja una cita con cara de verificada. |
+| `MNR-3` `G-C10` clava dos números no confiables | **ENTRA, y creció**: destapó el hallazgo 🪞 de arriba | Ver la entrada anterior: el candado no sólo se pudría, **no podía ponerse rojo**. |
+| `MNR-4` 187 tokens sin testigo en los 4 archivos nuevos | **NO entran al Corte A; se DECLARA como ítem 14 de la no-cobertura, con el desglose derivado** | Medido con `scanSource` sobre los propios archivos, ya con el fix-pack adentro: **243** tokens (`test` 61 · `citations` 100 · `exceptions` 45 · `scanner` 37). Desglose: **87** son literalmente el campo `cite` de una entrada declarada (**ya tienen testigo, y mejor**: `G-C5` verifica esa misma cita y `G-C7` se pone rojo si el token desaparece); **97** son `:N` sueltos; **23** nombran archivos que NO EXISTEN NI PUEDEN (los fixtures en memoria de `G-C2`/`G-C3`); **36** nombran un archivo trackeado, y de ésos **9** son el token HISTÓRICO `.gitignore:172` — el bug que esta HU arregló, citado como ejemplo. **Incluirlos convertiría cada mención del bug en una cita rota y llenaría el archivo de excusas de ruido para poder verificar otra cosa.** El costo real no es escribir 243 entradas: es que el corte no distingue un token que AFIRMA de uno que es DATO. Eso es `TD-224-CITAS-DEL-PROPIO-GUARDIAN`. |
+| `MNR-5` README fuera de Scope IN | **ENTRA como corrección de CONTRATO** (ver abajo). Esta vez **no hizo falta tocarlos**: el fix-pack no agrega archivos de test, `npm test` sigue contando **296**. | El AR dictaminó que el defecto es del contrato. |
+
+### Corrección del contrato (`MNR-5`), para la próxima HU
+
+`story-file.md:1116` pone `README.md` en ⛔ Out of Scope, y la Done Definition #5 exige
+`npm test` exit 0. **Están en conflicto directo**: `test/readme-numbers.test.ts` deriva del
+índice de git la cantidad de archivos de test y **los dos README la publican**, así que
+cualquier HU que agregue un archivo de test tiene que tocarlos o entregar rojo.
+
+> **Regla para F2.5**: toda HU que agregue o borre un archivo bajo `test/` declara en su Scope
+> IN la excepción `README.md` + `README.es.md` **acotada al dígito que deriva
+> `readme-numbers.test.ts`**. No declararla no evita el cambio: lo empuja a la puerta 3, donde
+> aparece como Scope Drift en el AR.
+
+---
+
+## Tabla de mutantes del fix-pack — ANTES (worktree en `5af987e`) / DESPUÉS
+
+Método: worktree detached en el commit auditado (`git worktree add … 5af987e`) con
+`node_modules` enlazado; arnés con copia propia + md5 pre-registrado (**nunca
+`git checkout --`**), aborto si el ancla no aparece exactamente N veces, restauración en
+`finally` verificada por md5, JSON reporter con la **raíz validada adentro del JSON**
+(`testResults[*].name` empieza con la raíz esperada) y **filtrado explícito del warning
+cosmético `Failed to load source map`** para no repetir el falso `PARSE_ERROR` del AR.
+
+| # | Mutante | ANTES (`5af987e`) | DESPUÉS | Quién lo mata |
+|---|---|---|---|---|
+| M1 | Cita real P1 normativa (`CLAUDE.md :: src/types/database.types.ts:2567`) movida a `SCANNER_FALSE_POSITIVES` con excusa de 40+ chars | **PASA — 10/10, exit 0** | **MUERE — 11/12, exit 1** | `G-C8` |
+| M2 | ✅ **CALIBRACIÓN**: `https://x.io:8443/y` en un archivo del Corte A + su entrada en `SCANNER_FALSE_POSITIVES` | PASA (12/12) | **PASA (12/12)** — el ruido legítimo sigue declarable | — |
+| M3 | `DELEGATED_TARGETS` con `ownedBy: 'NADIE…'` + borrado de las 3 entradas de `discovery.ts` | **PASA — 10/10, exit 0** | **MUERE — 11/12** (`no declara este target`) | `G-C9` |
+| M4 | `Dockerfile:12` en un archivo del Corte A (la sexta forma ciega) | n/a | **MUERE — 11/12** (degrada RUIDOSO, no silencioso) | `G-C4` |
+| M5 | Duplicar el token `:336` dentro del mismo citador | PASA | **PASA** — y ahora la prosa lo dice | — (ítem 13) |
+| M6 | Re-derivar los DOS porcentajes en el docblock (cumplir la deuda) | PASA¹ | **PASA** — sin dígitos clavados | — |
+| M9 | Borrar del docblock la declaración de la frase prohibida (AC-10) | **PASA — 10/10** | **MUERE — 11/12** | `G-C10` |
+| M10 | 🪞 MECANISMO: literal del assert → `ZZ-LITERAL-QUE-NO-EXISTE-EN-NINGUN-LADO` | **PASA — 10/10** (auto-satisfacción probada) | **MUERE — 11/12** | `G-C10` |
+| M7 | ARREGLO TRUCHO del candado 1: `citeTargetIfTracked` devuelve siempre `null` | n/a | **MUERE — 11/12** | `G-C11` |
+| M8 | ARREGLO TRUCHO del candado 2: `delegationFindings` devuelve siempre `[]` | n/a | **MUERE — 11/12** | `G-C12` |
+
+¹ **M6 ANTES pasa por la razón equivocada, y ése es el hallazgo 🪞**: el `expect(self.includes('6,0 %'))`
+se satisfacía con su propia línea. El primer intento de este mutante (una sola ocurrencia)
+dio un **falso PASA** por otro motivo —el párrafo de la foto repetía los dos números—, así que
+el mutante se re-hizo dos veces hasta aislar el mecanismo. Está escrito porque un mutante que
+sobrevive por la razón equivocada es indistinguible de un candado sano.
+
+**Las tres puertas, sobre el árbol final**: `npm test` ⇒ **296 archivos · 5781 tests · 5762
+passed · 19 pending · 0 failed · exit 0**, con **0 archivos fuera de la raíz** validado adentro
+del JSON (el conteo de archivos de test **no cambió**: sigue en 296, por eso los README no se
+tocaron). `tsc --noEmit` ⇒ **0**. `biome check src/` ⇒ **0** (489 archivos). Y como
+`tsconfig.json:19` es `include: ["src/**/*"]`, los 4 archivos del guardián **no** los mira ese
+`tsc`: los typechequeé aparte con un `tsconfig` de scratch en `strict` +
+`noUncheckedIndexedAccess` ⇒ **0 errores**.
+
+## Lo que NO pude medir — con estas palabras
+
+- **No medí la VERDAD de la prosa que rodea a las citas**, ni las del Corte A ni las de los 4
+  archivos del guardián. Verifiqué las 4 líneas que este fix-pack cita por primera vez
+  (`fee-split.ts:316/:320/:335/:336`) abriendo el archivo; el resto sigue siendo el ítem 3 de
+  la no-cobertura.
+- **No re-derivé el denominador** (749 anclas en `src`+`test`, ~20.550 en `doc/`). Sigue siendo
+  `TD-316-CITAS-DOTFILE-EN-OTROS-CORTES`. Lo que hice fue sacarle a `G-C10` la dependencia de
+  ese número, no medirlo.
+- **No corrí la suite completa bajo cada mutante**: cada mutante corrió sólo
+  `test/cited-lines-guard.test.ts`. La suite completa (296 archivos) la corrí sobre el árbol
+  final, limpio.
+- **No busqué en el resto del repo el patrón auto-satisfactorio** que encontré en `G-C10`
+  (`readTracked(self)` + `includes` sin recorte). Queda como
+  `TD-224-CONTROLES-QUE-SE-LEEN-A-SI-MISMOS`, y **hasta que alguien lo busque, no sé si hay
+  más**.
+- **No probé el guardián en un clone fresco**, ni ejecuté nada contra producción: cero llamadas
+  de red, cero Railway, cero Supabase.
+- **No amplié el universo del corte**: el silencio sobre los 4 archivos del guardián es real y
+  está declarado, no cerrado.
+
+## Deuda NUEVA del fix-pack
+
+- **`TD-224-CITAS-DEL-PROPIO-GUARDIAN`** — los 243 tokens de los 4 archivos del guardián no
+  tienen testigo mecánico. El arreglo NO es agregar los paths a `CORTE_A_PATHS` (mediría 23
+  fixtures inexistentes y 9 menciones históricas de un bug ya arreglado): es un corte que
+  distinga un token que AFIRMA de uno que es DATO.
+- **`TD-224-CONTROLES-QUE-SE-LEEN-A-SI-MISMOS`** — buscar en el repo el resto de los controles
+  que leen su propio archivo y comparan contra un literal escrito en la línea que compara.
+  Medido: en `G-C10` había tres, y ninguno podía ponerse rojo.

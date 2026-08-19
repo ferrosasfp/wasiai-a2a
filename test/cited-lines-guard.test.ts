@@ -163,8 +163,43 @@
  *     mismo — eso es el punto 3. No se resuelve con un índice posicional a
  *     propósito: un `nth` es un número de posición, o sea la misma clase de dato
  *     frágil que este guardián existe para no volver a guardar.
+ * 14. 🎯 LOS 4 ARCHIVOS DE ESTE GUARDIÁN. No están en `CORTE_A_PATHS`, y son los
+ *     citadores más densos que este commit agregó al repo: medido con
+ *     `scanSource` sobre ellos mismos, **243 tokens** (`test` 61 · `citations`
+ *     100 · `exceptions` 45 · `scanner` 37) contra 57 en TODO el Corte A. O sea
+ *     que el guardián más que cuadruplicó la población de citas del repo en
+ *     archivos que él mismo no mira. (Foto del 2026-08-19; derivalo corriendo
+ *     `scanSource` sobre los cuatro paths.)
+ *     **Se decidió declararlo y NO incluirlos, y la razón es medida, no de
+ *     esfuerzo** — el desglose de los 243:
+ *       · **87** son literalmente el valor del campo `cite` de una entrada de
+ *         `CITED_LINES`. Ésos YA tienen testigo, y mejor que el de acá: `G-C5`
+ *         verifica esa misma cita contra el archivo apuntado y `G-C7` se pone
+ *         rojo si el token desaparece de su citador.
+ *       · **97** son `:N` sueltos (P3/P4) sin archivo: números de línea citados
+ *         dentro de la prosa que explica el algoritmo.
+ *       · **23** nombran archivos que NO EXISTEN, y no pueden existir: son los
+ *         fixtures en memoria de `G-C2`/`G-C3` (`a.ts:1`, `b.ts:2`, `foo.ts:42`,
+ *         `./splash.tsx:245`). Declararlos exigiría una excusa escrita por cada
+ *         fixture, o sea llenar el archivo de excusas de ruido para poder
+ *         verificar otra cosa.
+ *       · **36** nombran un archivo trackeado; de ésos, 9 son el token
+ *         HISTÓRICO `.gitignore:172` —el bug que esta HU arregló, citado como
+ *         ejemplo de lo que estaba mal—, que por construcción ya no describe esa
+ *         línea. Meter los 4 archivos al corte convertiría cada mención del bug
+ *         en una cita rota.
+ *     El residuo real —las citas de estos 4 archivos que sí afirman algo sobre
+ *     otro archivo— **se verificó A MANO, una por una, y ninguna es falsa**: las
+ *     ~20 anteriores las abrió el AR; las que agregó el fix-pack se abrieron al
+ *     escribirlas (`fee-split.ts:316` = `const failed = …`, `:320` =
+ *     `return settlement;`, `:335` NO menciona `priorTx`, con
+ *     `git status --porcelain src/` vacío ⇒ disco = `HEAD`). Lo que no tienen es
+ *     testigo MECÁNICO, y ésa es la diferencia que este ítem declara: cada vez
+ *     que este archivo crece, crece la prosa que nadie confronta. Queda como
+ *     `TD-224-CITAS-DEL-PROPIO-GUARDIAN`, y su arreglo NO es agregar los paths:
+ *     es un corte que sepa distinguir un token que AFIRMA de uno que es DATO.
  *
- * Naming: G-C1..G-C10.
+ * Naming: G-C1..G-C12.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -176,6 +211,7 @@ import {
   CITED_LINES,
   CORTE_A_PATHS,
   DELEGATED_TARGETS,
+  type DelegatedTarget,
 } from './cited-lines-guard.citations.js';
 import {
   SCANNER_FALSE_POSITIVES,
@@ -187,6 +223,7 @@ import {
   type FoundCite,
   citeMatchesTarget,
   citeNamesFile,
+  citeTargetIfTracked,
   isOrderedSubsequence,
   locate,
   normalizeTarget,
@@ -250,6 +287,111 @@ function isDelegated(c: FoundCite): boolean {
   if (DELEGATED_SET.has(c.path)) return true;
   const base = c.path.slice(c.path.lastIndexOf('/') + 1);
   return !c.path.includes('/') && DELEGATED_BASENAMES.has(base);
+}
+
+/**
+ * 🔴 LAS FALLAS DE UNA DELEGACIÓN, contra un índice de git y un lector
+ * INYECTADOS. Es la parte de `G-C9` que tiene que valer para CUALQUIER entrada,
+ * y por eso es una función y no una lista de literales adentro del `it(`.
+ *
+ * La versión anterior de `G-C9` pedía dos cosas por entrada —target trackeado y
+ * motivo de 40 caracteres— y verificaba el dueño con literales HARDCODEADOS de
+ * la única entrada que existía (`G-F1`, `G-F2`, `CITED_INDEX_LINES`). Medido:
+ * una entrada nueva con `ownedBy: 'NADIE. No existe ningún guardián que
+ * verifique estas citas.'` sacaba 3 citas reales del universo con el guardián en
+ * **10/10 verde**, y como `OCCURRENCES` y `DECLARED` bajan a la par, el
+ * invariante estricto de `G-C4` quedaba balanceado y tampoco avisaba. Una
+ * delegación es la excusa más barata de escribir —una entrada saca hasta 4
+ * claves de una vez— y tenía la cara más respetable: parece una decisión de
+ * arquitectura.
+ *
+ * Pura sobre sus entradas a propósito: `G-C12` la prueba con fixtures en memoria
+ * en las DOS direcciones (dueño vivo → 0 fallas; dueño inventado → falla) y
+ * `G-C9` la aplica al árbol real. Sin ese par, el control volvería a ser «lo que
+ * la lista dice hoy».
+ *
+ * ⚠️ LO QUE ESTO NO VERIFICA, y hay que leerlo antes de apoyarse en su verde:
+ * comprueba que el dueño EXISTA, que CORRA (hay un `*.test.ts` entre sus
+ * archivos), que sus controles sigan escritos y que NOMBRE este target. NO
+ * comprueba que el dueño efectivamente VERIFIQUE las citas a ese target — es la
+ * misma clase de límite que «presencia, no valor» del guardián de ownership.
+ * Quien escribe una delegación sigue teniendo que abrir al dueño y leerlo; lo
+ * que ya no puede es inventarlo.
+ */
+function delegationFindings(
+  d: DelegatedTarget,
+  tracked: ReadonlySet<string>,
+  read: (rel: string) => string | null,
+): string[] {
+  const out: string[] = [];
+  const tag = `DELEGATED_TARGETS · ${d.target}`;
+  // Lecturas defensivas: a este archivo no lo typechequea CI, así que una
+  // entrada a la que le falte un campo tiene que dar un mensaje, no un TypeError.
+  const ownedBy = typeof d.ownedBy === 'string' ? d.ownedBy : '';
+  const reason = typeof d.reason === 'string' ? d.reason : '';
+  const ownerFiles = (Array.isArray(d.ownerFiles) ? d.ownerFiles : []).filter(
+    (f): f is string => typeof f === 'string' && f.length > 0,
+  );
+  const ownerControls = (Array.isArray(d.ownerControls) ? d.ownerControls : []).filter(
+    (c): c is string => typeof c === 'string',
+  );
+
+  if (typeof d.target !== 'string' || !tracked.has(d.target)) {
+    out.push(`${tag} · el target delegado no está en el índice de git`);
+  }
+  if (reason.trim().length < 40) out.push(`${tag} · motivo demasiado corto`);
+
+  const sources = new Map<string, string>();
+  for (const f of ownerFiles) {
+    if (!tracked.has(f)) {
+      out.push(`${tag} · el archivo del dueño \`${f}\` no está en el índice de git`);
+      continue;
+    }
+    const src = read(f);
+    if (src === null) out.push(`${tag} · no se pudo leer el archivo del dueño \`${f}\``);
+    else sources.set(f, src);
+  }
+
+  if (ownerFiles.length === 0) {
+    out.push(
+      `${tag} · sin \`ownerFiles\`: el dueño es una FRASE («${ownedBy.slice(0, 40)}…») y nada lo abre. ` +
+        'Una delegación sin archivo que abrir es un agujero con cara de decisión.',
+    );
+  } else if (![...sources.keys()].some((f) => f.endsWith('.test.ts'))) {
+    out.push(
+      `${tag} · ninguno de los \`ownerFiles\` legibles es un \`*.test.ts\`: un dueño que no CORRE no es un dueño.`,
+    );
+  }
+
+  if (ownerFiles.length > 0 && !ownerFiles.some((f) => ownedBy.includes(f))) {
+    out.push(
+      `${tag} · \`ownedBy\` no nombra ninguno de sus \`ownerFiles\`: la prosa y la máquina están ` +
+        'diciendo cosas distintas, que es el defecto que este guardián persigue.',
+    );
+  }
+
+  if (ownerControls.length === 0) {
+    out.push(`${tag} · sin \`ownerControls\`: nada prueba que el dueño siga teniendo controles vivos.`);
+  }
+  const all = [...sources.values()];
+  for (const c of ownerControls) {
+    if (c.trim().length < 4) {
+      out.push(`${tag} · el control \`${c}\` es demasiado corto para identificar nada`);
+    } else if (!all.some((s) => s.includes(c))) {
+      out.push(
+        `${tag} · el control \`${c}\` ya NO existe en [${[...sources.keys()].join(', ')}]. ` +
+          'Las citas a este target quedaron sin dueño y este guardián las sigue descartando.',
+      );
+    }
+  }
+
+  if (typeof d.target === 'string' && !all.some((s) => s.includes(d.target))) {
+    out.push(
+      `${tag} · ninguno de los \`ownerFiles\` NOMBRA \`${d.target}\`: el dueño declarado no declara ` +
+        'este target, así que la delegación no delega en nadie.',
+    );
+  }
+  return out;
 }
 
 const DECLARED = new Map(CITED_LINES.map((e) => [citeKey(e.from, e.cite), e]));
@@ -889,17 +1031,67 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // dos no se leyó.
     expect(new Set(motivos).size, 'Hay motivos repetidos palabra por palabra.').toBe(motivos.length);
 
-    // 🔴 CD-14, EL CANDADO QUE IMPIDE EL INTERRUPTOR DE APAGADO. Una excepción
-    // de unicidad acota SÓLO el `hits === 1`. La cita sigue OBLIGADA a estar
-    // declarada, a que el archivo exista, a que la línea exista y a que la
-    // conjunción matchee ESA línea. Sin esto, cualquiera que vea un rojo
-    // escribe una excepción y el guardián deja de medir.
+    // 🔴 CD-14, EL CANDADO QUE IMPIDE EL INTERRUPTOR DE APAGADO — Y VALE PARA
+    // LAS TRES LISTAS DE `exceptions.ts`, no sólo para la primera.
+    //
+    // 1️⃣ Una excepción de unicidad acota SÓLO el `hits === 1`. La cita sigue
+    // OBLIGADA a estar declarada, a que el archivo exista, a que la línea exista
+    // y a que la conjunción matchee ESA línea. Sin esto, cualquiera que vea un
+    // rojo escribe una excepción y el guardián deja de medir.
     for (const e of UNICITY_EXCEPTIONS) {
       const k = citeKey(e.from, e.cite);
       if (!DECLARED.has(k)) {
         malas.push(
           `UNICITY_EXCEPTIONS · ${k} · exceptúa la unicidad de una cita que NO está declarada en ` +
             '`CITED_LINES`. La excepción acota la unicidad, NUNCA la declaración.',
+        );
+      }
+    }
+
+    // 2️⃣ `SCANNER_FALSE_POSITIVES` es la lista que exceptúa TODO: la clave sale
+    // del conjunto de huérfanas de `G-C4` Y del invariante estricto. Medido: sin
+    // este candado, mover una cita REAL, con path y normativa
+    // (`CLAUDE.md :: src/types/database.types.ts:2567`) desde `CITED_LINES` hasta
+    // acá, con una excusa plausible de 40 caracteres, dejaba el guardián en
+    // 10/10 VERDE. Ninguno de los otros controles lo notaba: el token se sigue
+    // encontrando, sólo se deja de verificar, así que ni `FOUND.length` ni el
+    // invariante se mueven un milímetro.
+    //
+    // ⚠️ La regla NO es «ningún token con path» — `https://x.io:8443/y` produce
+    // un P2 con path (`x.io`) que es ruido legítimo. La regla es «ningún token
+    // que nombre un archivo TRACKEADO POR GIT», y las dos direcciones las mide
+    // `G-C11` con fixtures en memoria.
+    //
+    // 🚧 ACOTAR NO ES CERRAR: un `:N` suelto (P3/P4) se puede seguir moviendo
+    // acá con una excusa, porque nada mecánico separa un `:336` que cita una
+    // línea de un `:8443` que es un puerto. Medido sobre el registro de hoy: 31
+    // de las 50 citas declaradas tienen archivo en el token y quedan
+    // protegidas; 19 no.
+    for (const e of SCANNER_FALSE_POSITIVES) {
+      const hit = citeTargetIfTracked(e.from, e.cite, TRACKED_SET, BY_BASENAME);
+      if (hit !== null) {
+        malas.push(
+          `SCANNER_FALSE_POSITIVES · ${citeKey(e.from, e.cite)} · el token NOMBRA un archivo que ` +
+            `EXISTE en el índice de git (\`${hit}\`), así que no es ruido del escáner: es una ` +
+            'AFIRMACIÓN sobre el repo. Va a `CITED_LINES` con su `mustContain`, o se corrige el ' +
+            'comentario. Esta lista es la única que exceptúa TODO, y por eso es la que no admite ' +
+            'excusas: apagar una cita real acá es indistinguible de un guardián sano.',
+        );
+      }
+    }
+
+    // 3️⃣ `UNANCHORABLE_PROSE` es para prosa SIN forma sintáctica. Si el `quote`
+    // contiene algo que el propio escáner sabe encontrar, entonces se puede
+    // anclar por definición. Esta lista no saca nada del universo (no puede
+    // apagar un rojo), pero sí es donde terminaría archivándose lo que da
+    // trabajo declarar.
+    for (const e of UNANCHORABLE_PROSE) {
+      const dentro = scanSource(e.quote, e.from);
+      if (dentro.length > 0) {
+        malas.push(
+          `UNANCHORABLE_PROSE · ${e.from} :: ${e.quote} · el \`quote\` contiene ` +
+            `${dentro.length} token(s) que el escáner SÍ encuentra (${dentro.map((c) => c.cite).join(', ')}): ` +
+            'no es prosa suelta, es una cita con forma. Va a `CITED_LINES`.',
         );
       }
     }
@@ -911,37 +1103,45 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     ).toEqual([]);
   });
 
-  it('G-C9: la delegación tiene dueño VIVO', () => {
+  it('G-C9: la delegación tiene dueño VIVO, verificado POR ENTRADA', () => {
     // Input que lo pone en rojo: borrar `G-F2` de
     // `test/sdd-index-matches-folders.test.ts`, o borrar `CITED_INDEX_LINES` de
-    // su archivo de excepciones.
+    // su archivo de excepciones. Y —esto es lo que ANTES no pasaba— agregar una
+    // entrada nueva con un dueño inventado: `ownedBy: 'NADIE…'` sin
+    // `ownerFiles`, o con `ownerFiles` que no nombran el target.
     //
     // 🔴 Sin este control, borrar `G-F2` dejaría las citas `_INDEX.md:N` sin
     // dueño Y sin que nada avise: `G-C4` las seguiría descartando en silencio
     // por estar en `DELEGATED_TARGETS`, o sea que la delegación se convertiría
     // en un agujero con cara de decisión.
     //
+    // 🔴 Y con la versión hardcodeada de este control —tres literales de
+    // `_INDEX.md` escritos a mano— la delegación era EL SEGUNDO INTERRUPTOR DE
+    // APAGADO: cualquier entrada NUEVA pasaba sin que su dueño se mirara. Ahora
+    // cada entrada se evalúa con `delegationFindings`, que es la misma función
+    // que `G-C12` prueba en las dos direcciones con fixtures en memoria.
+    //
     // ⚠️ La población de citas delegadas hoy es 0, y este control NO afirma que
     // sea > 0: eso sería un candado que se pudre solo el día que alguien borre
-    // la última. Lo que afirma es que el dueño existe.
-    const muertos: string[] = [];
-    for (const d of DELEGATED_TARGETS) {
-      if (!TRACKED_SET.has(d.target)) muertos.push(`${d.target} · el target delegado no está en git`);
-      if (d.reason.trim().length < 40) muertos.push(`${d.target} · motivo demasiado corto`);
-    }
-    const excSrc = readTracked('test/sdd-index-matches-folders.exceptions.ts');
-    const testSrc = readTracked('test/sdd-index-matches-folders.test.ts');
-    if (!excSrc.includes('export const CITED_INDEX_LINES')) {
-      muertos.push('CITED_INDEX_LINES ya no se exporta desde test/sdd-index-matches-folders.exceptions.ts');
-    }
-    for (const g of ["it('G-F1", "it('G-F2"]) {
-      if (!testSrc.includes(g)) muertos.push(`${g} ya no existe en test/sdd-index-matches-folders.test.ts`);
-    }
+    // la última. Lo que afirma es que el dueño existe, corre, y nombra al target.
+    const leer = (rel: string): string | null => {
+      try {
+        return readTracked(rel);
+      } catch {
+        return null;
+      }
+    };
+    const muertos = DELEGATED_TARGETS.flatMap((d) =>
+      delegationFindings(d, TRACKED_SET, leer),
+    ).sort();
     expect(
       muertos,
-      'La delegación declarada en `DELEGATED_TARGETS` perdió a su dueño. Las citas a ese\n' +
-        'target quedan sin verificar por NADIE, y este guardián las sigue descartando.\n' +
-        'Arreglo: o se restituye el guardián dueño, o esas citas pasan a declararse acá.\n',
+      'La delegación declarada en `DELEGATED_TARGETS` perdió a su dueño, o nunca lo tuvo.\n' +
+        'Las citas a ese target quedan sin verificar por NADIE, y este guardián las sigue\n' +
+        'descartando ANTES de todo (`isDelegated`), así que el silencio es total: ni el\n' +
+        'conjunto de huérfanas ni el invariante estricto de `G-C4` se mueven.\n' +
+        'Arreglo: o se restituye el guardián dueño, o esas citas pasan a declararse acá.\n' +
+        `Hallazgos:\n${muertos.map((m) => `  ${m}`).join('\n')}\n`,
     ).toEqual([]);
 
     // Control de armado: una lista vacía haría pasar lo de arriba por vacuidad.
@@ -961,10 +1161,28 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // queda afuera. Merece su propio `it(` y no un assert escondido dentro de
     // otro control, porque el lugar donde tiene que leerse es la salida de CI.
     const self = readTracked('test/cited-lines-guard.test.ts');
-    const marca = 'QUÉ NO CUBRE';
-    expect(self.includes(marca), 'falta la sección de no-cobertura').toBe(true);
 
-    const seccion = self.slice(self.indexOf(marca), self.indexOf('Naming: G-C1'));
+    // 🪞 SE MIRA EL DOCBLOCK, NO EL ARCHIVO ENTERO, y esto NO es cosmético:
+    // medido con un mutante, `expect(self.includes('<literal>'))` es un control
+    // que NO PUEDE ponerse rojo JAMÁS, porque el literal que busca está escrito
+    // en la misma línea que lo busca. Reemplacé el literal por
+    // `ZZ-NUMERO-QUE-NO-EXISTE-EN-NINGUN-LADO` —una cadena que no está en ningún
+    // otro lugar del repo— y el control siguió **10/10 verde**: se satisfacía a
+    // sí mismo. Es un guardián comparándose contra su propia salida, adentro del
+    // guardián que existe para cazar prosa que nadie confronta. Recortando la
+    // cabecera (todo lo que está ANTES del primer `import`), los `includes` se
+    // evalúan contra la PROSA y no contra el assert.
+    const cabecera = self.slice(0, self.indexOf('\nimport {'));
+    expect(
+      cabecera.length,
+      'No se pudo recortar el docblock de cabecera: sin el recorte, todos los `includes`\n' +
+        'de este control se satisfacen solos.\n',
+    ).toBeGreaterThan(1000);
+
+    const marca = 'QUÉ NO CUBRE';
+    expect(cabecera.includes(marca), 'falta la sección de no-cobertura').toBe(true);
+
+    const seccion = cabecera.slice(cabecera.indexOf(marca), cabecera.indexOf('Naming: G-C1'));
     const items = seccion.match(/^\s*\*\s{0,2}\d+\.\s/gm) ?? [];
     expect(
       items.length,
@@ -984,13 +1202,202 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
 
     // Los DOS porcentajes de cobertura honesta, y la frase prohibida declarada
     // como prohibida. Un guardián que no publica su cobertura afirma de más.
-    expect(self.includes('6,0 %')).toBe(true);
-    expect(self.includes('0,21 %')).toBe(true);
-    expect(self.includes('LA FRASE PROHIBIDA')).toBe(true);
+    //
+    // ⚠️ SE CLAVA LA FORMA, NO LOS DÍGITOS, y la razón es un candado que se
+    // pudría solo: acá había `expect(self.includes('6,0 %'))` y
+    // `expect(self.includes('0,21 %'))` sobre dos números que el bloque de
+    // arriba declara NO CONFIABLES en ninguna de las dos direcciones, y que una
+    // deuda registrada (`TD-316-CITAS-DOTFILE-EN-OTROS-CORTES`) se compromete a
+    // RE-DERIVAR. El día que alguien cumpla esa deuda, el porcentaje correcto
+    // entra en conflicto con el literal y el rojo no señala nada falso: señala
+    // que el candado apunta a un número que su propio autor declaró equivocado.
+    // Lo normativo de AC-10 es que la cobertura se PUBLIQUE con su advertencia,
+    // no cuánto da hoy.
+    const cobertura = cabecera.slice(
+      cabecera.indexOf('LA COBERTURA HONESTA'),
+      cabecera.indexOf(marca),
+    );
+    const porcentajes = cobertura.match(/\d+,\d+ %/g) ?? [];
+    expect(
+      porcentajes.length,
+      'El bloque de cobertura honesta tiene que publicar los DOS porcentajes (el de\n' +
+        '`src`+`test` y el del repo entero). Se verifica que estén publicados, NO cuánto dan:\n' +
+        'clavar los dígitos es un candado que se pudre el día que alguien re-derive el\n' +
+        'denominador, que es una deuda registrada.\n',
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      cobertura.includes('LOS DOS PISOS'),
+      'Falta la advertencia de que numerador y denominador son PISOS. Un porcentaje\n' +
+        'publicado sin ella se lee como una medición, y no lo es.\n',
+    ).toBe(true);
+    expect(
+      cabecera.includes('LA FRASE PROHIBIDA'),
+      'El docblock dejó de declarar cuál es la frase PROHIBIDA. Es la mitad normativa de\n' +
+        'AC-10: publicar un porcentaje sin decir cómo NO se puede leer es afirmar de más.\n',
+    ).toBe(true);
 
-    // Control de armado de este mismo test: si `self` viniera vacío, todos los
-    // `includes` de arriba serían false y esto no haría falta — pero si viniera
-    // con el archivo equivocado, pasarían por casualidad. Esto lo ancla.
-    expect(self.includes('Naming: G-C1..G-C10')).toBe(true);
+    // Control de armado de este mismo test: si `cabecera` viniera vacía o del
+    // archivo equivocado, los `includes` de arriba pasarían por casualidad o
+    // fallarían todos juntos. Esto lo ancla al archivo correcto.
+    expect(cabecera.includes('Naming: G-C1..G-C12')).toBe(true);
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // LOS TESTIGOS DE LOS DOS CANDADOS (G-C11, G-C12)
+  // Un candado sin testigo es una línea de código que nadie midió: la primera
+  // versión de CD-14 se aplicó a la lista equivocada y las otras dos listas
+  // quedaron siendo el interruptor de apagado. Estos dos controles prueban la
+  // REGLA con fixtures en memoria y en las DOS direcciones — el caso malo tiene
+  // que morir y el caso bueno tiene que seguir pasando.
+  // ══════════════════════════════════════════════════════════════
+
+  it('G-C11: el candado de `SCANNER_FALSE_POSITIVES` mata la cita real y deja pasar el ruido', () => {
+    // El universo de git de juguete, para que el fixture no dependa del árbol.
+    const tracked = new Set([
+      'src/types/database.types.ts',
+      'src/lib/fixture.ts',
+      'src/lib/splash.tsx',
+      '.gitignore',
+      'CLAUDE.md',
+    ]);
+    const byBase = new Map<string, readonly string[]>();
+    for (const f of tracked) {
+      const b = f.slice(f.lastIndexOf('/') + 1);
+      byBase.set(b, [...(byBase.get(b) ?? []), f]);
+    }
+    const T = (from: string, token: string): string | null =>
+      citeTargetIfTracked(from, token, tracked, byBase);
+
+    // 🔴 EL CASO MALO — el mutante medido que dejaba 10/10 verde: la cita real,
+    // P1, normativa, del criterio de seguridad del repo, movida a la lista de
+    // ruido con una excusa plausible. Tiene que resolver a un archivo trackeado.
+    expect(T('CLAUDE.md', 'src/types/database.types.ts:2567')).toBe(
+      'src/types/database.types.ts',
+    );
+    // Y sus variantes: P2 por basename, `./` y `../` resueltos contra el citador,
+    // y el sufijo alineado por segmento que `citeMatchesTarget` acepta.
+    expect(T('CLAUDE.md', 'database.types.ts:2567')).toBe('src/types/database.types.ts');
+    expect(T('src/lib/fixture.ts', './splash.tsx:245')).toBe('src/lib/splash.tsx');
+    expect(T('src/lib/x/y.ts', '../../lib/fixture.ts:3')).toBe('src/lib/fixture.ts');
+    expect(T('CLAUDE.md', 'types/database.types.ts:2567')).toBe('src/types/database.types.ts');
+    expect(T('CLAUDE.md', '.gitignore:185')).toBe('.gitignore');
+
+    // ✅ EL CASO BUENO — LA CALIBRACIÓN, y es la mitad que hace que la regla sea
+    // usable: `https://x.io:8443/y` produce un token P2 CON PATH (`x.io`) que es
+    // ruido legítimo del escáner. Si la regla fuera «ningún token con path», este
+    // caso quedaría sin poder declararse y el arreglo sería peor que el bug.
+    const url = scanSource("const u = 'https://x.io:8443/y';", 'src/lib/fixture.ts');
+    expect(url).toHaveLength(1);
+    expect((url[0] as FoundCite).form).toBe('P2');
+    expect((url[0] as FoundCite).path).toBe('x.io');
+    expect(T('src/lib/fixture.ts', (url[0] as FoundCite).cite)).toBeNull();
+
+    // Y el resto del ruido que hoy está declarado: los `:N` sueltos no nombran
+    // archivo, así que el candado no les cuesta nada.
+    expect(T('src/types/index.ts', ':100')).toBeNull();
+    expect(T('src/types/index.ts', ':1')).toBeNull();
+    expect(T('src/services/agent.payment.test.ts', ':00')).toBeNull();
+    expect(T('src/lib/fixture.ts', '`:692`')).toBeNull();
+    // Un archivo que NO existe en el índice tampoco es una afirmación verificable.
+    expect(T('src/lib/fixture.ts', 'foo.ts:42')).toBeNull();
+    expect(T('src/lib/fixture.ts', './no/existe.ts:1')).toBeNull();
+
+    // Control de armado de este mismo test: una función que devolviera SIEMPRE
+    // `null` pasaría todos los `toBeNull()` de arriba, y una que devolviera
+    // siempre un string pasaría los otros. Están los dos lados, y este par lo
+    // deja explícito.
+    expect(T('CLAUDE.md', 'CLAUDE.md:212')).toBe('CLAUDE.md');
+    expect(T('CLAUDE.md', ':212')).toBeNull();
+  });
+
+  it('G-C12: el candado de la delegación mata al dueño inventado y deja pasar al real', () => {
+    const tracked = new Set([
+      'doc/sdd/_INDEX.md',
+      'test/sdd-index-matches-folders.test.ts',
+      'test/sdd-index-matches-folders.exceptions.ts',
+      'src/services/discovery.ts',
+      'test/otro-guardian.test.ts',
+    ]);
+    const FUENTES: Record<string, string> = {
+      'test/sdd-index-matches-folders.test.ts':
+        "const INDEX_REL = 'doc/sdd/_INDEX.md';\nit('G-F1: …', () => {});\nit('G-F2: …', () => {});",
+      'test/sdd-index-matches-folders.exceptions.ts':
+        "// citas a doc/sdd/_INDEX.md\nexport const CITED_INDEX_LINES = [];",
+      'test/otro-guardian.test.ts': "it('X-01: no habla de ningún target delegado', () => {});",
+    };
+    const leer = (rel: string): string | null => FUENTES[rel] ?? null;
+    const bueno: DelegatedTarget = {
+      target: 'doc/sdd/_INDEX.md',
+      ownedBy: 'G-F1/G-F2 en test/sdd-index-matches-folders.test.ts',
+      ownerFiles: [
+        'test/sdd-index-matches-folders.test.ts',
+        'test/sdd-index-matches-folders.exceptions.ts',
+      ],
+      ownerControls: ["it('G-F1", "it('G-F2", 'export const CITED_INDEX_LINES'],
+      reason: 'x'.repeat(41),
+    };
+
+    // ✅ EL CASO BUENO: el dueño existe, corre, sus controles están escritos y
+    // nombra al target. Cero hallazgos.
+    expect(delegationFindings(bueno, tracked, leer)).toEqual([]);
+
+    // 🔴 EL CASO MALO MEDIDO: el mutante que sacaba 3 citas reales del universo
+    // con 10/10 verde. Sin `ownerFiles`, el dueño es una frase.
+    const inventado = {
+      target: 'src/services/discovery.ts',
+      ownedBy: 'NADIE. No existe ningún guardián que verifique estas citas.',
+      reason: 'x'.repeat(41),
+    } as unknown as DelegatedTarget;
+    expect(delegationFindings(inventado, tracked, leer).length).toBeGreaterThan(0);
+
+    // Y las variantes con MEJOR cara, que son las que hay que cazar: un dueño
+    // que existe pero no habla de este target; un `ownerFiles` que no corre; un
+    // control que ya no está; una prosa que nombra un archivo que no declaró.
+    const noHablaDelTarget: DelegatedTarget = {
+      ...bueno,
+      target: 'src/services/discovery.ts',
+      ownedBy: 'G-F1 en test/sdd-index-matches-folders.test.ts',
+    };
+    expect(delegationFindings(noHablaDelTarget, tracked, leer)).toEqual([
+      expect.stringContaining('no declara este target'),
+    ]);
+
+    const duenoQueNoCorre: DelegatedTarget = {
+      ...bueno,
+      ownedBy: 'CITED_INDEX_LINES en test/sdd-index-matches-folders.exceptions.ts',
+      ownerFiles: ['test/sdd-index-matches-folders.exceptions.ts'],
+      ownerControls: ['export const CITED_INDEX_LINES'],
+    };
+    expect(delegationFindings(duenoQueNoCorre, tracked, leer)).toEqual([
+      expect.stringContaining('no CORRE'),
+    ]);
+
+    const controlBorrado: DelegatedTarget = {
+      ...bueno,
+      ownerControls: ["it('G-F1", "it('G-F3"],
+    };
+    expect(delegationFindings(controlBorrado, tracked, leer)).toEqual([
+      expect.stringContaining("G-F3` ya NO existe"),
+    ]);
+
+    const prosaQueNoCoincide: DelegatedTarget = {
+      ...bueno,
+      ownedBy: 'algún guardián por ahí',
+    };
+    expect(delegationFindings(prosaQueNoCoincide, tracked, leer)).toEqual([
+      expect.stringContaining('no nombra ninguno de sus `ownerFiles`'),
+    ]);
+
+    const archivoFantasma: DelegatedTarget = {
+      ...bueno,
+      ownedBy: 'test/no-existe.test.ts',
+      ownerFiles: ['test/no-existe.test.ts'],
+    };
+    expect(delegationFindings(archivoFantasma, tracked, leer).length).toBeGreaterThan(0);
+
+    // Control de armado de este mismo test: una función que devolviera SIEMPRE
+    // hallazgos haría fallar el caso bueno, y una que no devolviera NINGUNO
+    // haría fallar los seis malos. Los dos lados están medidos arriba.
+    expect(delegationFindings(bueno, tracked, leer)).toHaveLength(0);
   });
 });

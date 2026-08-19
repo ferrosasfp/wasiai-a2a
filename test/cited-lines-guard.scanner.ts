@@ -46,6 +46,26 @@
  *  (g) UN ARCHIVO QUE NO ESTÁ EN LOS 14 PATHS DEL CORTE, o que no está en el
  *      índice de git. El universo es explícito; el silencio sobre el resto es
  *      real y está declarado en el docblock del guardián.
+ *  (h) EL ARCHIVO SIN EXTENSIÓN. El grupo de extensión sigue siendo obligatorio
+ *      (`(?:\.[…]+)+`), así que un `Dockerfile:12` se DECAPITA exactamente igual
+ *      que se decapitaba `.gitignore:172` antes del arreglo del `*`. Medido con
+ *      fixtures sobre `scanSource`:
+ *
+ *        `// ver Dockerfile:12`         -> P4 `:12`  (pierde el nombre)
+ *        `// ver Makefile:3`            -> P4 `:3`   (idem)
+ *        `// ver docker/Dockerfile:12`  -> P4 `:12`  (idem, con directorio)
+ *        `// ver https://x.io:8443/y`   -> P2 con path `x.io` (archivo inventado)
+ *
+ *      ⚠️ NO está arreglado, y la diferencia con el dotfile es lo que lo deja
+ *      acá y no en un fix: DEGRADA RUIDOSO. Medido: agregar `Dockerfile:12` a un
+ *      archivo del Corte A pone `G-C4` en ROJO (el `:12` cae al barrido bare y
+ *      queda huérfano), no en verde. Lo que se pierde no es la detección: es el
+ *      cruce mecánico `citeMatchesTarget`, que queda vacuo y pasa a depender del
+ *      `targetReason` escrito a mano. Población hoy en el Corte A: 0 (barridos
+ *      los 14 paths buscando `Dockerfile|Makefile|Procfile|LICENSE|CHANGELOG`
+ *      seguidos de `:N`). Arreglarlo tiene CONTRAINDICACIÓN medida: aceptar
+ *      segmentos sin punto convierte cualquier `foo:12` de la prosa en una cita
+ *      con archivo, o sea que cambia un fallo ruidoso por ruido de fondo.
  */
 
 import ts from 'typescript';
@@ -206,6 +226,44 @@ export function citePathOf(token: string): string | null {
  */
 export function citeNamesFile(token: string): boolean {
   return citePathOf(token) !== null;
+}
+
+/**
+ * 🔴 EL CANDADO DE CD-14 SOBRE `SCANNER_FALSE_POSITIVES`: ¿este token nombra un
+ * archivo que EXISTE en el índice de git? Devuelve el path trackeado, o `null`.
+ *
+ * Es la única pregunta que distingue mecánicamente un RUIDO del escáner de una
+ * AFIRMACIÓN sobre el repo, y por eso vive acá y no adentro del guardián: es la
+ * misma decisión que `citeNamesFile`, y duplicar el criterio es exactamente lo
+ * que reprodujo el punto ciego del dotfile adentro de su propio arreglo.
+ *
+ * ⚠️ La regla NO puede ser «ningún token con path». Medido: `https://x.io:8443/y`
+ * produce un token P2 con path (`x.io`) que ES ruido legítimo. Lo que separa los
+ * dos casos es que `x.io` no está en el índice de git y `src/types/database.types.ts`
+ * sí. Sin esta función, mover una cita REAL a `SCANNER_FALSE_POSITIVES` con una
+ * excusa de 40 caracteres la saca del universo y el guardián queda 10/10 verde:
+ * el interruptor de apagado que CD-14 existe para prohibir, en la otra lista.
+ *
+ * La resolución es la misma que `citeMatchesTarget` acepta como consistente:
+ * `./`/`../` resuelto contra el citador; con `/`, path exacto o sufijo alineado
+ * por segmento; sin `/` (P2), por basename.
+ */
+export function citeTargetIfTracked(
+  fromFile: string,
+  token: string,
+  tracked: ReadonlySet<string>,
+  byBasename: ReadonlyMap<string, readonly string[]>,
+): string | null {
+  const raw = citePathOf(token);
+  if (raw === null) return null;
+  if (raw.startsWith('./') || raw.startsWith('../')) {
+    const resolved = normalizeTarget(fromFile, token);
+    return resolved !== null && tracked.has(resolved) ? resolved : null;
+  }
+  const base = raw.slice(raw.lastIndexOf('/') + 1);
+  const candidates = byBasename.get(base) ?? [];
+  if (!raw.includes('/')) return candidates[0] ?? null;
+  return candidates.find((f) => f === raw || f.endsWith(`/${raw}`)) ?? null;
 }
 
 /**

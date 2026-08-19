@@ -24,9 +24,28 @@
  * `fromLine`, toda inserción daba rojo). Ese rojo no señala nada falso, y su
  * fricción es lo que termina con alguien borrando el guardián.
  *
- * Precondición medida: hoy no hay dos tokens `cite` IGUALES dentro de un mismo
- * citador del Corte A, así que `{from, cite}` es único. Si mañana aparece un
- * duplicado, `G-C4` se pone rojo y pide un campo `nth` — no falla en silencio.
+ * ⚠️ ACÁ HABÍA UNA PRECONDICIÓN FALSA Y UN ROJO PROMETIDO QUE NO OCURRE. Decía:
+ * «hoy no hay dos tokens `cite` IGUALES dentro de un mismo citador del Corte A»
+ * y «si mañana aparece un duplicado, `G-C4` se pone rojo y pide un campo `nth`».
+ * Las dos mitades son falsas, y las dos se midieron sobre el commit que las
+ * escribió: hay claves con más de una ocurrencia HOY, y duplicar un token a
+ * propósito deja el guardián en verde. Es la clase de defecto que esta HU existe
+ * para sacar, escrita adentro de la HU.
+ *
+ * LO QUE PASA DE VERDAD, que es una DECISIÓN y no un accidente: `{from, cite}`
+ * es la clave, y UNA declaración cubre TODAS las ocurrencias de ese token en ese
+ * citador — son la misma afirmación repetida (mismo archivo, misma línea, mismo
+ * `mustContain`). `OCCURRENCES` agrupa por clave, así que un duplicado no mueve
+ * el `size` ni pone nada rojo. El campo `nth` NO se implementa a propósito: un
+ * índice posicional es la misma clase de dato frágil que este guardián existe
+ * para no volver a guardar. Está desarrollado en el ítem 13 de la no-cobertura
+ * del guardián, que es lo que hay que leer antes de apoyarse en esta clave.
+ *
+ * Cuántas claves tienen hoy más de una ocurrencia: al 2026-08-19 eran 3 (y esas
+ * 4 ocurrencias de más son exactamente la diferencia entre los 57 tokens y las
+ * 53 claves). ⚠️ ESE NÚMERO ES UNA FOTO y nada lo verifica: derivalo agrupando
+ * `FOUND` por `{file, cite}` y contando los grupos de tamaño > 1. Si este
+ * párrafo y esa derivación no coinciden, la que tiene razón es la derivación.
  *
  * Este archivo no lo typechequea nadie (`tsconfig.json:19` es
  * `include: ["src/**\/*"]`) ni lo lintea nadie (`package.json:11` es
@@ -82,11 +101,30 @@ export const CORTE_A_PATHS: readonly string[] = [
   'CLAUDE.md',
 ];
 
-/** Un target cuyas citas ya tienen dueño en OTRO guardián. */
+/**
+ * Un target cuyas citas ya tienen dueño en OTRO guardián.
+ *
+ * 🔴 EL DUEÑO NO ES PROSA: SE VERIFICA. `ownedBy` es la frase legible, y sola no
+ * alcanza — una entrada con `ownedBy: 'NADIE'` y un motivo largo sacaba N citas
+ * del universo con el guardián en 10/10 verde, porque `G-C9` sólo miraba que el
+ * `target` estuviera trackeado y que el motivo tuviera 40 caracteres. Los campos
+ * `ownerFiles` y `ownerControls` existen para que `G-C9` pueda ABRIR al dueño y
+ * comprobar que existe, que sus controles siguen vivos, y que declara ESTE
+ * target. Una delegación es la excusa MÁS BARATA de escribir y la que más citas
+ * saca de una sola vez (medido: un `target` puede cubrir 4 claves), así que es
+ * la que más tiene que costar.
+ */
 export interface DelegatedTarget {
   readonly target: string;
-  /** El guardián que ya las verifica, con el archivo donde vive. */
+  /** El guardián que ya las verifica, con el archivo donde vive. Tiene que
+   *  NOMBRAR al menos uno de los `ownerFiles`: prosa y máquina de acuerdo. */
   readonly ownedBy: string;
+  /** Los archivos del guardián dueño, trackeados. Al menos uno `*.test.ts`, o
+   *  sea un archivo que vitest CORRE — un dueño que no corre no es un dueño. */
+  readonly ownerFiles: readonly string[];
+  /** Literales que prueban que los controles dueños siguen existiendo. Cada uno
+   *  tiene que aparecer en alguno de los `ownerFiles`. */
+  readonly ownerControls: readonly string[];
   readonly reason: string;
 }
 
@@ -94,15 +132,23 @@ export interface DelegatedTarget {
  * Targets que este guardián NO verifica porque ya los verifica otro.
  *
  * No es un hueco: es una DELEGACIÓN, y se declara para que no se lea igual. La
- * población hoy es 0 (el Corte A no tiene ninguna cita a `_INDEX.md`), y `G-C9`
- * NO afirma que sea > 0 — eso sería un candado que se pudre solo. Lo que `G-C9`
- * afirma es que el DUEÑO sigue vivo: si alguien borra `G-F2`, las citas a
- * `_INDEX.md` quedarían sin dueño y `G-C4` las descartaría en silencio.
+ * población de citas delegadas hoy es 0 (el Corte A no tiene ninguna cita a
+ * `_INDEX.md`), y `G-C9` NO afirma que sea > 0 — eso sería un candado que se
+ * pudre solo. Lo que `G-C9` afirma es que el DUEÑO sigue vivo y que es el dueño
+ * de ESTE target: si alguien borra `G-F2`, las citas a `_INDEX.md` quedarían sin
+ * dueño y `G-C4` las descartaría en silencio.
  */
 export const DELEGATED_TARGETS: readonly DelegatedTarget[] = [
   {
     target: 'doc/sdd/_INDEX.md',
-    ownedBy: 'G-F1/G-F2 en test/sdd-index-matches-folders.test.ts',
+    ownedBy:
+      'G-F1/G-F2 en test/sdd-index-matches-folders.test.ts, con el registro ' +
+      'CITED_INDEX_LINES en test/sdd-index-matches-folders.exceptions.ts',
+    ownerFiles: [
+      'test/sdd-index-matches-folders.test.ts',
+      'test/sdd-index-matches-folders.exceptions.ts',
+    ],
+    ownerControls: ["it('G-F1", "it('G-F2", 'export const CITED_INDEX_LINES'],
     reason:
       'Las citas `doc/sdd/_INDEX.md:N` ya tienen testigo con precisión de línea: ' +
       '`CITED_INDEX_LINES` en `test/sdd-index-matches-folders.exceptions.ts` declara el ' +
