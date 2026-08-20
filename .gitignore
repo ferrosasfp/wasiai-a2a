@@ -229,3 +229,7 @@ backups/
 # la suite sin colectar y `npm test` en exit 1 en TODA rama. Es read-only, no tiene
 # credenciales (el PAT sale de .env en runtime) y está escrito para ser testeado.
 # Ver el test-guardián en test/scripts-imported-by-tests-are-tracked.test.ts.
+
+# Auditorias internas de deuda tecnica. Repo PUBLICO: el mapa de las debilidades
+# del sistema no se publica. Viven en disco, no en git.
+doc/audit/
