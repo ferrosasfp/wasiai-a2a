@@ -409,7 +409,7 @@ Estado medido en este repo, no citado de otro documento. Cada número de abajo o
 
 | Métrica | Valor |
 |---|---|
-| Archivos de test | **309 archivos de test** en la suite raíz. Derivado del `include` de `vitest.config.ts` sobre el índice de git, y verificado en los dos README, por `test/readme-numbers.test.ts` |
+| Archivos de test | **310 archivos de test** en la suite raíz. Derivado del `include` de `vitest.config.ts` sobre el índice de git, y verificado en los dos README, por `test/readme-numbers.test.ts` |
 | Casos de test | lo imprime `npm test`. A propósito no se escribe acá: cambia con cada test nuevo, y un test que lo clavara tendría que correr la suite que está contando |
 | Piso de cobertura que exige el CI | sentencias **80%**, ramas **70%**, funciones **80%**, líneas **80%** (`vitest.config.ts:26-31`). Por debajo de cualquiera de los cuatro, `npm run test:coverage` sale con código distinto de cero y el job `coverage` falla |
 | Cobertura medida | `npm run test:coverage` imprimió 87,49% de sentencias, 79,64% de ramas, 92,48% de funciones y 89,02% de líneas el 2026-08-15 |

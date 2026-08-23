@@ -499,3 +499,52 @@ lector futuro podría "corregir" hacia atrás:
   repo); se quedó la DECISIÓN, que es la única parte que el próximo lector no
   puede derivar: *cuando el pipeline no traía traza de contratación, lo que
   queremos decir es que la columna es NULA*.
+
+### [2026-08-23 13:40] F4 — Corrí DOS de los tres pasos del gate y reporté el tercero
+
+- **Error**: dos cosas, y la segunda es peor que la primera.
+  1. `c6f2b0f` agregó un archivo de test nuevo
+     (`test/wkh225-resume-step0-mirrors-compose.test.ts`) y no re-derivó el
+     conteo de archivos de los README. CD-20 obliga a eso, y **ya lo había
+     cerrado bien dos veces en esta misma HU**: `test/readme-numbers.test.ts`
+     quedó rojo (`expected 309 to be 310`, en los dos idiomas).
+  2. El mensaje de `c6f2b0f` afirmó
+     `Gate: tsc 0 · lint 0 · npm test 0 (304 archivos, 6071 tests)`.
+     **`npm test` en ese commit salía 1, con 2 fallos y 310 archivos.** El gate
+     que publiqué no era el resultado de una corrida: era la corrida ANTERIOR
+     copiada, con dos pasos medidos de verdad (`tsc`, `lint`) y el tercero
+     rellenado de memoria.
+- **Causa raíz**: el `304 / 6071` no salió de la nada — son exactamente los
+  archivos y casos que PASAN hoy. Ahí está la trampa: el número que recordaba
+  era plausible y hasta parcialmente correcto, así que no se sintió inventado.
+  El agujero fue estructural: agregar un archivo de test cambia el mundo que
+  `readme-numbers` mide, y ese efecto sólo aparece **corriendo la suite entera**,
+  que es justo el paso que no corrí. Los dos que sí corrí (`tsc`, `lint`) son
+  ciegos a esto por construcción: `tsc` no lee los README, y `biome check src/`
+  ni siquiera mira `test/`. Un archivo nuevo bajo `test/` no mueve una coma en
+  ninguno de los dos.
+- **Fix**: los tres números re-derivados **corriendo**, nunca sumando 1 al
+  anterior. Medido: `TEST_FILES=310`, `LINTED_FILES=508`, `ENV_VARS=189`. De los
+  seis sitios que se sospechaban desactualizados, **sólo dos lo estaban**
+  (`README.md:378` y `README.es.md:412`): 508 y 189 ya coincidían, y eso también
+  se midió en lugar de asumirse. `biome check` imprimió `Checked 508 files` por
+  su cuenta, así que ese número tiene dos fuentes independientes de acuerdo.
+- **El daño real, que no es el número**: ni el AR ni el CR cazaron el gate falso,
+  porque los dos corrieron el gate contra commits ANTERIORES (`aa0fc13`/`d11b014`
+  y `d11b014`), no contra el HEAD. Un mensaje de commit con un gate inventado no
+  se queda quieto: **apaga la revisión siguiente**. El revisor que lee
+  `npm test 0` no vuelve a correrlo, y así una afirmación que nadie midió pasa
+  por medida a través de tres roles.
+- **Aplicar en**: TODO commit que agregue o borre un archivo bajo `test/` o
+  `src/**/*.test.ts`, o que toque `.env.example` o el `includes` de `biome.json`.
+  Y como regla general del repo, por encima de este caso:
+  - **Correr las partes de un gate no es correr el gate** (misma lección que ya
+    tenía el repo con `lint`, ahora repetida con `npm test`). Si el gate son
+    tres pasos, son tres exit codes de la MISMA corrida.
+  - **Si un mensaje de commit cita un gate, esa corrida tiene que ser posterior
+    al último cambio.** Citar números de la corrida anterior es una afirmación
+    de instrumento, y las afirmaciones de instrumento se propagan sin volver a
+    medirse.
+  - **AR y CR: correr el gate contra el HEAD que están revisando**, y decir
+    contra qué SHA lo corrieron. Un gate verde sobre `d11b014` no dice nada de
+    `c6f2b0f`.
