@@ -58,6 +58,26 @@ export const RESUME_ENV_VAR = 'COMPOSE_RESUME_HMAC_KEY';
 /** Nombre de la variable que fija el techo del TTL, en un solo lugar. */
 export const SUSPEND_MAX_TTL_ENV_VAR = 'SUSPEND_MAX_TTL_SECONDS';
 
+/** Nombre de la bandera, en un solo lugar. */
+export const COMPOSE_SUSPEND_ENABLED_ENV_VAR = 'COMPOSE_SUSPEND_ENABLED';
+
+/**
+ * ¿Está encendida la suspensión?
+ *
+ * Comparación LITERAL contra el string `'true'`, y el default es apagado. Es la
+ * convención de banderas de este repo y no es cosmética: con un `Boolean(env)` o
+ * un `!== 'false'`, cualquier valor —`'TRUE'`, `'1'`, `'yes'`, `'off'`—
+ * encendería un camino que escribe filas y emite credenciales. Un typo no puede
+ * prender un camino de dinero.
+ *
+ * Vive en este módulo LEAF, y no en el route, por dos motivos: el nombre de la
+ * variable queda junto a las otras dos de la misma HU, y el test de los valores
+ * de la bandera no necesita levantar Fastify para correr.
+ */
+export function isComposeSuspendEnabled(): boolean {
+  return process.env[COMPOSE_SUSPEND_ENABLED_ENV_VAR] === 'true';
+}
+
 /** Techo de tamaño del token, chequeado ANTES de decodificar nada. */
 export const RESUME_MAX_TOKEN_CHARS = 8192;
 

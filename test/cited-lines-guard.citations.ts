@@ -260,9 +260,9 @@ export const CITED_LINES: readonly CitedLine[] = [
     // `src/services/compose.ts:571`. Es el caso que `E-WRONG_FILE` existe para
     // explicar: buscar `i > 0` en `src/routes/compose.ts` da CERO.
     from: 'src/types/index.ts',
-    cite: 'src/services/compose.ts:571',
+    cite: 'src/services/compose.ts:602',
     target: 'src/services/compose.ts',
-    line: 571,
+    line: 602,
     mustContain: ['if (i > 0 &&', 'scopingKeyRow'],
     symbolPath: ['composeService', 'executePipeline'],
   },
@@ -310,9 +310,9 @@ export const CITED_LINES: readonly CitedLine[] = [
     // 0 para `i === 0`. Lo único falso era el número — que es exactamente el
     // modo de falla que hace que «abrir y comparar» confirme la mentira.
     from: 'src/services/compose.ts',
-    cite: ':571',
+    cite: ':602',
     target: 'src/services/compose.ts',
-    line: 571,
+    line: 602,
     mustContain: ['if (i > 0 &&', 'scopingKeyRow'],
     symbolPath: ['composeService', 'executePipeline'],
   },

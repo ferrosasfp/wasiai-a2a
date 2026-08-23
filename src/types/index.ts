@@ -1254,6 +1254,21 @@ export interface ComposeResult {
    */
   suspended?: ComposeSuspension;
   /**
+   * WKH-225 — el token con el que se reanuda. Presente EXACTAMENTE cuando
+   * `suspended` lo está, y viaja una sola vez: no es recuperable después.
+   *
+   * ⛔ POR QUÉ NO ESTÁ DENTRO DE `ComposeSuspension`. Ese objeto es el que se
+   * ECHA hacia afuera y el que un cliente guarda o loguea entero; éste es la
+   * CREDENCIAL. Separarlos hace que "mostrar el estado de la suspensión" y
+   * "entregar la credencial" sean dos decisiones distintas en vez de una sola
+   * que se toma por descuido.
+   *
+   * ⛔ NUNCA en una query string, NUNCA en una URL, NUNCA en un log, NUNCA en un
+   * mensaje de error. Lo único de este camino que se puede escribir en un canal
+   * de operador es el `runId`.
+   */
+  resumeToken?: string;
+  /**
    * WKH-61: discriminator para que el route handler mapee a 403 (`SCOPE_DENIED`).
    * WKH-125: `DEST_CAP_EXCEEDED` → 402 (cap por destino excedido mid-pipeline).
    * WKH-305: `INPUT_MAPPING_FAILED` → **400**, por el `default` que YA existe en
@@ -1516,7 +1531,7 @@ export interface OrchestrateRequest {
    * chainId resuelto (request.resolvedChainId), propagado a compose para que el
    * débito per-step de steps 1..N funcione. WKH-102 (DT-1): se propaga SIEMPRE
    * (master y delegación, single-chain semantics — modelo WKH-59), no solo bajo
-   * delegación. El guard `i>0` de src/services/compose.ts:571 protege el step 0 contra
+   * delegación. El guard `i>0` de src/services/compose.ts:602 protege el step 0 contra
    * double-charge (CD-1, intacto).
    */
   chainId?: number | undefined;

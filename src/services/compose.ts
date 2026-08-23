@@ -96,10 +96,41 @@ import { maybeTransform } from './llm/transform.js';
 import { refundOutbox } from './refund-outbox.js';
 import { registryService, SYSTEM_OWNER_REF } from './registry.js';
 import { normalizeDestination } from './spend-policy.js';
+import { suspendedRunService } from './suspended-run.js';
 import {
   summarizePipelineVerification,
   verifyStepOutput,
 } from './verification.js';
+
+/**
+ * WKH-225 — el ÚNICO discriminante del sobre de suspensión.
+ *
+ * 🔴 ES UNA CLAVE PROPIA, Y NO UNA DE LAS QUE YA SIGNIFICAN ALGO. `hasErrorSignal`
+ * de `services/verification.ts` dispara con `error` truthy, con `success:false` y
+ * con `status` en {'failed','error'} sobre el output DEL AGENTE, así que un sobre
+ * construido con cualquiera de esas tres haría que `verifyStepOutput` marcara el
+ * step como incompleto — el step que SÍ entregó y SÍ cobró.
+ *
+ * Y su AUSENCIA es el 100 % del tráfico de hoy: ningún agente publicado la emite,
+ * así que el lector no puede cambiar el desenlace de un pipeline existente.
+ */
+const SUSPEND_ENVELOPE_KEY = 'a2a_suspend';
+
+/**
+ * ¿El agente pidió que el pipeline ESPERE?
+ *
+ * Total y pura: cualquier forma inesperada devuelve `false`. Un output que no es
+ * objeto, o que trae la clave con cualquier cosa que no sea exactamente `true`,
+ * es un output normal. Comparación estricta a propósito: `'true'`, `1` y
+ * `'yes'` NO suspenden, por el mismo motivo por el que la bandera de entorno se
+ * compara contra el string exacto.
+ */
+function readsAsSuspension(output: unknown): boolean {
+  if (output === null || typeof output !== 'object' || Array.isArray(output)) {
+    return false;
+  }
+  return (output as Record<string, unknown>)[SUSPEND_ENVELOPE_KEY] === true;
+}
 
 const log = getLogger('compose');
 
@@ -685,7 +716,7 @@ export const composeService = {
             // `settle_signature` base58 de una transferencia real: la
             // reconciliación cruza ambos. `stepDebitedUsd` es el DÉBITO DEL CALLER
             // y vale 0 para `i === 0` (lo debita el middleware vía
-            // composeEstimatedCostUsd, guard `i > 0` de :571) ⇒ un compose de UN
+            // composeEstimatedCostUsd, guard `i > 0` de :602) ⇒ un compose de UN
             // step con agente Solana emitía `amount_usd = 0` junto a una firma
             // real. Además incluye el gas overhead del gateway, que nunca se le
             // paga al agente.
@@ -730,6 +761,23 @@ export const composeService = {
         totalCost = agg.totalCost;
         totalLatency = agg.totalLatency;
         lastOutput = agg.lastOutput;
+        // WKH-225: ¿el agente pidió esperar a una persona? Ver el docblock de
+        // `suspendIfEnvelope` para por qué es ACÁ y no antes de `invokeAgent`.
+        const suspendedResult = await this.suspendIfEnvelope({
+          request,
+          output,
+          composeRunId,
+          i,
+          steps,
+          results,
+          lastOutput,
+          totalCost,
+          totalLatency,
+          chainId,
+          outboundContracting,
+          selfHostHint,
+        });
+        if (suspendedResult !== null) return suspendedResult;
       } catch (err) {
         const firstError = err instanceof Error ? err.message : String(err);
 
@@ -1088,6 +1136,26 @@ export const composeService = {
                 totalCost = agg.totalCost;
                 totalLatency = agg.totalLatency;
                 lastOutput = agg.lastOutput;
+                // WKH-225: el MISMO lector que el happy-path, y por eso está
+                // extraído en vez de copiado. Un step puede fallar, reintentarse
+                // y recién entonces pedir la espera; sin esta llamada el sobre
+                // del retry se trataría como salida normal y el pipeline
+                // seguiría con una URL de KYC como entrada del step siguiente.
+                const suspendedRetry = await this.suspendIfEnvelope({
+                  request,
+                  output,
+                  composeRunId,
+                  i,
+                  steps,
+                  results,
+                  lastOutput,
+                  totalCost,
+                  totalLatency,
+                  chainId,
+                  outboundContracting,
+                  selfHostHint,
+                });
+                if (suspendedRetry !== null) return suspendedRetry;
                 // CONTINÚA el pipeline (el loop sigue con i+1). NO return.
                 continue;
               } catch (retryErr) {
@@ -1198,6 +1266,132 @@ export const composeService = {
       totalLatencyMs: totalLatency,
       // WKH-114 (AC-5): completitud a nivel pipeline, ADITIVA y distinta de success.
       verificationStatus: summarizePipelineVerification(results),
+    };
+  },
+
+  /**
+   * WKH-225 — ¿este step pidió que el pipeline ESPERE a una persona?
+   *
+   * Devuelve el `ComposeResult` con el que hay que cortar, o `null` para que el
+   * loop siga como siempre. `null` es el 100 % del tráfico de hoy.
+   *
+   * ── DÓNDE SE LA LLAMA, Y POR QUÉ AHÍ
+   *
+   * DESPUÉS de `invokeAgent` y DESPUÉS de la cola de éxito del step, no antes.
+   * Cuando se lee la respuesta del step, su settle YA TERMINÓ —dentro de
+   * `invokeAgent` el pago downstream va después del parseo del cuerpo— y los
+   * steps que faltan usan claves de idempotencia distintas. Así que no hay
+   * ninguna entrada de idempotencia que pueda vencer mientras el run está
+   * suspendido: el step que suspende cerró su plata antes de que nadie se entere
+   * de que iba a suspender.
+   *
+   * Y el step SÍ completó y SÍ se pagó: entra a `results`, emite su evento y
+   * anota su leg igual que cualquier otro. Suspender no es fallar a mitad.
+   *
+   * ── EL GATE ES `request.suspension`, Y ES LO QUE HACE CIERTO EL AC-9
+   *
+   * Ausente ⇒ el sobre NI SE MIRA (el `&&` corta antes de `readsAsSuspension`).
+   * Cero filas, cero queries, cero claves nuevas en el resultado. Ese campo lo
+   * construye UN SOLO archivo, `src/routes/compose.ts`, y sólo con la bandera
+   * en `'true'` y un caller bindeable.
+   *
+   * ── `success: true`, Y NO ES ESTILO
+   *
+   * Con `success:false`, la envoltura `compose()` llamaría a
+   * `recordStrandedRunIfAny` y cada suspensión normal emitiría un
+   * `compose_stranded_payment`, que `services/stranded-alert.ts` acumula y
+   * publica en `/health` como camino degradado. Un KYC funcionando bien haría
+   * sonar la alarma de plata varada — el daño exacto que esa alerta declara
+   * combatir. Con `success:true` esa línea es un no-op y no hay diff.
+   *
+   * ── SI LA PERSISTENCIA FALLA
+   *
+   * `{success:false}` SIN `errorCode`: la unión cerrada de `errorCode` no gana
+   * miembros por esto (cae en el `default → 400` del route, igual que el guard
+   * de presupuesto de más arriba, que tampoco agrega uno). El mensaje es
+   * distinguible, que es lo que el operador necesita. Lo que NO se hace es
+   * seguir el pipeline como si nada: el step ya cobró y el caller iba a recibir
+   * una espera; ejecutar los siguientes con una URL como entrada es peor que
+   * cortar.
+   */
+  async suspendIfEnvelope(ctx: {
+    request: ComposeRequest;
+    /** El output CRUDO del agente. El artefacto es esto, tal cual (CD-21). */
+    output: unknown;
+    composeRunId: string;
+    i: number;
+    steps: ResolvedComposeStep[];
+    results: StepResult[];
+    lastOutput: unknown;
+    totalCost: number;
+    totalLatency: number;
+    chainId: number | undefined;
+    outboundContracting: { chain: string[]; depth: number };
+    selfHostHint: string | undefined;
+  }): Promise<ComposeResult | null> {
+    const suspension = ctx.request.suspension;
+    if (suspension === undefined) return null;
+    if (!readsAsSuspension(ctx.output)) return null;
+
+    const opened = await suspendedRunService.open({
+      caller: suspension.caller,
+      ownerRef: suspension.ownerRef,
+      keyId: suspension.keyId,
+      composeRunId: ctx.composeRunId,
+      stepIndex: ctx.i,
+      // Los `StepResult` COMPLETOS de lo ya ejecutado. No una versión reducida:
+      // la emisión del residuo del vencimiento lee de acá los hashes on-chain,
+      // el costo y el agente de cada step, y sin ellos no se puede cumplir.
+      steps: ctx.results,
+      lastOutput: ctx.lastOutput,
+      remainingSteps: ctx.steps.slice(ctx.i + 1),
+      frozenStepPrices: ctx.request.frozenStepPricesUsd ?? null,
+      totalCostUsdc: ctx.totalCost,
+      totalLatencyMs: ctx.totalLatency,
+      // 🔴 LOS TRES DE LA TRAZA ANTI-BUCLE. Sin persistirlos, la reanudación
+      // arrancaría con cadena vacía y profundidad 0 — o sea reiniciando el
+      // contador del guard de capa 1 a pedido de quien reanuda, y dejando el
+      // conjunto de identidad vacío, que vuelve INERTES los dos sitios del
+      // guard. Sería un bypass abierto por esta HU, no heredado.
+      contractingChain: ctx.outboundContracting.chain,
+      contractingDepth: ctx.outboundContracting.depth,
+      selfHostHint: ctx.selfHostHint ?? null,
+      chainId: ctx.chainId ?? null,
+      ttlSeconds: suspension.ttlSeconds,
+      frozenPricesExpireAtMs: suspension.frozenPricesExpireAtMs,
+    });
+
+    if (!opened.ok) {
+      return {
+        success: false,
+        output: null,
+        steps: ctx.results,
+        totalCostUsdc: ctx.totalCost,
+        totalLatencyMs: ctx.totalLatency,
+        error: `Step ${ctx.i} asked to suspend but the run state could not be persisted: ${opened.reason}`,
+      };
+    }
+
+    return {
+      success: true,
+      output: ctx.lastOutput,
+      steps: ctx.results,
+      totalCostUsdc: ctx.totalCost,
+      totalLatencyMs: ctx.totalLatency,
+      suspended: {
+        runId: opened.runId,
+        step: ctx.i,
+        // ⛔ CD-21: TAL CUAL. No se reescribe, no se le agregan parámetros, no
+        // se valida contra una allowlist nuestra y no se loguea. El gateway
+        // sabe que hay que esperar; no sabe a qué.
+        artifact: ctx.output,
+        // Lo escribió POSTGRES, releído del insert. No es una copia de lo que
+        // este proceso hubiera calculado.
+        expiresAt: opened.expiresAt,
+        state: 'input-required',
+      },
+      resumeToken: opened.token,
+      verificationStatus: summarizePipelineVerification(ctx.results),
     };
   },
   /**
