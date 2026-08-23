@@ -280,3 +280,96 @@ lector futuro podría "corregir" hacia atrás:
   que ROMPER, no ser un no-op** — un no-op silencioso acá habría dejado
   `T-MIG-5` midiendo posiciones de literales y yo habría reportado que lo
   reescribí.
+
+---
+
+### [2026-08-23 20:10] Fix-pack it2 (AR/MNR-9) — Escribí "generaliza" de un parser que probé con UN solo caso
+
+- **Error**: el docblock de `T-MIG-5` afirmaba que el control «generaliza:
+  cazaría el mismo error re-introducido en cualquier otra rama». El AR extrajo
+  el parser a un script y lo corrió contra 4 variantes del `.sql`: **2 pasaban
+  en VERDE con el defecto adentro**. Un `IF` anidado (`IF TRUE THEN … END IF;`)
+  escondía el bug entero, y un `UPDATE` + `RAISE` al nivel del cuerpo de la
+  función era literalmente invisible.
+- **Causa raíz**: verifiqué el parser contra los DOS inputs que tenía a mano —el
+  `.sql` con el bug y el `.sql` arreglado— y de ese 2/2 deduje una propiedad
+  UNIVERSAL. `/^[ \t]*IF .*?THEN$[\s\S]*?^[ \t]*END IF;$/gm` es no-greedy:
+  ante anidamiento el bloque externo termina en el `END IF;` INTERNO. Y
+  `bloquesIf` sólo miraba bloques `IF`, nunca el nivel superior. Ninguna de las
+  dos limitaciones aparece si sólo probás los dos inputs que motivaron el
+  control. Peor: el propio fix-pack introdujo un `IF` anidado en
+  `trigger_set_suspended_run_expires_at`, así que la forma ciega ya estaba en el
+  archivo cuando escribí "generaliza".
+- **Fix**: parser reescrito con balanceo real (`regionesDe` cuenta
+  profundidad línea por línea, parte cada bloque en sus ramas `ELSIF`/`ELSE` de
+  primer nivel y devuelve TAMBIÉN el nivel superior como región), comentarios
+  `--` stripeados antes de parsear, y `FOR UPDATE` excluido del DML (es lock, no
+  escritura). Verificado mutando el `.sql` REAL, no razonando: parser viejo vs.
+  nuevo, exit code de `vitest -t "T-MIG-5"`.
+
+  | variante del `.sql` | parser viejo | parser nuevo |
+  |---|---|---|
+  | `aa0fc13` limpio | 0 (verde) ✅ | 0 (verde) ✅ |
+  | `87134bf` real (el bug) | 1 (rojo) ✅ | 1 (rojo) ✅ |
+  | MUT-0 · el `UPDATE` en un `IF` plano | 1 (rojo) ✅ | 1 (rojo) ✅ |
+  | **MUT-1 · el `UPDATE` anidado en `IF TRUE`** | **0 (verde) ❌** | **1 (rojo) ✅** |
+  | **MUT-2 · `UPDATE`+`RAISE` en el top-level** | **0 (verde) ❌** | **1 (rojo) ✅** |
+  | MUT-3 · `EXECUTE 'UPDATE …'` | 1 (rojo) ✅ | 1 (rojo) ✅ |
+
+  Y el docblock ya no dice "generaliza": DECLARA su alcance y sus cuatro
+  límites. Las dos formas ciegas quedaron como fixtures DENTRO del test
+  (`MUT_1` / `MUT_2` + `expect(infractoras(...)).toHaveLength(1)`), así que
+  simplificar el parser vuelve a poner rojo ese control ANTES de que el `.sql`
+  real lo necesite. Sin eso el docblock envejece otra vez en silencio.
+- **Aplicar en**: **todo control que sea un PARSER**. Un parser probado con los
+  inputs que lo motivaron mide esos inputs, no la propiedad. La regla mínima:
+  antes de escribir "generaliza" / "cualquier" / "siempre" en el docblock de un
+  guardián, construir al menos una variante que el guardián DEBERÍA cazar y que
+  NO se parezca al caso original — y si no la construís, escribir el alcance
+  acotado en vez del adverbio. Es la versión "parser" de la lección que este
+  repo ya tiene: *un guardián que dice cubrir más de lo que cubre apaga la
+  próxima revisión* — quien lo lea va a descartar un hallazgo real creyéndolo
+  vigilado.
+
+---
+
+### [2026-08-23 20:35] Fix-pack it2 (AR/MNR-10 + MNR-11) — Dos certezas escritas que el código no respalda
+
+- **Error**: dos comentarios normativos afirmaban cosas falsas o no verificables.
+  (1) `ResumeStep0Debit.rejected` se documentaba como *"la base lo RECHAZÓ (nada
+  aplicado)"*; (2) el `.sql` justificaba no bajar el guard de `MNR-6` a
+  `resuming` diciendo que un claim concurrente marcaría `expired` un run EN
+  EJECUCIÓN.
+- **Causa raíz**: la misma en las dos, y no es descuido — es **prosa escrita
+  desde la intención en vez de desde el shape**. En (1) el shape de
+  `budgetService.debit` es `{success:false, error}` y sale por un canal que
+  mezcla rechazo con no-sé (`catch` en las rutas de sesión/delegación, `error`
+  de `supabase.rpc` —que incluye transporte— en las dos master): un timeout
+  POSTERIOR al commit produce el mismo valor que un saldo insuficiente. Escribí
+  la intención del caso ("esto es el rechazo por saldo") como si fuera una
+  garantía del tipo. En (2) la razón era CIERTA cuando se escribió y **el fix de
+  BLQ-ALTO-1 —mío, tres horas antes— la volvió falsa**: sacar la transición del
+  RPC y ponerla en un `UPDATE … WHERE status='suspended'` hace que sobre un run
+  en `resuming` afecte 0 filas. Arreglé el código y no barrí las razones que ese
+  arreglo invalidaba.
+- **Fix**: (1) el comentario baja a lo que el shape permite —"la base no
+  confirmó el débito; la disposición puede ser DESCONOCIDA"— y deja escrito por
+  qué `failed` sigue siendo correcto (lado seguro contra el doble cobro +
+  paridad con `/compose`). Corregida también la MISMA frase repetida en el
+  call-site, que el AR no citó y decía "⇒ nada se aplicó" dos líneas antes de
+  decir "cuya disposición no podemos probar". Discriminar saldo de transporte
+  queda declarado como **`TD-225-02`**, NO implementado: pide un tercer estado
+  en `budgetService.debit` y toca el camino del dinero de `/compose`.
+  (2) el párrafo se reescribe con el motivo verdadero —un guard laxo no marcaría
+  nada, no emitiría residuo, y degradaría el 409 a un 410 engañoso— y suma el
+  dato de que un run atascado en `resuming` **sí es visible** en
+  `listSuspendedRuns`, que no filtra por status. La DECISIÓN (barrido con
+  antigüedad mínima, NC-3 / TD-225-01) no cambia.
+- **Aplicar en**: (1) todo tipo del camino del dinero cuyo comentario afirme una
+  DISPOSICIÓN (`nada aplicado`, `ya cobrado`, `no se tocó`): sólo es válido si
+  el productor del valor puede distinguir "no pasó" de "no pude preguntar". Si
+  el fallo sale de un `catch` o del `error` de un cliente HTTP, **no puede**.
+  (2) cuando un fix cambia DÓNDE ocurre una escritura, hay que barrer las
+  justificaciones que se apoyaban en la ubicación vieja — no sólo los sitios que
+  tocaste. Acá el `git diff` del fix-pack ni siquiera rozaba el párrafo falso:
+  el fix lo volvió falso a distancia.

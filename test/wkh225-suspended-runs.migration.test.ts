@@ -87,6 +87,7 @@ describe('T-MIG · up migration (a2a_suspended_runs)', () => {
 
   /**
    * 🔴 FIX-PACK AR/BLQ-ALTO-1 — ESTE TEST SE REESCRIBIÓ ENTERO.
+   * 🔴 FIX-PACK AR/MNR-9 — Y SU PARSER SE REESCRIBIÓ DE NUEVO. Ver abajo.
    *
    * Antes comparaba POSICIONES DE LITERALES en un string
    * (`marcaExpired > expiredGuard`, `raiseExpired > marcaExpired`): medía el
@@ -95,25 +96,58 @@ describe('T-MIG · up migration (a2a_suspended_runs)', () => {
    *
    * Lo que mide ahora es un INVARIANTE ESTRUCTURAL de PL/pgSQL, no una posición:
    *
-   *   > Ninguna rama que levante una excepción puede contener una escritura.
+   *   > Ninguna región que levante una excepción puede contener una escritura.
    *
    * Es exactamente el defecto: un `RAISE EXCEPTION` sin bloque `EXCEPTION` que
    * lo atrape aborta la transacción entera —y PostgREST corre cada `rpc()` en
-   * una transacción propia—, así que toda escritura de esa rama se DESCARTA. El
-   * `UPDATE … SET status='expired'` que vivía dos líneas arriba del
+   * una transacción propia—, así que toda escritura de esa región se DESCARTA.
+   * El `UPDATE … SET status='expired'` que vivía dos líneas arriba del
    * `RAISE 'RUN_EXPIRED'` nunca commiteó ni una vez: verificado ejecutando la
    * migración contra un Postgres 16 real (tres claims seguidos sobre una fila
    * vencida ⇒ `suspended` las tres veces).
    *
-   * Este control se pone ROJO con el `.sql` anterior, y generaliza: cazaría el
-   * mismo error re-introducido en cualquier otra rama de cualquiera de las dos
-   * funciones.
+   * ── POR QUÉ EL PARSER SE REESCRIBIÓ (AR/MNR-9) ────────────────────────────
    *
-   * ⚠️ LO QUE SIGUE SIN PODER DECIR: es texto. Que la transición durable OCURRA
-   * lo mide `src/services/suspended-run.test.ts` (T-RUN-9), con un doble que
-   * descarta lo que la función escribió antes de levantar. Ninguno solo alcanza.
+   * Acá decía que el control «generaliza: cazaría el mismo error re-introducido
+   * en cualquier otra rama». Era FALSO, y el AR lo midió extrayendo el parser a
+   * un script: de 4 variantes del `.sql`, DOS pasaban en verde con el defecto
+   * adentro. El regex viejo era
+   * `/^[ \t]*IF .*?THEN$[\s\S]*?^[ \t]*END IF;$/gm`:
+   *
+   *  · NO BALANCEABA. Al ser no-greedy, ante un `IF` anidado el bloque externo
+   *    terminaba en el `END IF;` INTERNO, y el `RAISE` posterior quedaba afuera
+   *    del match. Envolver el `UPDATE` en un `IF TRUE THEN … END IF;` bastaba
+   *    para esconder el bug entero. Y el `IF` anidado no es hipotético: este
+   *    mismo fix-pack introdujo uno, en `trigger_set_suspended_run_expires_at`.
+   *  · SÓLO MIRABA BLOQUES `IF`. Un `UPDATE` + `RAISE` sueltos al nivel del
+   *    cuerpo de la función —fuera de todo `IF`— eran invisibles.
+   *
+   * El parser de hoy (`regionesDe`) balancea `IF`/`END IF;` contando anidamiento
+   * línea por línea, parte cada bloque en sus RAMAS reales (`ELSIF` / `ELSE` de
+   * primer nivel), y devuelve TAMBIÉN el nivel superior del cuerpo como una
+   * región más. Las dos variantes que se le escapaban están construidas abajo
+   * como fixtures (`MUT-1`, `MUT-2`) y el test asserta que las MARCA: sin eso,
+   * este docblock volvería a envejecer sin que nada se ponga rojo.
+   *
+   * ── LO QUE ESTE CONTROL SIGUE SIN PODER DECIR ─────────────────────────────
+   *
+   *  · ES TEXTO, no ejecución. Que la transición durable OCURRA lo mide
+   *    `src/services/suspended-run.test.ts` (T-RUN-9), con un doble que descarta
+   *    lo que la función escribió antes de levantar. Ninguno solo alcanza.
+   *  · MIRA DOS FUNCIONES, las dos `SECURITY DEFINER` del claim/settle. La
+   *    función del trigger NO se escanea (no levanta excepciones).
+   *  · ES CONSERVADOR CON LO ANIDADO, a propósito: la rama externa incluye el
+   *    texto de sus bloques internos, así que un `RAISE` en un `ELSE` anidado
+   *    marca una escritura de la rama externa aunque en runtime no la pise. Se
+   *    eligió el falso positivo sobre el falso negativo — es la asimetría que
+   *    dejó pasar el BLOQUEANTE. Si aparece uno, se declara acá.
+   *  · IGNORA LOS COMENTARIOS `--` (se stripean antes de parsear): si no, la
+   *    prosa que menciona un `UPDATE` o un `RAISE` movería el veredicto, que es
+   *    justo el modo de falla que este archivo persigue.
+   *  · `FOR UPDATE` NO ES ESCRITURA: es cláusula de lock del `SELECT`, y se
+   *    borra antes de buscar DML. Un `EXECUTE 'UPDATE …'` sí queda cazado.
    */
-  it('T-MIG-5: ninguna rama que levante una excepción ESCRIBE (lo escrito se rollbackea)', () => {
+  it('T-MIG-5: ninguna región que levante una excepción ESCRIBE (lo escrito se rollbackea)', () => {
     const cuerpoDe = (nombre: string): string => {
       const desde = sql.indexOf(`CREATE OR REPLACE FUNCTION ${nombre}`);
       expect(desde).toBeGreaterThan(-1);
@@ -123,33 +157,104 @@ describe('T-MIG · up migration (a2a_suspended_runs)', () => {
     };
 
     /**
-     * Todo bloque `IF … THEN … END IF;` del cuerpo, sin anidar. Alcanza para
-     * este `.sql` (los guards del claim y del settle son planos), y el control
-     * de más abajo verifica que se hayan ENCONTRADO bloques con `RAISE`: si un
-     * cambio de forma los volviera invisibles, el test se rompe en vez de
-     * quedar vacuo en silencio.
+     * Parte un cuerpo PL/pgSQL en sus regiones de flujo recto: una por cada
+     * RAMA de cada bloque `IF` de primer nivel (el `THEN`, cada `ELSIF` y el
+     * `ELSE` son regiones distintas — no comparten destino transaccional), más
+     * el nivel superior del cuerpo como una región propia.
+     *
+     * El anidamiento se CUENTA (`profundidad`), no se adivina: las líneas de un
+     * `IF` interno se acumulan dentro de la rama externa que las contiene, que
+     * es lo semánticamente correcto —un `RAISE` adentro rollbackea lo que la
+     * rama externa escribió antes— y lo que el regex viejo no hacía.
      */
-    const bloquesIf = (cuerpo: string): string[] =>
-      [...cuerpo.matchAll(/^[ \t]*IF .*?THEN$[\s\S]*?^[ \t]*END IF;$/gm)].map(
-        (m) => m[0],
-      );
+    const regionesDe = (cuerpoCrudo: string): string[] => {
+      const cuerpo = cuerpoCrudo.replace(/--[^\n]*/g, '');
+      const ABRE = /^[ \t]*IF\b.*\bTHEN[ \t]*$/;
+      const CIERRA = /^[ \t]*END IF;/;
+      const OTRA_RAMA = /^[ \t]*(ELSIF\b.*\bTHEN|ELSE)[ \t]*$/;
+
+      const regiones: string[] = [];
+      const nivelSuperior: string[] = [];
+      let rama: string[] = [];
+      let profundidad = 0;
+
+      for (const linea of cuerpo.split('\n')) {
+        if (ABRE.test(linea)) {
+          if (profundidad === 0) rama = [];
+          else rama.push(linea);
+          profundidad += 1;
+          continue;
+        }
+        if (CIERRA.test(linea)) {
+          profundidad -= 1;
+          if (profundidad === 0) regiones.push(rama.join('\n'));
+          else rama.push(linea);
+          continue;
+        }
+        if (profundidad === 1 && OTRA_RAMA.test(linea)) {
+          regiones.push(rama.join('\n'));
+          rama = [];
+          continue;
+        }
+        if (profundidad === 0) nivelSuperior.push(linea);
+        else rama.push(linea);
+      }
+      // Si esto falla, el `.sql` tiene un `IF`/`END IF;` desbalanceado o una
+      // forma que el parser no reconoce: se ROMPE en vez de quedar vacuo.
+      expect(profundidad).toBe(0);
+      regiones.push(nivelSuperior.join('\n'));
+      return regiones;
+    };
 
     const DML = /\b(UPDATE|INSERT\s+INTO|DELETE\s+FROM)\b/;
+    const escribe = (region: string): boolean =>
+      DML.test(region.replace(/\bFOR\s+UPDATE\b/g, ''));
+
+    /** Las regiones que levantan Y escriben. Vacío = invariante intacto. */
+    const infractoras = (cuerpo: string): string[] =>
+      regionesDe(cuerpo).filter(
+        (r) => r.includes('RAISE EXCEPTION') && escribe(r),
+      );
 
     for (const nombre of ['claim_suspended_run', 'settle_suspended_run']) {
       const cuerpo = cuerpoDe(nombre);
-      const bloques = bloquesIf(cuerpo);
-      expect(bloques.length).toBeGreaterThan(0);
-      const conRaise = bloques.filter((b) => b.includes('RAISE EXCEPTION'));
-      expect(conRaise.length).toBeGreaterThan(0);
-      for (const bloque of conRaise) {
-        expect(
-          DML.test(bloque),
-          `${nombre}: una rama que hace RAISE tambien ESCRIBE; el RAISE la ` +
-            `rollbackea y la escritura no ocurre nunca:\n${bloque}`,
-        ).toBe(false);
-      }
+      const regiones = regionesDe(cuerpo);
+      expect(regiones.length).toBeGreaterThan(0);
+      // Anti-vacuidad: si un cambio de forma volviera invisibles las regiones
+      // que levantan, este control se rompe en vez de aplaudir en silencio.
+      const queLevantan = regiones.filter((r) =>
+        r.includes('RAISE EXCEPTION'),
+      );
+      expect(queLevantan.length).toBeGreaterThan(0);
+      expect(
+        infractoras(cuerpo),
+        `${nombre}: una región que hace RAISE tambien ESCRIBE; el RAISE la ` +
+          `rollbackea y la escritura no ocurre nunca`,
+      ).toEqual([]);
     }
+
+    // ── EL CONTROL DEL CONTROL (AR/MNR-9) ────────────────────────────────
+    // Las DOS formas que el parser viejo dejaba pasar en verde, con el mismo
+    // defecto adentro. Si alguien vuelve a simplificar `regionesDe`, estas dos
+    // se ponen rojas ANTES de que el `.sql` real las necesite.
+    const MUT_1 = [
+      'BEGIN',
+      "  IF v_status = 'suspended' AND NOW() >= v_expires THEN",
+      '    IF TRUE THEN',
+      "      UPDATE a2a_suspended_runs SET status = 'expired' WHERE id = v_id;",
+      '    END IF;',
+      "    RAISE EXCEPTION 'RUN_EXPIRED';",
+      '  END IF;',
+      'END;',
+    ].join('\n');
+    const MUT_2 = [
+      'BEGIN',
+      "  UPDATE a2a_suspended_runs SET status = 'expired' WHERE id = v_id;",
+      "  RAISE EXCEPTION 'RUN_EXPIRED';",
+      'END;',
+    ].join('\n');
+    expect(infractoras(MUT_1)).toHaveLength(1); // `IF` anidado
+    expect(infractoras(MUT_2)).toHaveLength(1); // fuera de todo `IF`
   });
 
   it('T-MIG-14 (fix-pack AR/BLQ-ALTO-1): el claim NO transiciona a `expired`, y `expired` levanta RUN_EXPIRED', () => {

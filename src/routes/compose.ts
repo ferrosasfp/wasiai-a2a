@@ -1031,7 +1031,33 @@ type ResumeStep0Debit =
   | { ok: true; debitedUsd: number }
   /** Pre-débito: no se pudo cotizar. NADA se tocó ⇒ el run puede reabrirse. */
   | { ok: false; reason: 'unresolvable' }
-  /** El débito se pidió y la base lo RECHAZÓ (nada aplicado). */
+  /**
+   * El débito se PIDIÓ y `budgetService.debit` devolvió `success: false`.
+   *
+   * ⚠️ ESO NO DICE «nada aplicado» — acá lo decía, y era una certeza que el
+   * shape no da (fix-pack AR/MNR-10). En las CUATRO rutas de
+   * `budgetService.debit` el fallo sale por un canal que mezcla el rechazo con
+   * el no-sé: las de sesión y delegación desde la cola de un `catch`, y las dos
+   * master desde el `error` de `supabase.rpc`, que trae también los fallos de
+   * TRANSPORTE. Un rechazo por saldo y un timeout POSTERIOR al commit de la RPC
+   * producen el MISMO valor. Lo único que este `reason` afirma es que **la base
+   * no confirmó el débito**; la disposición puede ser DESCONOCIDA.
+   * Es el patrón que este repo ya tiene escrito —"no pude preguntar" ≠ "no
+   * pasó"— y que esta misma ruta respeta más abajo con el fee, que sí distingue
+   * `unknown` de `not_charged`.
+   *
+   * POR QUÉ `failed` SIGUE SIENDO LO CORRECTO bajo esa incertidumbre: es el
+   * lado seguro. `reopen` devolvería el run a `suspended` con el MISMO token,
+   * o sea ofrecería un segundo intento sobre un débito que pudo haberse
+   * aplicado ⇒ doble cobro. `failed` es terminal y no vuelve a cobrar. El costo
+   * es que un rechazo legítimo por saldo tampoco se puede reintentar — que es
+   * exactamente lo que `/compose` hace hoy con su step 0. Paridad, no invento.
+   *
+   * ⛔ DISCRIMINAR el fallo de saldo del de transporte NO se hace acá: pide un
+   * tercer estado en `budgetService.debit` y toca el camino del dinero de
+   * `/compose`, no sólo el de `/compose/resume`. Queda declarado como
+   * `TD-225-02` (ver `auto-blindaje.md`), no implementado.
+   */
   | { ok: false; reason: 'rejected'; error: string; capExceeded: boolean };
 
 async function debitResumedFirstStep(
@@ -1732,10 +1758,12 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
       if (!step0.ok) {
-        // El débito se PIDIÓ y la base lo rechazó ⇒ nada se aplicó, pero ya
-        // pasamos el punto en el que `reopen` es seguro: la doctrina de este
-        // repo reserva `reopen` para los guards PRE-débito, y reabrir sobre un
-        // débito cuya disposición no podemos probar es ofrecer un segundo cobro.
+        // El débito se PIDIÓ y la base NO lo confirmó (fix-pack AR/MNR-10:
+        // acá decía "⇒ nada se aplicó", y el shape no lo garantiza — ver el
+        // docblock de `ResumeStep0Debit`). Ya pasamos el punto en el que
+        // `reopen` es seguro: la doctrina de este repo lo reserva para los
+        // guards PRE-débito, y reabrir sobre un débito cuya disposición no
+        // podemos probar es ofrecer un segundo cobro.
         // `failed` es terminal, igual que para cualquier otro fallo del tramo.
         await suspendedRunService.settle(
           run.id,

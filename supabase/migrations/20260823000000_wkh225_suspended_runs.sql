@@ -279,12 +279,32 @@ BEGIN
   -- ⚠️ LÍMITE CONOCIDO, DECLARADO Y NO CERRADO EN ESTE CORTE (AR/MNR-6): un run
   -- que muere en `resuming` —proceso caído entre el claim y el settle— cae acá
   -- para siempre. No vence (el guard de vencimiento exige `suspended`) y por lo
-  -- tanto nunca deja constancia del pago varado de su primera mitad. Se decidió
-  -- NO cubrirlo bajando el guard a `resuming`: un claim concurrente podría
-  -- entonces marcar `expired` un run que está EJECUTÁNDOSE, y eso rompe el
-  -- single-use que es la propiedad central de esta tabla. El remedio correcto es
-  -- un barrido con antigüedad mínima (NC-3, fuera de scope del corte A), no un
-  -- guard más laxo acá.
+  -- tanto nunca deja constancia del pago varado de su primera mitad.
+  --
+  -- 🔴 FIX-PACK AR/MNR-11 — LA RAZÓN QUE ESTABA ESCRITA ACÁ ERA FALSA. Decía
+  -- que bajar el guard a `resuming` dejaría que un claim concurrente marcara
+  -- `expired` un run EN EJECUCIÓN. Eso ya no puede pasar: desde el fix-pack de
+  -- BLQ-ALTO-1 esta función NO transiciona nada, y el único escritor de
+  -- `expired` es el `UPDATE … WHERE status = 'suspended'` de
+  -- `suspendedRunService.expire` (`src/services/suspended-run.ts`), que sobre un
+  -- run en `resuming` afecta 0 FILAS — y sin fila no hay residuo emitido.
+  --
+  -- Lo que un guard más laxo cambiaría de verdad es el CÓDIGO que ve el segundo
+  -- caller: un 410 RUN_EXPIRED en vez del 409 RUN_ALREADY_USED que le
+  -- corresponde a un run que otro proceso está reanudando. Molesto y engañoso,
+  -- no destructivo.
+  --
+  -- LA DECISIÓN NO CAMBIA, y el motivo verdadero es que un guard laxo no
+  -- ARREGLA nada: no marcaría la fila, no emitiría el residuo que MNR-6 echa de
+  -- menos, y a cambio degradaría un código de error correcto. El remedio sigue
+  -- siendo un barrido con antigüedad mínima (NC-3 / TD-225-01, fuera de scope
+  -- del corte A), que es lo único que distingue un run abandonado de uno que se
+  -- está reanudando ahora mismo.
+  --
+  -- Y el estado actual NO es invisible para el operador: `listSuspendedRuns`
+  -- (`src/services/reconciliation.ts`) no filtra por status, así que un run
+  -- atascado en `resuming` aparece en el reporte admin. La pérdida real es la
+  -- que MNR-6 nombra: no hay residuo automático.
   IF v_status <> 'suspended' THEN
     RAISE EXCEPTION 'RUN_ALREADY_USED';
   END IF;
