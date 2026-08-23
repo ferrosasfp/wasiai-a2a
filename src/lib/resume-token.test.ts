@@ -247,8 +247,8 @@ describe('T-TOK · emisión y verificación del token de reanudación', () => {
       '',
       'v1',
       'v1.abc',
-      'v2.abc.' + 'f'.repeat(64),
-      'v1..' + 'f'.repeat(64),
+      `v2.abc.${'f'.repeat(64)}`,
+      `v1..${'f'.repeat(64)}`,
       'v1.abc.no-es-hex',
       `v1.${Buffer.from('{"no":"json-valido"').toString('base64url')}.${'f'.repeat(64)}`,
     ];

@@ -332,6 +332,19 @@ export interface AmbiguousReport {
    * pantallas distintas se miran por turnos y siempre hay una que no se mira.
    */
   strandedRuns: StrandedRunsReport;
+  /**
+   * WKH-225: la CUARTA pregunta del mismo panel — "¿qué pipelines quedaron
+   * esperando a una persona, y cuáles están por vencer?". Va anidada acá por el
+   * MISMO motivo que las otras dos: cuatro listas de plata en cuatro pantallas
+   * distintas se miran por turnos y siempre hay una que no se mira.
+   *
+   * ⛔ NO se mezcla con `strandedRuns` ni con `settleUnknown`. Son tres
+   * preguntas con tres acciones humanas distintas: "reconciliar contra la
+   * cadena", "esto ya se fue, contalo", y "esto todavía puede completarse".
+   * Un run suspendido VIVO no es plata perdida; recién si vence sin reanudarse
+   * emite su residuo, y ahí aparece —una sola vez— en `strandedRuns`.
+   */
+  suspendedRuns: SuspendedRunsReport;
 }
 
 /**
@@ -427,6 +440,39 @@ type StrandedPaidStepRow =
 /** Mismo contrato de completitud que `SettleUnknownReport` y por el mismo motivo. */
 export interface StrandedRunsReport {
   rows: StrandedRunRow[];
+  total: number;
+  truncated: boolean;
+}
+
+/**
+ * WKH-225 — un run de `/compose` que quedó ESPERANDO a una persona.
+ *
+ * ⛔ NO SALE DE `a2a_events`, a diferencia de las otras dos listas de este
+ * archivo: sale de `a2a_suspended_runs`, que es la tabla del ESTADO. La
+ * diferencia no es de implementación — un evento dice "esto pasó" y no cambia
+ * nunca; una suspensión es una fila VIVA cuyo `status` se mueve. Buscarla entre
+ * los eventos daría la foto del momento en que se abrió, no la de ahora.
+ *
+ * ⛔ Y NO trae `token_hash`: el panel de un operador no necesita el material del
+ * que sale una credencial de reanudación de otro inquilino.
+ */
+export interface SuspendedRunListRow {
+  run_id: string;
+  owner_ref: string;
+  key_id: string;
+  compose_run_id: string;
+  step_index: number;
+  status: string;
+  /** NUMERIC leído con `::text` (WKH-196): PostgREST lo entregaría redondeado. */
+  totalCostUsdc: string;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Mismo contrato de completitud que las otras dos, y por el mismo motivo. */
+export interface SuspendedRunsReport {
+  rows: SuspendedRunListRow[];
   total: number;
   truncated: boolean;
 }
@@ -527,6 +573,19 @@ interface StrandedRunSelectRow {
   cost_usdc: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
+}
+
+interface SuspendedRunSelectRow {
+  id: string;
+  owner_ref: string;
+  key_id: string;
+  compose_run_id: string;
+  step_index: number;
+  status: string;
+  total_cost_usdc: string | null;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
 }
 
 interface DriftSigRow {
@@ -678,9 +737,16 @@ export const reconciliationService = {
     // TIENE que subir. Un `catch` que devolviera la lista a medias diría "no hay pagos
     // varados" cuando la verdad es "no pudimos saberlo" (AC-4).
     const strandedRuns = await this.listStrandedRuns();
+    // WKH-225: SECUENCIAL por el mismo motivo que las dos anteriores (con las
+    // promesas en vuelo, un fallo de una deja las otras como unhandled
+    // rejection) y SIN `try` alrededor: si esta query falla, el error TIENE que
+    // subir. Un `catch` diría "no hay pipelines esperando" cuando la verdad es
+    // "no pudimos saberlo".
+    const suspendedRuns = await this.listSuspendedRuns();
     return {
       settleUnknown,
       strandedRuns,
+      suspendedRuns,
       rows: rows.map((r) => ({
         intent_id: r.id,
         owner_ref: r.owner_ref,
@@ -815,6 +881,74 @@ export const reconciliationService = {
           paidSteps: parsed.paidSteps,
         };
       }),
+      total,
+      truncated: total > rows.length,
+    };
+  },
+
+  /**
+   * WKH-225 (AC-11) — los runs de `/compose` que quedaron esperando a una
+   * persona. Se sirve dentro de `listAmbiguous()` (`AmbiguousReport.suspendedRuns`).
+   *
+   * ⛔ CONSULTA `a2a_suspended_runs`, NO `a2a_events`. Es la única de las cuatro
+   * listas de este archivo que mira una tabla de ESTADO en vez del log de
+   * eventos, y es a propósito: el `status` de un run suspendido se mueve
+   * (`suspended` → `resuming` → `resumed` / `failed` / `expired`), así que un
+   * evento diría cómo estaba cuando se abrió, no cómo está.
+   *
+   * ⛔ Y NO SE MEZCLA con `listStrandedRuns`. Un run suspendido VIVO no es plata
+   * varada: todavía puede completarse. Recién si vence sin reanudarse emite su
+   * residuo —una sola vez, en la transición a `expired`— y aparece allá. Meter
+   * los dos en la misma lista haría que el operador viera como pérdida algo que
+   * está funcionando.
+   *
+   * Hereda las TRES invariantes de las otras listas, y ninguna se puede debilitar:
+   *   1. NO gateada por `isEscrowSettleEnabled()` — este camino no tiene nada
+   *      que ver con el escrow y corre siempre;
+   *   2. `total` exacto (`count:'exact'`) + `truncated` — una lista de plata
+   *      comprometida que se corta en silencio afirma algo falso sobre su
+   *      propia completitud;
+   *   3. un error de query TIRA en vez de devolver `[]` — "no hay nada
+   *      esperando" es una mentira cara en esta superficie.
+   *
+   * `total_cost_usdc::text` es obligatorio (WKH-196): PostgREST entrega los
+   * NUMERIC como número JSON y `JSON.parse` redondea.
+   *
+   * ⚠️ CROSS-TENANT DELIBERADO, y por eso lleva su entrada escrita a mano en
+   * `test/ownership-filter-guard.exceptions.ts`: es el mismo patrón que
+   * `listSettleUnknown` / `listPending` / `listAmbiguous`, o sea una superficie
+   * de ALTO PRIVILEGIO gateada por `requireAdminToken` en la ruta. La
+   * contraparte owner-scoped existe y filtra: `suspendedRunService.listForOwner`.
+   */
+  async listSuspendedRuns(): Promise<SuspendedRunsReport> {
+    const { data, error, count } = await supabase
+      .from('a2a_suspended_runs')
+      .select(
+        'id, owner_ref, key_id, compose_run_id, step_index, status, ' +
+          'total_cost_usdc::text, expires_at, created_at, updated_at',
+        { count: 'exact' },
+      )
+      .order('created_at', { ascending: false })
+      .limit(AMBIGUOUS_LIST_LIMIT);
+    if (error) {
+      log.error({ detail: error.message }, 'listSuspendedRuns query failed');
+      throw new ReconciliationError('INTERNAL');
+    }
+    const rows = (data as unknown as SuspendedRunSelectRow[] | null) ?? [];
+    const total = count ?? rows.length;
+    return {
+      rows: rows.map((r) => ({
+        run_id: r.id,
+        owner_ref: r.owner_ref,
+        key_id: r.key_id,
+        compose_run_id: r.compose_run_id,
+        step_index: r.step_index,
+        status: r.status,
+        totalCostUsdc: r.total_cost_usdc ?? '0',
+        expires_at: r.expires_at,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      })),
       total,
       truncated: total > rows.length,
     };

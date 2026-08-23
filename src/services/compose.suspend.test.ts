@@ -567,3 +567,98 @@ describe('WKH-225 · los controles transversales', () => {
     expect(fallado.resumeToken).toBeUndefined();
   });
 });
+
+// ─── AC-12 / CD-17 · lo que la reanudación RESTAURA, medido por su efecto ──
+//
+// Estos dos no prueban que el route copie tres campos: prueban que copiarlos
+// CAMBIA lo que hace el pipeline. Sin ellos, la persistencia de la traza
+// anti-bucle sería código que nadie mira — y ése es exactamente el estado en el
+// que un bypass se abre sin que ningún test se ponga rojo.
+//
+// El otro extremo del cable —que el route los lea de la fila y los pase— vive
+// en `src/routes/compose.resume.test.ts`. Ninguno de los dos solo alcanza: uno
+// mide el efecto sin el cable, el otro el cable sin el efecto.
+
+describe('WKH-225 · la traza restaurada tiene EFECTO (AC-12, CD-17)', () => {
+  it('T-RES-10: con el `selfHostHint` restaurado, un destino propio corta el pipeline', async () => {
+    // El pipeline reanudado re-entra a `executePipeline` con los steps que
+    // faltan, así que el guard de capa 1 corre otra vez sobre ellos — y el
+    // catálogo pudo cambiar durante las horas que el run estuvo esperando, así
+    // que ese re-chequeo es MÁS necesario tras una suspensión, no menos.
+    // ⚠️ El host es `example.com` y no uno inventado A PROPÓSITO: el guard de
+    // SSRF resuelve DNS antes de invocar, así que con un host que no existe el
+    // contrafactual de abajo moriría por SSRF y no probaría nada sobre el
+    // guard anti-bucle.
+    wireAgents(
+      makeAgent({ slug: 'payout', invokeUrl: 'https://example.com/invoke' }),
+    );
+
+    const conHint = await composeService.compose({
+      steps: [{ agent: 'payout', input: {} }],
+      // Lo que la fila persistió y el resume restaura.
+      selfHostHint: 'example.com',
+    });
+    expect(conHint.success).toBe(false);
+    expect(conHint.errorCode).toBe('CONTRACTING_LOOP_DETECTED');
+    // Y no se invocó a nadie: el guard corta ANTES del débito y del invoke.
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    // 🔴 El control que hace falsable la frase: SIN el hint, el conjunto de
+    // identidad queda vacío, `isSelfDestination` devuelve `false` por conjunto
+    // vacío y el guard queda INERTE. O sea que reanudar sin restaurar el campo
+    // vuelve a abrir el camino.
+    vi.clearAllMocks();
+    mockDownstream.mockResolvedValue(null);
+    mockGasOverhead.mockResolvedValue(0);
+    mockTrack.mockResolvedValue({} as never);
+    wireAgents(
+      makeAgent({ slug: 'payout', invokeUrl: 'https://example.com/invoke' }),
+    );
+    mockFetchOk({ result: 'se ejecutó igual' });
+    const sinHint = await composeService.compose({
+      steps: [{ agent: 'payout', input: {} }],
+    });
+    expect(sinHint.errorCode).toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-RES-11: la profundidad restaurada VIAJA en la traza saliente, no se reinicia', async () => {
+    // Reanudar con `depth: 0` sería reiniciar el contador del guard anti-bucle
+    // a pedido de quien reanuda: el techo de profundidad dejaría de acotar el
+    // costo exponencial de las contrataciones encadenadas.
+    wireAgents(makeAgent({ slug: 'payout' }));
+    mockFetchOk({ result: 'ok' });
+
+    await composeService.compose({
+      steps: [{ agent: 'payout', input: {} }],
+      contractingChain: ['gw-a', 'gw-b', 'gw-c', 'gw-d'],
+      contractingDepth: 4,
+      selfHostHint: 'a2a.wasiai.io',
+    });
+
+    const headersConDepth = (mockFetch.mock.calls[0]?.[1] ?? {}) as {
+      headers?: Record<string, string>;
+    };
+    expect(headersConDepth.headers?.['x-a2a-contracting-depth']).toBe('5');
+    expect(headersConDepth.headers?.['x-a2a-contracting-chain']).toContain(
+      'gw-d',
+    );
+
+    // Y el contrafactual: con la profundidad reiniciada a 0, el hop siguiente
+    // recibe `1` y cree que es el primero de la cadena.
+    vi.clearAllMocks();
+    mockDownstream.mockResolvedValue(null);
+    mockGasOverhead.mockResolvedValue(0);
+    mockTrack.mockResolvedValue({} as never);
+    wireAgents(makeAgent({ slug: 'payout' }));
+    mockFetchOk({ result: 'ok' });
+    await composeService.compose({
+      steps: [{ agent: 'payout', input: {} }],
+      selfHostHint: 'a2a.wasiai.io',
+    });
+    const headersSinDepth = (mockFetch.mock.calls[0]?.[1] ?? {}) as {
+      headers?: Record<string, string>;
+    };
+    expect(headersSinDepth.headers?.['x-a2a-contracting-depth']).toBe('1');
+  });
+});

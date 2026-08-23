@@ -52,3 +52,56 @@ No es una bitácora de progreso: sólo entra lo que se ROMPIÓ.
   dos lectores con criterios distintos puede ponerse rojo por prosa**, no sólo
   por código. Antes de escribir un comentario ahí: preguntarse a qué bloque lo
   va a atribuir el lector más laxo.
+
+---
+
+### [2026-08-23 17:06] Wave 2 — Insertar en `reconciliation.ts` corrió SEIS excepciones del guardián de dueño
+
+- **Error**: agregué `listSuspendedRuns` y sus tipos a
+  `src/services/reconciliation.ts` y `npm test` se puso rojo en `G-08` con
+  **6 cadenas "sin filtro y sin motivo escrito"** — las mismas seis de siempre,
+  que sí tenían motivo: sus entradas en
+  `test/ownership-filter-guard.exceptions.ts` apuntaban a los números viejos.
+- **Causa raíz**: esa lista está escrita a mano y su `line` es la del `.from(`.
+  Yo agregué líneas en CINCO puntos distintos del archivo, así que el
+  desplazamiento **no es uniforme**: +59 para los sitios anteriores al método
+  nuevo, +134 para los posteriores. Un "sumale N a todo" habría re-apuntado la
+  mitad a la línea equivocada, y el guardián habría quedado verde apuntando a
+  otra cadena.
+- **Fix**: derivé los números nuevos del propio archivo
+  (`grep -n "\.from('a2a_"`) y VERIFIQUÉ uno por uno que la función contenedora
+  siguiera siendo la que la excepción nombra (`listPending`, `listAmbiguous`,
+  `resolveIntent` ×2, `driftCheck`, el lease del hop 2). Además corrí los cuatro
+  `:NNN-NNN` que las propias razones citan hacia docblocks de
+  `reconciliation.ts`, y abrí las cuatro para confirmar que el texto sigue
+  diciendo lo que la razón afirma.
+- **Aplicar en**: cualquier HU que inserte en un archivo con excepciones
+  escritas a mano. **Derivar, no sumar**, y cruzar por SÍMBOLO contenedor, no
+  por aritmética. Y acordarse de que las razones también citan líneas: el
+  guardián no las mira, así que envejecen en silencio.
+
+---
+
+### [2026-08-23 17:14] Wave 2 — Registrar una ruta nueva tumbó TRES suites enteras al arrancar
+
+- **Error**: `POST /compose/resume` usa `requireA2AKey` del middleware de auth.
+  Tres suites que ya existían moquean ese módulo con una factory **parcial**
+  (sin `importOriginal`) que sólo exporta `extractRawKey` y
+  `requirePaymentOrA2AKey`. El resultado no fue un test rojo: fue
+  `Failed Suites 3` — el plugin no registra, así que se cayeron los **46 tests**
+  de esos archivos, y el resumen los contó como `skipped`.
+- **Causa raíz**: un doble parcial de un módulo es un contrato implícito con la
+  lista EXACTA de símbolos que el consumidor importa hoy. Agregar un símbolo al
+  consumidor rompe el doble desde afuera, en tiempo de registro, no de aserción.
+  Y el modo de falla es engañoso: `Tests 6000 passed | 46 skipped` se lee como
+  verde si uno mira sólo la línea de tests.
+- **Fix**: agregar a las tres factories el `requireA2AKey` que faltaba, con el
+  MISMO pass-through que ya tenían para `requirePaymentOrA2AKey`. No se aflojó
+  ninguna aserción ni se tocó ningún test: se completó el doble.
+  ⚠️ Son tres archivos **fuera del Scope IN del Story File**, y va al reporte
+  como ampliación declarada, no aplicada en silencio.
+- **Aplicar en**: toda HU que le agregue un `import` a un archivo que ya tiene
+  dobles parciales. **Antes de importar un símbolo nuevo en un route/service muy
+  moqueado**: `grep -rn "vi.mock('.*<modulo>'" src/` y mirar cuáles usan
+  `importOriginal` y cuáles no. Y al leer la salida de `npm test`, mirar
+  **`Test Files`**, no sólo `Tests`: una suite que no arranca no falla, desaparece.

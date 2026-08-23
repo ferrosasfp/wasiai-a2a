@@ -252,7 +252,7 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
       'ninguna ruta devuelve este resultado verbatim (docblock :454-460).',
   },
 
-  // ── admin-cross-tenant (12) ─────────────────────────────────────────────
+  // ── admin-cross-tenant (13) ─────────────────────────────────────────────
   {
     file: 'src/services/arbiter.ts',
     line: 1178,
@@ -309,7 +309,7 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 564,
+    line: 623,
     table: 'a2a_payment_intent_debit_signatures',
     verb: 'select',
     category: 'admin-cross-tenant',
@@ -319,27 +319,27 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 614,
+    line: 673,
     table: 'a2a_payment_intent_debit_signatures',
     verb: 'select',
     category: 'admin-cross-tenant',
     reason:
-      'listPending: docblock :604-606 — "Cross-tenant DELIBERADO (patrón listHolds): sin filtro ' +
+      'listPending: docblock :663-665 — "Cross-tenant DELIBERADO (patrón listHolds): sin filtro ' +
       'owner_ref, superficie de ALTO PRIVILEGIO gateada por requireAdminToken en la ruta".',
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 655,
+    line: 714,
     table: 'a2a_payment_intents',
     verb: 'select',
     category: 'admin-cross-tenant',
     reason:
-      'listAmbiguous: docblock :649-651 — "Cross-tenant DELIBERADO (mismo patrón y misma ' +
+      'listAmbiguous: docblock :708-710 — "Cross-tenant DELIBERADO (mismo patrón y misma ' +
       'justificación que listPending)". Ruta dashboard.ts:598.',
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 886,
+    line: 1020,
     table: 'a2a_payment_intent_debit_signatures',
     verb: 'select',
     category: 'admin-cross-tenant',
@@ -349,13 +349,29 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 1349,
+    line: 1483,
     table: 'a2a_payment_intent_debit_signatures',
     verb: 'select',
     category: 'admin-cross-tenant',
     reason:
       'driftCheck: reporte global del drift entre el débito off-chain y el balance on-chain, por ' +
-      'key. Sólo reporta, nunca corrige (docblock :1340-1342). Ruta dashboard.ts:598.',
+      'key. Sólo reporta, nunca corrige (docblock :1474-1476). Ruta dashboard.ts:598.',
+  },
+  {
+    file: 'src/services/reconciliation.ts',
+    line: 925,
+    table: 'a2a_suspended_runs',
+    verb: 'select',
+    category: 'admin-cross-tenant',
+    reason:
+      'listSuspendedRuns: la CUARTA lista de `listAmbiguous`, y el mismo patrón que ' +
+      'listSettleUnknown/listPending/listAmbiguous — superficie de ALTO PRIVILEGIO gateada por ' +
+      'requireAdminToken en la ruta (dashboard.ts, GET /dashboard/api/reconciliation). El ' +
+      'operador necesita ver los runs esperando de TODOS los owners; un filtro por dueño ' +
+      'vaciaría el reporte, porque no hay un caller cuyo owner_ref usar. La contraparte ' +
+      'owner-scoped existe y SÍ filtra: suspendedRunService.listForOwner ' +
+      '(src/services/suspended-run.ts), medida por src/services/suspended-run.ownership.test.ts. ' +
+      'El select no trae `token_hash`: el panel no necesita el material de una credencial ajena.',
   },
   {
     file: 'src/services/trace.ts',
@@ -456,14 +472,14 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 1129,
+    line: 1263,
     table: 'a2a_payment_intent_debit_signatures',
     verb: 'update',
     category: 'ligadura-de-fila',
     reason:
       'Lease de evidencia del hop 2: compare-and-set sobre (key_id, debit_nonce, ' +
       'debit_settle_status="resolving_settle"), los tres derivados de la fila que el proceso ya ' +
-      'leyó y claimeó. Es la guarda anti-doble-pago (docblock :1123-1126).',
+      'leyó y claimeó. Es la guarda anti-doble-pago (docblock :1257-1260).',
   },
 
   // ── chequeo-en-js (3) ───────────────────────────────────────────────────

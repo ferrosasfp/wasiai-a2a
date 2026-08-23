@@ -293,10 +293,10 @@ export const CITED_LINES: readonly CitedLine[] = [
   // ── src/services/compose.ts ──────────────────────────────────────────────
   {
     from: 'src/services/compose.ts',
-    cite: 'src/routes/compose.ts:63-77',
+    cite: 'src/routes/compose.ts:90-104',
     target: 'src/routes/compose.ts',
-    line: 63,
-    endLine: 77,
+    line: 90,
+    endLine: 104,
     mustContain: ['function deriveComposeDestination(resolved'],
     symbolPath: ['deriveComposeDestination'],
   },

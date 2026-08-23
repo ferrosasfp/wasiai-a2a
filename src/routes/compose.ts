@@ -24,11 +24,21 @@ import { getStepGasOverheadUsd } from '../lib/gas-overhead.js';
 import { getLogger } from '../lib/logger.js';
 import { PLACEHOLDER_FEE_USD } from '../lib/pricing-constants.js';
 import { refundIdemKey, requestRefundIdemBase } from '../lib/refund-idem.js';
+import {
+  isComposeSuspendEnabled,
+  resolveResumeCaller,
+  resolveSuspendTtlSeconds,
+  resumeTokenHash,
+  SUSPEND_MIN_TTL_SECONDS,
+  suspendMaxTtlSeconds,
+  verifyResumeToken,
+} from '../lib/resume-token.js';
 // HU-208: fuente ÚNICA del monto del débito step-0, compartida con el middleware
 // que lo debita. Ver el comentario en `refundComposeStep0`.
 import { resolveStep0DebitUsd } from '../lib/step0-debit.js';
 import {
   extractRawKey,
+  requireA2AKey,
   requirePaymentOrA2AKey,
 } from '../middleware/a2a-key.js';
 import { contractingGuardHandler } from '../middleware/contracting-guard.js';
@@ -57,7 +67,13 @@ import type { SplitPartyRef } from '../services/fee-split.js';
 import { receiptService } from '../services/receipt.js';
 import { refundOutbox } from '../services/refund-outbox.js';
 import { normalizeDestination } from '../services/spend-policy.js';
-import type { ComposeStep, ResolvedComposeStep } from '../types/index.js';
+import { suspendedRunService } from '../services/suspended-run.js';
+import type {
+  ComposeStep,
+  ResolvedComposeStep,
+  ResumeCaller,
+  StepResult,
+} from '../types/index.js';
 
 const log = getLogger('compose');
 
@@ -116,6 +132,20 @@ async function resolveStep0GasOverheadUsd(
 type ComposeBody = {
   steps: ComposeStep[];
   maxBudget?: number;
+  /**
+   * WKH-225: cuánto tiempo puede quedar esperando un step suspendido, en
+   * segundos. Opcional; ausente ⇒ el máximo configurado, que es lo normal
+   * (el caller no sabe cuánto va a tardar la persona).
+   *
+   * Fuera de rango se rechaza con 400 ANTES de tocar nada: recortarlo en
+   * silencio le devolvería un `expiresAt` que no pidió.
+   */
+  suspendTtlSeconds?: number;
+};
+
+/** WKH-225: body del `POST /compose/resume`. El token va acá, NO en el path. */
+type ResumeBody = {
+  token?: unknown;
 };
 
 /**
@@ -895,6 +925,70 @@ async function resolveComposePriceHandler(
   }
 }
 
+/**
+ * WKH-225 — la autorización para que ESTE pipeline pueda suspender, o `null`.
+ *
+ * Dos condiciones, las dos necesarias:
+ *
+ *  1. la bandera es el string EXACTO `'true'` (`isComposeSuspendEnabled`);
+ *  2. el caller es BINDEABLE — `resolveResumeCaller` devuelve `null` para un
+ *     caller x402 puro o anónimo. Sin credencial exacta no hay a qué atar el
+ *     token de reanudación, y un token que puede redimir cualquiera no es una
+ *     credencial. Ese pipeline se comporta exactamente como hoy.
+ *
+ * ⚠️ `frozenPricesExpireAtMs` NO SE POBLA ACÁ, Y NO ES UN OLVIDO. El único
+ * productor de precios congelados es `/orchestrate/execute` (WKH-303), y
+ * `/orchestrate` no puede suspender: no construye este campo. O sea que hoy
+ * ningún run suspendido lleva precios congelados, y el `LEAST` del trigger
+ * queda inerte por falta de entrada, no por falta de código. El día que un
+ * quote llegue por acá, el recorte ya está del lado de Postgres.
+ */
+function buildSuspensionAuthz(
+  request: FastifyRequest,
+  ttlSeconds: number | undefined,
+): {
+  caller: ResumeCaller;
+  ownerRef: string;
+  keyId: string;
+  ttlSeconds?: number;
+} | null {
+  if (!isComposeSuspendEnabled()) return null;
+  const caller = resolveResumeCaller(request);
+  if (caller === null) return null;
+  const keyRow = request.a2aKeyRow;
+  if (!keyRow) return null;
+  return {
+    caller,
+    ownerRef: keyRow.owner_ref,
+    keyId: keyRow.id,
+    // CD-9 (exactOptionalPropertyTypes): NO poner `ttlSeconds: undefined`.
+    ...(ttlSeconds === undefined ? {} : { ttlSeconds }),
+  };
+}
+
+/**
+ * WKH-225 — el mapeo del desenlace del claim a HTTP.
+ *
+ * Exemplar: `src/routes/agent-links.ts`, que ya traduce el mismo vocabulario
+ * (`LINK_NOT_FOUND` → 404, `LINK_EXPIRED` → 410, `LINK_ALREADY_USED` → 409,
+ * indisponible → 503) con bodies `{ error_code }` en snake.
+ *
+ * 🔴 AC-6: el body del `not_found` es BYTE-IDÉNTICO al de un run inexistente,
+ * porque son EL MISMO body — el service ya colapsó los dos casos en el mismo
+ * `reason`, y el service pudo hacerlo porque el RPC levanta el mismo literal.
+ * Los tres eslabones tienen que decir lo mismo o el más hablador anula a los
+ * otros dos.
+ */
+const RESUME_CLAIM_HTTP: Record<
+  'not_found' | 'expired' | 'already_used' | 'unavailable',
+  { status: number; code: string }
+> = {
+  not_found: { status: 404, code: 'RUN_NOT_FOUND' },
+  expired: { status: 410, code: 'RUN_EXPIRED' },
+  already_used: { status: 409, code: 'RUN_ALREADY_USED' },
+  unavailable: { status: 503, code: 'RESUME_UNAVAILABLE' },
+};
+
 const composeRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: ComposeBody }>(
     '/',
@@ -1031,6 +1125,25 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       // `toPublicSkipCode` genericiza para no filtrar flags, allow-list de
       // mainnet ni estado de la wallet del operador.
       const downstreamSkipCauses: DownstreamSkipCode[] = [];
+
+      // ── WKH-225 · el TTL de la espera, validado ANTES de invocar nada ─────
+      // Fuera de rango es un 400 y punto: acá todavía no se ejecutó ningún
+      // step, así que rechazar no cuesta plata. Validarlo después habría
+      // significado descubrirlo cuando el step de KYC ya cobró.
+      const ttlPedido = request.body.suspendTtlSeconds;
+      if (
+        ttlPedido !== undefined &&
+        resolveSuspendTtlSeconds(ttlPedido) === null
+      ) {
+        await refundComposeStep0(request, 0);
+        return reply.status(400).send({
+          error: `suspendTtlSeconds must be an integer between ${SUSPEND_MIN_TTL_SECONDS} and ${suspendMaxTtlSeconds()}`,
+          error_code: 'INVALID_SUSPEND_TTL',
+          requestId: request.id,
+        });
+      }
+      const suspensionAuthz = buildSuspensionAuthz(request, ttlPedido);
+
       const result = await composeService.compose({
         downstreamSkipCauses,
         // HU-208: `steps` (resuelto), NO `body.steps`. `findUnresolvedStepIndex`
@@ -1077,6 +1190,16 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         // arriba en este archivo; se pasa por el request y no se re-resuelve
         // adentro para que los cuatro sitios comparen contra el MISMO conjunto.
         selfHostHint: request.hostname,
+        // ── WKH-225 (AC-9) · la autorización para SUSPENDER ─────────────────
+        // Se construye SÓLO si la bandera es el string exacto `'true'` Y el
+        // caller es bindeable. `resolveResumeCaller` devuelve `null` para un
+        // caller x402 puro / anónimo: sin credencial exacta no hay a qué atar
+        // el token, y un token que cualquiera puede redimir no es una
+        // credencial. Fail-closed, y ese pipeline se comporta como hoy.
+        //
+        // ⛔ ESTE ES EL ÚNICO SITIO DEL REPO QUE CONSTRUYE ESTE CAMPO, y el
+        // testigo `T-SUSP-CALLSITE` lo clava leyendo `services/orchestrate.ts`.
+        ...(suspensionAuthz === null ? {} : { suspension: suspensionAuthz }),
       });
 
       // BLQ-2: bail early if timeout fired during compose
@@ -1087,6 +1210,40 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       if (reply.sent) {
         await refundComposeStep0(request, result.totalCostUsdc);
         return;
+      }
+
+      // ── WKH-225 · 202: el pipeline quedó ESPERANDO ────────────────────────
+      //
+      // 🔴 EL ORDEN DE ESTAS TRES RAMAS ES LOAD-BEARING, y de las tres esta es
+      // la del medio:
+      //
+      //  · ARRIBA queda el `if (reply.sent)` — el 504 del timeout, que
+      //    reembolsa. Un run que suspendió DESPUÉS de que la reply salió no
+      //    puede responder 202: ya se le respondió al caller.
+      //  · ABAJO queda `if (!result.success)`, que reembolsa el step-0. Un
+      //    suspendido NO falló: reembolsarle el step-0 sería devolverle plata
+      //    por un trabajo que sí se hizo y que se va a terminar.
+      //  · Y MÁS ABAJO todavía queda el cobro del fee de protocolo. ⛔ CD-18:
+      //    el fee NO se cobra acá. Ese bloque idempotiza por `request.id`, y el
+      //    `POST /compose/resume` llega con OTRO `request.id` ⇒ se cobraría una
+      //    vez sobre el pipeline PARCIAL y otra vez al reanudar. Doble cobro,
+      //    plata real. El fee se cobra UNA vez, al completar, sobre el total
+      //    acumulado, y con `compose_run_id` como clave.
+      if (result.suspended) {
+        // Los skips del prefijo ya ejecutado tienen que quedar en el evento
+        // igual que en las otras dos ramas: un pipeline que suspende no es un
+        // pipeline sin telemetría.
+        noteDownstreamSkips(request, result.steps, downstreamSkipCauses);
+        return reply.status(202).send({
+          suspended: result.suspended,
+          // ⛔ Viaja UNA sola vez, en el body de un POST. Nunca en una URL,
+          // nunca en un log. No es recuperable después.
+          resumeToken: result.resumeToken,
+          steps: result.steps,
+          totalCostUsdc: result.totalCostUsdc,
+          totalLatencyMs: result.totalLatencyMs,
+          requestId: request.id,
+        });
       }
 
       if (!result.success) {
@@ -1274,6 +1431,246 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         protocolFeeStatus,
         ...(protocolFeeUsdc !== undefined && { protocolFeeUsdc }),
         ...rollUpCascadedFee(result.steps.map((s) => s.coordinatorFee)),
+      });
+    },
+  );
+
+  // ══ WKH-225 · POST /compose/resume ════════════════════════════════════════
+  //
+  // 🔴 EL TOKEN VA EN EL BODY, y eso DIVERGE a propósito del exemplar
+  // `src/routes/agent-links.ts`, que toma el suyo del PATH (`req.params.token`).
+  // Un token en el path queda en el access log del hosting, en el Referer, y en
+  // cualquier proxy del camino. Los logs de esta ruta son value-free: sólo
+  // `runId`, el nombre del error y el status. Nunca el token, nunca el
+  // artefacto.
+  //
+  // ── LA CADENA DE preHandlers, Y LA DIVERGENCIA QUE HAY QUE LEER ───────────
+  //
+  // Es la de `/compose` MENOS el preHandler de precio del step-0… y menos
+  // `requirePaymentOrA2AKey`, que se reemplaza por `requireA2AKey`. NO es una
+  // simplificación: es un bug de plata evitado. `resolveStep0DebitUsd` cae a
+  // `PLACEHOLDER_FEE_USD` cuando nadie inyectó `composeEstimatedCostUsd`, así
+  // que dejar el middleware de pago sin el preHandler de precio le habría
+  // cobrado UN DÓLAR a cada reanudación — por un step-0 que ya se debitó en el
+  // `/compose` original.
+  //
+  // `requireA2AKey` autentica exactamente igual (master / sesión / delegación),
+  // puebla `a2aKeyRow`, `keySessionContext` y `delegationContext` —que es lo que
+  // `resolveResumeCaller` necesita— y no debita nada. Y exigir credencial es
+  // fail-closed en la dirección correcta: un caller x402 anónimo nunca pudo
+  // haber suspendido, porque no es bindeable.
+  //
+  // ── LA BANDERA NO GATEA ESTA RUTA, Y ES DELIBERADO ────────────────────────
+  //
+  // Apagar `COMPOSE_SUSPEND_ENABLED` tiene que dejar de CREAR runs suspendidos,
+  // no dejar varados a los que ya existen: esos ya gastaron plata del caller.
+  // Con la bandera apagada esta ruta sigue siendo alcanzable y sigue sin poder
+  // inventar nada — sin filas que reanudar, todo token da 404.
+  fastify.post<{ Body: ResumeBody }>(
+    '/resume',
+    {
+      config: { rateLimit: orchestrateRateLimit() },
+      preHandler: [
+        contractingGuardHandler,
+        ...requireForwardKey(),
+        createTimeoutHandler(
+          parseInt(process.env.TIMEOUT_COMPOSE_MS ?? '180000', 10),
+        ),
+        ...requireA2AKey(),
+      ],
+    },
+    async (request, reply: FastifyReply) => {
+      const token = request.body?.token;
+      if (typeof token !== 'string' || token.length === 0) {
+        return reply
+          .status(400)
+          .send({ error_code: 'RESUME_INVALID', requestId: request.id });
+      }
+
+      const caller = resolveResumeCaller(request);
+      const keyRow = request.a2aKeyRow;
+      if (caller === null || !keyRow) {
+        // Defensivo: `requireA2AKey` ya garantizó una de las tres credenciales.
+        return reply
+          .status(400)
+          .send({ error_code: 'RESUME_INVALID', requestId: request.id });
+      }
+
+      // ── AC-4 · LA FIRMA ANTES QUE TODO, Y ANTES DE TOCAR LA BASE ──────────
+      // `verifyResumeToken` valida forma, secreto, estructura y HMAC ANTES de
+      // decodificar el payload, y este `return` es lo que hace que un token
+      // forjado no produzca NI UNA consulta. El orden ES el criterio de
+      // aceptación, no una optimización.
+      //
+      // ⚠️ `RESUME_EXPIRED` NO corta acá. El `exp` del token es un fast-fail;
+      // la autoridad sobre el vencimiento es `expires_at` comparado contra
+      // `NOW()` DENTRO del claim — y ese claim es además el único que puede
+      // marcar la fila `expired` y dejar constancia del pago varado. Cortar
+      // acá ahorraría una consulta y perdería el registro del residuo.
+      const verified = verifyResumeToken(token, caller);
+      if (!verified.ok && verified.code === 'RESUME_INVALID') {
+        return reply
+          .status(400)
+          .send({ error_code: 'RESUME_INVALID', requestId: request.id });
+      }
+
+      const claimed = await suspendedRunService.claim(
+        resumeTokenHash(token),
+        keyRow.owner_ref,
+      );
+      if (!claimed.ok) {
+        const mapped = RESUME_CLAIM_HTTP[claimed.reason];
+        request.log.warn(
+          { error_code: mapped.code },
+          'compose-resume.rejected',
+        );
+        return reply
+          .status(mapped.status)
+          .send({ error_code: mapped.code, requestId: request.id });
+      }
+
+      const run = claimed.run;
+      const remaining = Array.isArray(run.remaining_steps)
+        ? (run.remaining_steps as ResolvedComposeStep[])
+        : [];
+      const stepsPrevios = Array.isArray(run.steps_json)
+        ? (run.steps_json as StepResult[])
+        : [];
+      const costoPrevio = Number(run.total_cost_usdc ?? 0);
+      const latenciaPrevia = Number(run.total_latency_ms ?? 0);
+
+      // ── AC-8 · SÓLO LOS STEPS QUE FALTAN ─────────────────────────────────
+      // El pipeline arranca con `remaining_steps` y NADA MÁS. Los steps 0..i ya
+      // se invocaron, ya se settlearon y ya se debitaron: re-ejecutarlos sería
+      // cobrarlos dos veces. Lo que se re-agrega DESPUÉS es sólo su registro.
+      //
+      // 🔴 CD-17 · LOS TRES CAMPOS DE LA TRAZA SE RESTAURAN. Arrancar con
+      // `depth: 0` reiniciaría el contador del guard anti-bucle a pedido de
+      // quien reanuda, y sin `selfHostHint` el conjunto de identidad quedaría
+      // vacío y los dos sitios del guard, INERTES. Sería un bypass ABIERTO por
+      // esta HU.
+      //
+      // ⚠️ Y NO SE VUELVE A AUTORIZAR LA SUSPENSIÓN (no se pasa `suspension`).
+      // Un run reanudado corre hasta el final o falla; no puede suspender otra
+      // vez. Soportarlo exigiría fusionar los `StepResult` y los espacios de
+      // índice de dos ejecuciones dentro de una sola fila, y hacerlo mal pierde
+      // la evidencia on-chain de la primera mitad — que es justo lo que la
+      // emisión del residuo lee. Queda anotado como límite conocido del corte A.
+      const result = await composeService.compose({
+        steps: remaining,
+        scopingKeyRow: keyRow,
+        chainId: run.chain_id ?? undefined,
+        logger: request.log,
+        contractingChain: Array.isArray(run.contracting_chain)
+          ? (run.contracting_chain as string[])
+          : [],
+        contractingDepth: run.contracting_depth,
+        selfHostHint: run.self_host_hint ?? request.hostname,
+        ...(Array.isArray(run.frozen_step_prices)
+          ? { frozenStepPricesUsd: run.frozen_step_prices as number[] }
+          : {}),
+        ...(request.delegationContext === undefined
+          ? {}
+          : { delegationContext: request.delegationContext }),
+        ...(request.keySessionContext === undefined
+          ? {}
+          : { keySessionContext: request.keySessionContext }),
+      });
+
+      if (reply.sent) {
+        // El 504 salió mientras la cola corría. NO hay step-0 que reembolsar
+        // acá (esta ruta no debita ninguno), y el run queda `resuming`: la fila
+        // se cierra como fallida para que no la reclame nadie más.
+        await suspendedRunService.settle(
+          run.id,
+          run.owner_ref,
+          'failed',
+          'resume timed out',
+        );
+        return;
+      }
+
+      // ── El cierre exactly-once de la fila ────────────────────────────────
+      // `failed` y no `reopen`: acá ya corrieron débitos e invocaciones de los
+      // steps restantes. `reopen` está reservado para guards PRE-débito, y
+      // reabrir después de un débito ambiguo es ofrecer un segundo cobro.
+      await suspendedRunService.settle(
+        run.id,
+        run.owner_ref,
+        result.success ? 'resumed' : 'failed',
+        result.success ? null : (result.error ?? 'resume failed'),
+      );
+
+      // AC-8: el registro COMPLETO del pipeline, no sólo su cola.
+      const stepsCompletos = [...stepsPrevios, ...result.steps];
+      const totalCostUsdc = costoPrevio + result.totalCostUsdc;
+      const totalLatencyMs = latenciaPrevia + result.totalLatencyMs;
+
+      noteDownstreamSkips(request, result.steps, []);
+
+      if (!result.success) {
+        let status = 400;
+        if (result.errorCode === 'SCOPE_DENIED') status = 403;
+        else if (result.errorCode === 'DEST_CAP_EXCEEDED') status = 402;
+        return reply.status(status).send({
+          ...result,
+          steps: stepsCompletos,
+          totalCostUsdc,
+          totalLatencyMs,
+          requestId: request.id,
+        });
+      }
+
+      // ── 🔴 CD-18 · EL FEE, UNA SOLA VEZ EN TODA LA VIDA DEL RUN ───────────
+      //
+      // La clave de idempotencia es `compose_run_id` —el id del run ORIGINAL—,
+      // NUNCA `request.id`. El `request.id` del `/compose` que suspendió y el de
+      // este `POST /compose/resume` son distintos: con cualquiera de los dos, un
+      // run que se suspende y se reanuda pagaría el fee DOS veces. El
+      // `compose_run_id` es el único identificador estable a través de la
+      // suspensión, y es el mismo con el que se correlaciona el residuo.
+      //
+      // Y la base es el total ACUMULADO (pre-suspensión + cola), no el de esta
+      // mitad: el caller ejecutó un pipeline, no dos.
+      //
+      // Best-effort, igual que en `/compose`: un fallo del cobro deja
+      // `protocolFeeStatus: 'unknown'` y NUNCA rompe la respuesta.
+      let protocolFeeStatus: 'charged' | 'not_charged' | 'unknown' = 'unknown';
+      let protocolFeeUsdc: number | undefined;
+      try {
+        const feeResult = await chargeProtocolFee({
+          orchestrationId: run.compose_run_id,
+          feeBaseUsdc: totalCostUsdc,
+          feeRate: getProtocolFeeRate(),
+        });
+        if (feeResult.status === 'failed') {
+          // "No pude preguntar" ≠ "no pasó": la disposición es DESCONOCIDA y el
+          // monto se omite.
+          protocolFeeStatus = 'unknown';
+          log.error({ detail: feeResult.error }, 'resume fee charge failed');
+        } else if (feeResult.status === 'skipped') {
+          protocolFeeStatus = 'not_charged';
+        } else {
+          protocolFeeStatus = 'charged';
+          protocolFeeUsdc = feeResult.feeUsdc;
+        }
+      } catch (e) {
+        log.error(
+          { detail: e instanceof Error ? e.message : String(e) },
+          'resume fee charge threw',
+        );
+      }
+
+      return reply.send({
+        ...result,
+        steps: stepsCompletos,
+        totalCostUsdc,
+        totalLatencyMs,
+        runId: run.id,
+        feeRatePercent: Number((getProtocolFeeRate() * 100).toFixed(6)),
+        protocolFeeStatus,
+        ...(protocolFeeUsdc !== undefined && { protocolFeeUsdc }),
+        ...rollUpCascadedFee(result.steps.map((st) => st.coordinatorFee)),
       });
     },
   );

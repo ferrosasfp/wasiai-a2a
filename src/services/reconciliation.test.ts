@@ -1042,6 +1042,14 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
    * (una entrada por query a `a2a_events`, en orden) y cada llamada tiene su propio
    * payload (`opts.eventCalls[i]`), que además puede ser un ERROR para probar que el
    * fallo de UNA de las dos sube.
+   *
+   * WKH-225: ahora son CUATRO queries sobre TRES tablas. La cuarta va contra
+   * `a2a_suspended_runs` y necesitó su PROPIA captura por el mismo motivo, medido:
+   * cayendo en el `else` compartido, PISABA `cap.cols` y el candado del
+   * `authorized_usd::text` de HU-201 pasó a leer las columnas de la query nueva. O sea
+   * que el modo de falla que este docblock describe volvió a ocurrir, con otra tabla, y
+   * lo cazó el test viejo. Sin bucket propio, un test de `suspendedRuns` podría además
+   * "pasar" leyendo las filas de los intents.
    */
   function wireIntents(
     rows: unknown[],
@@ -1052,13 +1060,21 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
         count?: number | null;
         error?: { message: string };
       }>;
+      /** WKH-225: el payload de la query a `a2a_suspended_runs`. */
+      suspendedCall?: {
+        rows?: unknown[];
+        count?: number | null;
+        error?: { message: string };
+      };
     } = {},
-  ): Captured & { events: Captured[] } {
+  ): Captured & { events: Captured[]; suspended: Captured } {
     const cap = makeCap();
     const events: Captured[] = [];
+    const suspended = makeCap();
     let eventCallIndex = 0;
     mockFrom.mockImplementation(((table: string) => {
       const isEvents = table === 'a2a_events';
+      const isSuspended = table === 'a2a_suspended_runs';
       let target: Captured;
       let payload: {
         data: unknown[] | null;
@@ -1072,6 +1088,15 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
         payload = spec?.error
           ? { data: null, error: spec.error, count: null }
           : { data: spec?.rows ?? [], error: null, count: spec?.count ?? 0 };
+      } else if (isSuspended) {
+        target = suspended;
+        payload = opts.suspendedCall?.error
+          ? { data: null, error: opts.suspendedCall.error, count: null }
+          : {
+              data: opts.suspendedCall?.rows ?? [],
+              error: null,
+              count: opts.suspendedCall?.count ?? 0,
+            };
       } else {
         target = cap;
         payload = { data: rows, error: null, count };
@@ -1112,7 +1137,7 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
       return b;
       // biome-ignore lint/suspicious/noExplicitAny: test double for supabase builder
     }) as any);
-    return Object.assign(cap, { events });
+    return Object.assign(cap, { events, suspended });
   }
 
   function ambiguousRow(overrides: Record<string, unknown> = {}) {
@@ -1675,6 +1700,130 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
 
     expect(writes).toEqual([]);
     expect(mockRpc).not.toHaveBeenCalled();
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // WKH-225 — LA CUARTA LISTA: pipelines que quedaron ESPERANDO a una persona.
+  // Es la única de las cuatro que NO sale de `a2a_events`, así que todo se
+  // afirma contra `cap.suspended`. Contra `cap` estaríamos mirando la query de
+  // los intents y el candado quedaría verde por el motivo equivocado.
+  // ══════════════════════════════════════════════════════════════════
+
+  function suspendedRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'run-1',
+      owner_ref: OWNER,
+      key_id: KEY_ID,
+      compose_run_id: 'compose-run-1',
+      step_index: 1,
+      status: 'suspended',
+      total_cost_usdc: '3.14159265',
+      expires_at: '2030-01-01T00:00:00.000Z',
+      created_at: '2026-08-23T00:00:00.000Z',
+      updated_at: '2026-08-23T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('T-REC-1: `listAmbiguous()` trae la CUARTA clave, leída de la tabla de ESTADO', async () => {
+    const cap = wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        { rows: [], count: 0 },
+      ],
+      suspendedCall: { rows: [suspendedRow()], count: 1 },
+    });
+
+    const out = await reconciliationService.listAmbiguous();
+
+    // La TABLA importa: un run suspendido es una fila VIVA cuyo `status` se
+    // mueve. Buscarlo entre los eventos daría la foto de cuando se abrió.
+    expect(cap.suspended.table).toBe('a2a_suspended_runs');
+    expect(out.suspendedRuns.rows).toHaveLength(1);
+    expect(out.suspendedRuns.rows[0]!.run_id).toBe('run-1');
+    expect(out.suspendedRuns.rows[0]!.status).toBe('suspended');
+    // WKH-196: el NUMERIC llega por `::text` y NO se redondea.
+    expect(cap.suspended.cols).toContain('total_cost_usdc::text');
+    expect(out.suspendedRuns.rows[0]!.totalCostUsdc).toBe('3.14159265');
+    // Y el material de la credencial NO sale: el panel no lo necesita.
+    expect(cap.suspended.cols).not.toContain('token_hash');
+    expect(JSON.stringify(out.suspendedRuns)).not.toContain('token_hash');
+  });
+
+  it('T-REC-2: un run suspendido NO aparece en `settleUnknown` ni en `strandedRuns`', async () => {
+    // Las tres listas son tres preguntas con tres acciones humanas distintas.
+    // Mezclarlas haría que el operador lea como pérdida algo que funciona.
+    const cap = wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        { rows: [], count: 0 },
+      ],
+      suspendedCall: { rows: [suspendedRow()], count: 1 },
+    });
+
+    const out = await reconciliationService.listAmbiguous();
+
+    expect(out.suspendedRuns.rows).toHaveLength(1);
+    expect(out.settleUnknown.rows).toEqual([]);
+    expect(out.strandedRuns.rows).toEqual([]);
+    // Y ninguna de las dos queries de eventos preguntó por la tabla nueva.
+    for (const ev of cap.events) expect(ev.table).toBe('a2a_events');
+  });
+
+  it('T-REC-2b: `total` exacto + `truncated`, y un fallo TIRA en vez de devolver `[]`', async () => {
+    const cap = wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        { rows: [], count: 0 },
+      ],
+      suspendedCall: { rows: [suspendedRow()], count: 900 },
+    });
+    const out = await reconciliationService.listAmbiguous();
+    expect(cap.suspended.countOpt).toBe('exact');
+    expect(out.suspendedRuns.total).toBe(900);
+    expect(out.suspendedRuns.truncated).toBe(true);
+
+    // Y el fallo: "no hay pipelines esperando" es una mentira cara acá.
+    wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        { rows: [], count: 0 },
+      ],
+      suspendedCall: { error: { message: 'boom' } },
+    });
+    await expect(reconciliationService.listAmbiguous()).rejects.toThrow(
+      'INTERNAL',
+    );
+  });
+
+  it('T-REC-2c: NO gateada por `ESCROW_SETTLE_ENABLED`', async () => {
+    // El camino que produce estas filas no tiene nada que ver con el escrow. Si
+    // alguien "unificara" esta lista con el gate de `resolveIntent()`, quedaría
+    // vacía exactamente cuando importa, y en silencio.
+    mockIsEscrowSettleEnabled.mockReturnValue(false);
+    wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        { rows: [], count: 0 },
+      ],
+      suspendedCall: { rows: [suspendedRow()], count: 1 },
+    });
+    const out = await reconciliationService.listAmbiguous();
+    expect(out.suspendedRuns.rows).toHaveLength(1);
+  });
+
+  it('T-REC-3 (CD-12): `SETTLE_UNKNOWN_EVENT_TYPES` sigue teniendo los MISMOS miembros', async () => {
+    // 🔴 El testigo mecánico de CD-12. La lista de HU-203 responde "¿qué settle
+    // quedó sin resolver?"; una suspensión responde otra cosa. Meter un
+    // `event_type` de esta HU ahí corrompería una cola que se reconcilia contra
+    // la cadena con filas que no hay que reconciliar.
+    const { SETTLE_UNKNOWN_EVENT_TYPES } = await import(
+      '../lib/settle-withholding.js'
+    );
+    expect([...SETTLE_UNKNOWN_EVENT_TYPES]).toEqual([
+      'x402_settle_unknown',
+      'compose_settle_unknown',
+    ]);
   });
 });
 

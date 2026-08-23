@@ -603,7 +603,7 @@ export const composeService = {
         // WKH-59 BLQ-MED-1 fix (CD-4 / AC-4): fallback honesto si priceUsdc
         // del agente es 0, null, NaN, o no es un number (config error en el
         // registry). Mismo patrón que el preHandler de step 0 en
-        // `src/routes/compose.ts:63-77`, replicado per-step.
+        // `src/routes/compose.ts:90-104`, replicado per-step.
         // NOTA OPERACIONAL: NO podemos setear el header
         // `x-debit-fallback: registry-miss` acá — la response ya está en
         // pipeline (los steps 0 corrieron). Esa señal queda exclusiva del
