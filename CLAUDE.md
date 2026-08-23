@@ -129,6 +129,9 @@ Cada agente tiene su bloque `⛔ PROHIBIDO EN ESTA FASE` integrado en su system 
 5. **Sub-agentes son OBLIGATORIOS** — el orquestador NUNCA ejecuta ni evalúa roles directamente. Usá los 6 agentes custom + 8 slash commands. Si no podés (sub-agente no disponible), parar y avisar al humano antes de improvisar.
 6. **Un gate por lanzamiento** — NUNCA incluyas `HU_APPROVED → F2 → SPEC_APPROVED` en el mismo prompt. Los sub-agentes one-shot no pueden esperar gates. Lanzá `/nexus-f0-f1`, esperá HU_APPROVED, lanzá `/nexus-f2`, esperá SPEC_APPROVED, lanzá `/nexus-f2-5`, etc.
 7. **Entre gates el pipeline corre solo** — F2.5 → F3 → AR → CR → F4 → DONE NO tiene gates humanos. NO preguntes "¿continuo?". Si tenés F2.5 listo, lanzá F3 inmediatamente.
+8. **Símbolo de librería externa = verificar contra la versión INSTALADA** — leé los tipos en `node_modules/<pkg>/**/*.d.ts` o la doc de esa versión exacta, y anotá dónde. `^1.2.0` en `package.json` no dice qué hay instalado, y un `Grep` en `node_modules` matchea changelogs y ejemplos de versiones que no son la tuya. El modo de falla no es inventar de la nada: es **recordar una versión anterior**.
+9. **F4 corre el gate ÚNICO del repo, siempre** — acá es `npm run qa`. Los sub-gates sueltos (`vitest`, `tsc`) no se re-ejecutan si CR ya los confirmó; el gate completo sí, una vez. **Correr las partes de un gate no es correr el gate.** Y todo AC que afirme un comportamiento se **ejecuta**: una cita `archivo:línea` dice dónde vive el código, no qué hace corriendo.
+10. **El SDD declara la escala esperada y el CR la contrasta** (check 7) — si el diff excede el presupuesto más de 2x, se justifica por escrito o se recorta. La pregunta que decide: *¿qué parte de esto seguiría existiendo si lo escribiera alguien que ya conoce esta librería?* Un exceso justificado es información; un exceso silencioso es el hallazgo.
 
 ---
 
