@@ -85,24 +85,127 @@ describe('T-MIG · up migration (a2a_suspended_runs)', () => {
     expect(claim).not.toMatch(/RAISE EXCEPTION '[^']*', p_token_hash/);
   });
 
-  it('T-MIG-5: el vencido se marca `expired` EN LA MISMA transacción que el raise', () => {
-    // AC-7 pide EXACTAMENTE UN residuo. Eso sale de que la transición y el
-    // raise vayan juntos: la fila sólo puede pasar suspended→expired una vez, y
-    // el segundo intento cae en el guard de "ya usado".
+  /**
+   * 🔴 FIX-PACK AR/BLQ-ALTO-1 — ESTE TEST SE REESCRIBIÓ ENTERO.
+   *
+   * Antes comparaba POSICIONES DE LITERALES en un string
+   * (`marcaExpired > expiredGuard`, `raiseExpired > marcaExpired`): medía el
+   * ORDEN DEL TEXTO, no la semántica, así que ninguna mutación transaccional
+   * podía ponerlo rojo — y de hecho no lo puso, con el bug adentro.
+   *
+   * Lo que mide ahora es un INVARIANTE ESTRUCTURAL de PL/pgSQL, no una posición:
+   *
+   *   > Ninguna rama que levante una excepción puede contener una escritura.
+   *
+   * Es exactamente el defecto: un `RAISE EXCEPTION` sin bloque `EXCEPTION` que
+   * lo atrape aborta la transacción entera —y PostgREST corre cada `rpc()` en
+   * una transacción propia—, así que toda escritura de esa rama se DESCARTA. El
+   * `UPDATE … SET status='expired'` que vivía dos líneas arriba del
+   * `RAISE 'RUN_EXPIRED'` nunca commiteó ni una vez: verificado ejecutando la
+   * migración contra un Postgres 16 real (tres claims seguidos sobre una fila
+   * vencida ⇒ `suspended` las tres veces).
+   *
+   * Este control se pone ROJO con el `.sql` anterior, y generaliza: cazaría el
+   * mismo error re-introducido en cualquier otra rama de cualquiera de las dos
+   * funciones.
+   *
+   * ⚠️ LO QUE SIGUE SIN PODER DECIR: es texto. Que la transición durable OCURRA
+   * lo mide `src/services/suspended-run.test.ts` (T-RUN-9), con un doble que
+   * descarta lo que la función escribió antes de levantar. Ninguno solo alcanza.
+   */
+  it('T-MIG-5: ninguna rama que levante una excepción ESCRIBE (lo escrito se rollbackea)', () => {
+    const cuerpoDe = (nombre: string): string => {
+      const desde = sql.indexOf(`CREATE OR REPLACE FUNCTION ${nombre}`);
+      expect(desde).toBeGreaterThan(-1);
+      const hasta = sql.indexOf('$$ LANGUAGE plpgsql SECURITY DEFINER;', desde);
+      expect(hasta).toBeGreaterThan(desde);
+      return sql.slice(desde, hasta);
+    };
+
+    /**
+     * Todo bloque `IF … THEN … END IF;` del cuerpo, sin anidar. Alcanza para
+     * este `.sql` (los guards del claim y del settle son planos), y el control
+     * de más abajo verifica que se hayan ENCONTRADO bloques con `RAISE`: si un
+     * cambio de forma los volviera invisibles, el test se rompe en vez de
+     * quedar vacuo en silencio.
+     */
+    const bloquesIf = (cuerpo: string): string[] =>
+      [...cuerpo.matchAll(/^[ \t]*IF .*?THEN$[\s\S]*?^[ \t]*END IF;$/gm)].map(
+        (m) => m[0],
+      );
+
+    const DML = /\b(UPDATE|INSERT\s+INTO|DELETE\s+FROM)\b/;
+
+    for (const nombre of ['claim_suspended_run', 'settle_suspended_run']) {
+      const cuerpo = cuerpoDe(nombre);
+      const bloques = bloquesIf(cuerpo);
+      expect(bloques.length).toBeGreaterThan(0);
+      const conRaise = bloques.filter((b) => b.includes('RAISE EXCEPTION'));
+      expect(conRaise.length).toBeGreaterThan(0);
+      for (const bloque of conRaise) {
+        expect(
+          DML.test(bloque),
+          `${nombre}: una rama que hace RAISE tambien ESCRIBE; el RAISE la ` +
+            `rollbackea y la escritura no ocurre nunca:\n${bloque}`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('T-MIG-14 (fix-pack AR/BLQ-ALTO-1): el claim NO transiciona a `expired`, y `expired` levanta RUN_EXPIRED', () => {
     const claim = sql.slice(
       sql.indexOf('CREATE OR REPLACE FUNCTION claim_suspended_run'),
       sql.indexOf('CREATE OR REPLACE FUNCTION settle_suspended_run'),
     );
-    const expiredGuard = claim.indexOf(
-      "IF v_status = 'suspended' AND NOW() >= v_expires THEN",
+    // El ÚNICO escritor de `expired` es el UPDATE condicional del service. Si
+    // esta línea vuelve al `.sql`, la transición se vuelve inalcanzable otra vez.
+    expect(claim).not.toContain("SET status = 'expired'");
+    // Y un run YA registrado como vencido tiene que dar el MISMO desenlace que
+    // la primera vez: 410, no un 409 «ya usado».
+    expect(claim).toContain("IF v_status = 'expired' THEN");
+    expect((claim.match(/RAISE EXCEPTION 'RUN_EXPIRED'/g) ?? []).length).toBe(2);
+    // El guard genérico sigue existiendo, y DESPUÉS de los dos de vencimiento.
+    expect(claim.indexOf("IF v_status <> 'suspended' THEN")).toBeGreaterThan(
+      claim.lastIndexOf("RAISE EXCEPTION 'RUN_EXPIRED'"),
     );
-    const marcaExpired = claim.indexOf("SET status = 'expired'");
-    const raiseExpired = claim.indexOf("RAISE EXCEPTION 'RUN_EXPIRED'");
-    const yaUsado = claim.indexOf("RAISE EXCEPTION 'RUN_ALREADY_USED'");
-    expect(expiredGuard).toBeGreaterThan(-1);
-    expect(marcaExpired).toBeGreaterThan(expiredGuard);
-    expect(raiseExpired).toBeGreaterThan(marcaExpired);
-    expect(yaUsado).toBeGreaterThan(raiseExpired);
+  });
+
+  it('T-MIG-15 (fix-pack AR/MNR-7): el settle no interpola el id del run en su error', () => {
+    const settle = sql.slice(
+      sql.indexOf('CREATE OR REPLACE FUNCTION settle_suspended_run'),
+    );
+    expect(settle).toContain("RAISE EXCEPTION 'OWNERSHIP_MISMATCH';");
+    expect(settle).not.toMatch(/RAISE EXCEPTION '[^']*', p_id/);
+  });
+
+  it('T-MIG-16 (fix-pack AR/BLQ-MED-1): la columna del techo del caller existe y viaja en el claim', () => {
+    expect(sql).toContain(
+      'max_budget_usdc          NUMERIC(20,8) CHECK (max_budget_usdc >= 0)',
+    );
+    // Nullable a propósito: el caller que no declara techo es el caso normal.
+    expect(sql).not.toContain('max_budget_usdc          NUMERIC(20,8) NOT NULL');
+    // Y con `::text` (WKH-196), igual que el costo — fix-pack AR/MNR-3.
+    expect(sql).toContain('max_budget_usdc    TEXT,');
+    expect(sql).toContain('total_cost_usdc    TEXT,');
+    expect(sql).toContain('r.total_cost_usdc::text, r.max_budget_usdc::text,');
+  });
+
+  /**
+   * Fix-pack AR/MNR-4. Verificado ejecutando contra Postgres 16: con
+   * `frozen_prices_expires_at = now() - 5 min` y `ttl_seconds = 3600`, el INSERT
+   * dejaba `expires_at < created_at` — el caller recibía un 202 con un token
+   * irredimible DESPUÉS de que el step ya había cobrado.
+   *
+   * ⚠️ Esto es TEXTO: lee que el guard esté escrito. Que el trigger produzca
+   * `nace_vencido = f` se midió a mano contra Postgres 16; no hay Postgres en
+   * esta suite.
+   */
+  it('T-MIG-17 (fix-pack AR/MNR-4): una fila no puede NACER vencida', () => {
+    expect(sql).toContain('IF NEW.frozen_prices_expires_at > now() THEN');
+    // La rama del else NO acorta el vencimiento: DESCARTA los precios
+    // congelados, porque una garantía ya vencida no puede debitarse (CD-15).
+    expect(sql).toContain('NEW.frozen_step_prices       := NULL;');
+    expect(sql).toContain('NEW.frozen_prices_expires_at := NULL;');
   });
 
   it('T-MIG-6: el status-gate exactly-once del settle', () => {

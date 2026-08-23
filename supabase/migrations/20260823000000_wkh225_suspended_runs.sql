@@ -10,6 +10,9 @@
 --   - 2 RPC atómicos (FOR UPDATE + status-gate + Ownership Guard DB-level):
 --       claim_suspended_run  (suspended→resuming, single-use, cero doble-resume).
 --       settle_suspended_run (resuming→resumed|suspended|failed exactly-once).
+--     ⛔ NINGUNA de las dos escribe el estado `expired`: esa transición vive en
+--     `suspendedRunService.expire`, en una sentencia condicional propia. Ver el
+--     bloque «FIX-PACK AR/BLQ-ALTO-1» en la cabecera de `claim_suspended_run`.
 --   - RLS deny-by-default (service_role bypassa por BYPASSRLS).
 --   - Trigger updated_at (trigger_set_updated_at, mismo que a2a_agent_links).
 --
@@ -55,6 +58,16 @@ CREATE TABLE IF NOT EXISTS a2a_suspended_runs (
   remaining_steps          JSONB NOT NULL,
   frozen_step_prices       JSONB,
   total_cost_usdc          NUMERIC(20,8) NOT NULL CHECK (total_cost_usdc >= 0),
+  -- 🔴 FIX-PACK AR/BLQ-MED-1 — el techo de gasto DECLARADO POR EL CALLER.
+  -- Sin esta columna, el `maxBudget` del `POST /compose` original no sobrevivía
+  -- a la suspensión: el tramo reanudado corría con `maxBudget` ausente y
+  -- `totalCost` en 0, así que el techo del caller Y el del operador valían UNA
+  -- VEZ POR MITAD, o sea el DOBLE para un run suspendido. Se persiste junto con
+  -- `total_cost_usdc` porque el guard del pipeline reanudado necesita los dos:
+  -- el techo y lo que ya se gastó contra él.
+  -- NULL ⇒ el caller no declaró techo (que es el 100% del tráfico de hoy), y el
+  -- único que aplica es el del operador (`PIPELINE_EXPOSURE_CEILING_USD`).
+  max_budget_usdc          NUMERIC(20,8) CHECK (max_budget_usdc >= 0),
   total_latency_ms         INT NOT NULL CHECK (total_latency_ms >= 0),
   -- 🔴 CD-17 — la traza del guard anti-bucle de capa 1. Sin estos tres, la
   -- reanudación arrancaría con cadena vacía y profundidad 0, o sea REINICIANDO
@@ -113,8 +126,26 @@ CREATE OR REPLACE FUNCTION trigger_set_suspended_run_expires_at()
 RETURNS TRIGGER AS $$
 BEGIN
   NEW.expires_at := now() + make_interval(secs => NEW.ttl_seconds);
+  -- 🔴 FIX-PACK AR/MNR-4 — EL `LEAST` SOLO SE TOMA SI LA GARANTÍA SIGUE VIVA.
+  --
+  -- Sin el `> now()`, un `frozen_prices_expires_at` YA VENCIDO producía una fila
+  -- que NACÍA VENCIDA (medido contra Postgres 16: `expires_at < created_at`), y
+  -- el caller recibía un 202 con un token irredimible DESPUÉS de que el step ya
+  -- había cobrado. Cerrarlo con un piso artificial (`GREATEST(..., now()+1s)`)
+  -- sería peor: dejaría vivo un run que debitaría precios congelados cuya
+  -- garantía venció, que es exactamente lo que CD-15 prohíbe.
+  --
+  -- La salida correcta es la de abajo: si la garantía ya venció, el run vive su
+  -- TTL completo pero SIN precios congelados. La cola se debita a precio VIVO,
+  -- que es lo que significa un quote vencido, y CD-15 se cumple literalmente —
+  -- ningún precio congelado se debita después de que su garantía expiró.
   IF NEW.frozen_prices_expires_at IS NOT NULL THEN
-    NEW.expires_at := LEAST(NEW.expires_at, NEW.frozen_prices_expires_at);
+    IF NEW.frozen_prices_expires_at > now() THEN
+      NEW.expires_at := LEAST(NEW.expires_at, NEW.frozen_prices_expires_at);
+    ELSE
+      NEW.frozen_step_prices       := NULL;
+      NEW.frozen_prices_expires_at := NULL;
+    END IF;
   END IF;
   RETURN NEW;
 END;
@@ -144,13 +175,36 @@ CREATE TRIGGER set_a2a_suspended_runs_updated_at
 -- 🔴 EL ORDEN DE LOS GUARDS ES LOAD-BEARING:
 --   1. lock por token_hash; NOT FOUND → RUN_NOT_FOUND;
 --   2. dueño distinto → RUN_NOT_FOUND, EL MISMO LITERAL (disclosure-safe);
---   3. suspendido y vencido → marcar `expired` EN LA MISMA TRANSACCIÓN y
---      RUN_EXPIRED. La transición y el raise JUNTOS son lo que hace que se emita
---      EXACTAMENTE UN residuo: la fila sólo puede pasar suspended→expired una
---      vez, así que un segundo intento cae en el guard 4 y no vuelve a emitir;
---   4. cualquier otro estado → RUN_ALREADY_USED;
---   5. recién ahora, el claim.
+--   3. suspendido y vencido → RUN_EXPIRED, SIN ESCRIBIR NADA;
+--   4. ya registrado como `expired` → RUN_EXPIRED también (mismo desenlace para
+--      el caller en el 1er intento y en el N-ésimo);
+--   5. cualquier otro estado → RUN_ALREADY_USED;
+--   6. recién ahora, el claim.
 -- Invertir 2 y 3 filtraría la existencia del run por el código de error.
+--
+-- ⛔⛔ FIX-PACK AR/BLQ-ALTO-1 — POR QUÉ EL GUARD 3 **NO** ESCRIBE, Y NO PUEDE.
+--
+-- Esta función tenía, entre el guard 3 y su `RAISE`, un
+-- `UPDATE … SET status = 'expired'`. Un `RAISE EXCEPTION` sin bloque `EXCEPTION`
+-- que lo atrape ABORTA LA TRANSACCIÓN ENTERA, y PostgREST corre cada `rpc()` en
+-- una transacción propia: ese UPDATE se DESCARTABA siempre. Medido contra
+-- Postgres 16 con la migración aplicada tal cual — tres claims seguidos sobre
+-- una fila vencida dejaban el status en `suspended` las tres veces, o sea que
+-- `expired` era un estado INALCANZABLE y cada intento volvía a emitir el residuo
+-- de plata varada. Un caller autenticado podía encender la alerta de
+-- `/health` a voluntad repitiendo el mismo token vencido.
+--
+-- ⛔ "Escribir y levantar" NO se arregla reordenando ni agregando un
+-- `EXCEPTION WHEN OTHERS`: si la función no levanta, el service no puede
+-- distinguir el desenlace por el mensaje, que es el contrato que este repo usa
+-- (`key-session.ts` / `agent-link.ts`). La transición vive AFUERA, en una
+-- sentencia propia y CONDICIONAL (`… WHERE status = 'suspended'`), que es lo
+-- que hace que "exactamente un residuo" sea una propiedad del MOTOR y no una
+-- promesa: la segunda pasada afecta 0 filas y no emite nada. La escribe
+-- `suspendedRunService.expire` (`src/services/suspended-run.ts`).
+--
+-- El exemplar hace lo mismo y lo dice: `20260706000000_wkh137_agent_links.sql`
+-- (`-- open + expirado → LINK_EXPIRED (no consume)`), sin UPDATE antes del RAISE.
 -- ============================================================
 CREATE OR REPLACE FUNCTION claim_suspended_run(
   p_token_hash TEXT,
@@ -167,7 +221,14 @@ CREATE OR REPLACE FUNCTION claim_suspended_run(
   last_output        JSONB,
   remaining_steps    JSONB,
   frozen_step_prices JSONB,
-  total_cost_usdc    NUMERIC,
+  -- 🔴 FIX-PACK AR/MNR-3 — TEXT, no NUMERIC (doctrina WKH-196). PostgREST
+  -- entrega los NUMERIC como número JSON y `JSON.parse` los redondea. El resto
+  -- de esta misma HU ya lo aplicaba (`suspended-run.ts` y `reconciliation.ts`
+  -- seleccionan `total_cost_usdc::text`); esta función era la divergencia, y
+  -- `SuspendedRunClaim.total_cost_usdc: string` ya declaraba lo que acá no
+  -- pasaba. El `::text` está en el `RETURN QUERY` de abajo.
+  total_cost_usdc    TEXT,
+  max_budget_usdc    TEXT,
   total_latency_ms   INT,
   contracting_chain  JSONB,
   contracting_depth  INT,
@@ -195,16 +256,35 @@ BEGIN
     RAISE EXCEPTION 'RUN_NOT_FOUND';
   END IF;
 
-  -- suspendido + vencido → terminal `expired` en ESTA transacción, y raise.
+  -- suspendido + vencido → RUN_EXPIRED. ⛔ SIN ESCRIBIR: ver la cabecera. La
+  -- marca durable la aplica `suspendedRunService.expire` en una sentencia propia
+  -- y condicional, porque este `RAISE` descarta todo lo que se escriba acá.
+  -- El reloj del vencimiento es el de POSTGRES en los DOS lados (CD-19).
   IF v_status = 'suspended' AND NOW() >= v_expires THEN
-    UPDATE a2a_suspended_runs
-      SET status = 'expired'
-      WHERE a2a_suspended_runs.id = v_id;
     RAISE EXCEPTION 'RUN_EXPIRED';
   END IF;
 
-  -- ya en uso / terminal (incluye el 2º resume concurrente que perdió el lock,
-  -- y el 2º intento sobre uno ya marcado `expired`).
+  -- Ya REGISTRADO como vencido. Mismo literal que el guard de arriba a
+  -- propósito: el caller que reintenta con un token vencido tiene que recibir
+  -- el MISMO 410 la primera vez y la décima, y no un 409 que le diga que el run
+  -- "se usó" cuando lo que pasó es que se le venció. Que el residuo no se
+  -- vuelva a emitir NO depende de este mensaje: depende de que el UPDATE
+  -- condicional de `expire` afecte 0 filas.
+  IF v_status = 'expired' THEN
+    RAISE EXCEPTION 'RUN_EXPIRED';
+  END IF;
+
+  -- ya en uso / terminal (incluye el 2º resume concurrente que perdió el lock).
+  --
+  -- ⚠️ LÍMITE CONOCIDO, DECLARADO Y NO CERRADO EN ESTE CORTE (AR/MNR-6): un run
+  -- que muere en `resuming` —proceso caído entre el claim y el settle— cae acá
+  -- para siempre. No vence (el guard de vencimiento exige `suspended`) y por lo
+  -- tanto nunca deja constancia del pago varado de su primera mitad. Se decidió
+  -- NO cubrirlo bajando el guard a `resuming`: un claim concurrente podría
+  -- entonces marcar `expired` un run que está EJECUTÁNDOSE, y eso rompe el
+  -- single-use que es la propiedad central de esta tabla. El remedio correcto es
+  -- un barrido con antigüedad mínima (NC-3, fuera de scope del corte A), no un
+  -- guard más laxo acá.
   IF v_status <> 'suspended' THEN
     RAISE EXCEPTION 'RUN_ALREADY_USED';
   END IF;
@@ -215,7 +295,8 @@ BEGIN
   RETURN QUERY
     SELECT r.id, r.owner_ref, r.key_id, r.caller_kind, r.caller_id,
            r.compose_run_id, r.step_index, r.steps_json, r.last_output,
-           r.remaining_steps, r.frozen_step_prices, r.total_cost_usdc,
+           r.remaining_steps, r.frozen_step_prices,
+           r.total_cost_usdc::text, r.max_budget_usdc::text,
            r.total_latency_ms, r.contracting_chain, r.contracting_depth,
            r.self_host_hint, r.chain_id
       FROM a2a_suspended_runs r
@@ -267,7 +348,13 @@ BEGIN
     RAISE EXCEPTION 'RUN_NOT_FOUND';
   END IF;
   IF v_owner IS DISTINCT FROM p_owner_ref THEN
-    RAISE EXCEPTION 'OWNERSHIP_MISMATCH: run % not owned by caller', p_id;
+    -- 🔴 FIX-PACK AR/MNR-7 — SIN el `p_id` en el mensaje. El claim se cuida de
+    -- no discriminar (mismo literal para "no existe" y "dueño ajeno"); esta
+    -- función interpolaba el id del run en el error, que es la asimetría que el
+    -- propio archivo declara evitar. Hoy es inalcanzable (el único caller pasa
+    -- el `owner_ref` que el claim ya validó), y por eso mismo el mensaje no le
+    -- sirve a nadie: cuando aparezca, aparecerá en un log de PostgREST.
+    RAISE EXCEPTION 'OWNERSHIP_MISMATCH';
   END IF;
 
   -- Idempotencia exactly-once: sólo se cierra una transición 'resuming'.

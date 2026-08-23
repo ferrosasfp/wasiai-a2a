@@ -2880,6 +2880,7 @@ export type Database = {
           id: string;
           key_id: string;
           last_output: Json | null;
+          max_budget_usdc: number | null;
           owner_ref: string;
           remaining_steps: Json;
           resumed_at: string | null;
@@ -2908,6 +2909,7 @@ export type Database = {
           id?: string;
           key_id: string;
           last_output?: Json | null;
+          max_budget_usdc?: number | null;
           owner_ref: string;
           remaining_steps: Json;
           resumed_at?: string | null;
@@ -2936,6 +2938,7 @@ export type Database = {
           id?: string;
           key_id?: string;
           last_output?: Json | null;
+          max_budget_usdc?: number | null;
           owner_ref?: string;
           remaining_steps?: Json;
           resumed_at?: string | null;

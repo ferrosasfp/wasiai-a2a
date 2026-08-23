@@ -52,11 +52,7 @@ import {
 } from '../lib/stranded-payment.js';
 import { supabase } from '../lib/supabase.js';
 import type { Database } from '../types/database.types.js';
-import type {
-  StepResult,
-  SuspendedRunClaim,
-  SuspendedRunRow,
-} from '../types/index.js';
+import type { StepResult, SuspendedRunClaim } from '../types/index.js';
 import { eventService } from './event.js';
 
 const log = getLogger('suspended-run');
@@ -94,8 +90,21 @@ export interface OpenSuspendedRunInput {
   lastOutput: unknown;
   /** Los steps que faltan, tal como los resolvió el pipeline. */
   remainingSteps: unknown;
+  /**
+   * Fix-pack AR/BLQ-BAJO-1 — YA RE-INDEXADOS contra `remainingSteps`. El
+   * productor (`compose.suspendIfEnvelope`) los recorta con el MISMO
+   * `slice(i + 1)` que arma `remainingSteps`, así que el índice 0 de este array
+   * es el precio del índice 0 de aquél. Guardar el array entero dejaba dos
+   * espacios de índices distintos apuntando a la misma plata.
+   */
   frozenStepPrices: unknown;
   totalCostUsdc: number;
+  /**
+   * Fix-pack AR/BLQ-MED-1 — el techo declarado por el caller en el `/compose`
+   * original, o `null` si no declaró ninguno. Sin persistirlo, el tramo
+   * reanudado corría sin techo del caller y con el del operador reiniciado.
+   */
+  maxBudgetUsdc: number | null;
   totalLatencyMs: number;
   contractingChain: unknown;
   contractingDepth: number;
@@ -139,19 +148,6 @@ export type SettleSuspendedRunResult =
       ok: false;
       reason: 'ownership_mismatch' | 'not_found' | 'unavailable';
     };
-
-/** ⛔ CD-22. Una lista vacía y una lectura fallida NO son lo mismo. */
-export type ListSuspendedRunsResult =
-  | { ok: true; rows: SuspendedRunRow[] }
-  | { ok: false; reason: 'unavailable' };
-
-/** Las columnas que la fila expone hacia afuera del service. */
-const ROW_COLUMNS =
-  'id, token_hash, owner_ref, key_id, caller_kind, caller_id, compose_run_id, ' +
-  'step_index, steps_json, last_output, remaining_steps, frozen_step_prices, ' +
-  'total_cost_usdc::text, total_latency_ms, contracting_chain, ' +
-  'contracting_depth, self_host_hint, chain_id, status, ttl_seconds, ' +
-  'expires_at, resumed_at, error_message, created_at, updated_at';
 
 export const suspendedRunService = {
   /**
@@ -203,6 +199,7 @@ export const suspendedRunService = {
       remaining_steps: asJsonColumn(input.remainingSteps),
       frozen_step_prices: asJsonColumn(input.frozenStepPrices),
       total_cost_usdc: input.totalCostUsdc,
+      max_budget_usdc: input.maxBudgetUsdc,
       total_latency_ms: Math.max(0, Math.round(input.totalLatencyMs)),
       contracting_chain: asJsonColumn(input.contractingChain),
       contracting_depth: input.contractingDepth,
@@ -250,11 +247,13 @@ export const suspendedRunService = {
    * Mapea los prefijos del `RAISE` por mensaje (patrón `key-session.ts` /
    * `agent-link.ts`) y NUNCA propaga el mensaje crudo de Postgres.
    *
-   * 🔴 CUANDO EL RUN VENCIÓ, la fila ya quedó `expired` DENTRO del RPC, en la
-   * misma transacción que levantó el error. Acá se emite el residuo, y "exactamente
-   * uno" no es una promesa de este código: es una consecuencia de que la
-   * transición `suspended→expired` sólo pueda ocurrir una vez. Un segundo
-   * intento sobre la misma fila cae en el guard de "ya usado" y no emite nada.
+   * 🔴 CUANDO EL RUN VENCIÓ, la fila SIGUE `suspended` al volver de este RPC, y
+   * eso es lo correcto: el `RAISE EXCEPTION` del claim aborta su transacción, así
+   * que NADA de lo que se escriba ahí adentro sobrevive (fix-pack AR/BLQ-ALTO-1,
+   * medido contra Postgres 16). La transición durable la aplica `expire()` en una
+   * sentencia propia y CONDICIONAL, y ahí "exactamente un residuo" deja de ser
+   * una promesa de este código: es el número de filas que afectó un
+   * `UPDATE … WHERE status = 'suspended'`. El segundo intento afecta 0.
    */
   async claim(
     tokenHash: string,
@@ -294,16 +293,51 @@ export const suspendedRunService = {
   },
 
   /**
-   * AC-7 — la constancia durable de la plata que ya salió y no vuelve, cuando
-   * un run suspendido vence sin que nadie lo reanude.
+   * AC-7 — la TRANSICIÓN a `expired` y la constancia durable de la plata que ya
+   * salió y no vuelve, cuando un run suspendido vence sin que nadie lo reanude.
+   *
+   * ── 🔴 FIX-PACK AR/BLQ-ALTO-1 · ESTA FUNCIÓN AHORA **ESCRIBE**
+   *
+   * Antes sólo LEÍA, porque se creía que el `UPDATE … SET status = 'expired'` que
+   * vivía dentro de `claim_suspended_run` había dejado la fila terminal. No:
+   * el `RAISE EXCEPTION` que va dos líneas más abajo aborta la transacción y
+   * descarta ese UPDATE — PostgREST corre cada `rpc()` en una transacción propia.
+   * Medido contra Postgres 16: tres claims seguidos sobre una fila vencida la
+   * dejaban `suspended` las tres veces. O sea que `expired` era INALCANZABLE y
+   * cada intento emitía OTRO `compose_stranded_payment`, sin techo: un caller
+   * autenticado podía encender `strandedExposureBreached` en `/health` repitiendo
+   * el mismo token vencido.
+   *
+   * ── POR QUÉ UN `UPDATE` CONDICIONAL Y NO UN `SELECT` + UN `UPDATE`
+   *
+   * Regla 1 del encabezado de este archivo: nunca un `SELECT` que decide y un
+   * `UPDATE` que ejecuta. El `.eq('status', 'suspended')` es el gate: bajo
+   * READ COMMITTED, dos llamadas concurrentes se serializan sobre el row lock y
+   * la segunda re-evalúa el `WHERE` contra la versión nueva, encuentra `expired`
+   * y afecta 0 filas. Verificado ejecutando: 5 sesiones concurrentes contra
+   * Postgres 16 ⇒ `1 0 0 0 0`. El residuo se emite SÓLO si esta sentencia afectó
+   * una fila, así que "exactamente uno" es una propiedad del motor.
+   *
+   * ⛔ EL PREDICADO DEL RELOJ NO ESTÁ ACÁ, Y ES DELIBERADO (CD-19). Quien decide
+   * que el run venció es `claim_suspended_run`, comparando `NOW() >= expires_at`
+   * con el reloj de POSTGRES en los dos lados. Escribir acá un
+   * `.lte('expires_at', new Date().toISOString())` metería el reloj de NODE en la
+   * decisión, que es exactamente lo que CD-19 prohíbe. Esta sentencia sólo
+   * REGISTRA una decisión ya tomada, y `expires_at` no se puede mover después del
+   * INSERT (el trigger es `BEFORE INSERT`, verificado ejecutando).
+   *
+   * ⛔ Y POR ESO ESTA FUNCIÓN SÓLO SE LLAMA DESDE LA RAMA `RUN_EXPIRED` DE
+   * `claim()`. Llamarla desde otro lado marcaría `expired` un run que sigue vivo.
+   * Es un único call-site y así tiene que quedarse.
    *
    * REUSA el módulo leaf del residuo: cero aritmética nueva. Si ningún step
    * dejó evidencia on-chain no se emite NADA — un run que suspendió en el step
-   * 0 sin pagos confirmados se comporta byte-idéntico a hoy.
+   * 0 sin pagos confirmados se comporta byte-idéntico a hoy. La transición SÍ se
+   * aplica igual: que no haya plata varada no significa que el run no venció.
    *
-   * FIRE-AND-FORGET con `.catch`, igual que el residuo del pipeline: esto es
-   * telemetría de un resultado YA decidido, y un fallo al ANOTAR no puede
-   * convertirse en un fallo distinto del que el caller iba a recibir. El
+   * FIRE-AND-FORGET con `.catch` para el evento, igual que el residuo del
+   * pipeline: es telemetría de un resultado YA decidido, y un fallo al ANOTAR no
+   * puede convertirse en un fallo distinto del que el caller iba a recibir. El
    * `.catch` es obligatorio: sin él, el rechazo sería una unhandled rejection.
    *
    * NO PUEDE LANZAR: se la llama desde el camino de error del claim, donde una
@@ -313,24 +347,32 @@ export const suspendedRunService = {
     try {
       const { data, error } = await supabase
         .from('a2a_suspended_runs')
-        .select('id, compose_run_id, steps_json, status')
+        .update({ status: 'expired' })
         .eq('token_hash', tokenHash)
         .eq('owner_ref', ownerId)
-        .maybeSingle();
+        .eq('status', 'suspended')
+        .select('id, compose_run_id, steps_json');
 
-      if (error || !data) {
+      if (error) {
         log.error(
-          { detail: error?.message },
-          '[suspended-run.expire] the run expired and its stranded payments could NOT be read — the only remaining record is this log line',
+          { detail: error.message },
+          '[suspended-run.expire] the run expired and could NOT be marked terminal — the only remaining record is this log line',
         );
         return;
       }
 
-      const fila = data as unknown as {
-        id: string;
-        compose_run_id: string;
-        steps_json: unknown;
-      };
+      const filas =
+        (data as unknown as Array<{
+          id: string;
+          compose_run_id: string;
+          steps_json: unknown;
+        }> | null) ?? [];
+      const fila = filas[0];
+      // 0 filas = la transición ya la aplicó otra pasada (o el dueño no es el
+      // suyo, o el run nunca estuvo `suspended`). NO es un error y NO emite: es
+      // justamente lo que hace que el residuo sea exactamente uno.
+      if (fila === undefined) return;
+
       const steps = Array.isArray(fila.steps_json)
         ? (fila.steps_json as StepResult[])
         : [];
@@ -342,8 +384,6 @@ export const suspendedRunService = {
           buildStrandedPaymentEvent({
             composeRunId: fila.compose_run_id,
             strandedSteps,
-            // Los steps COMPLETADOS son los que están en la fila; el índice del
-            // que "falló" es su cantidad, igual que en el pipeline.
             failedStepIndex: steps.length,
             error: 'suspended run expired without being resumed',
           }),
@@ -398,40 +438,5 @@ export const suspendedRunService = {
       return { ok: false, reason: 'unavailable' };
     }
     return { ok: true };
-  },
-
-  /**
-   * Los runs suspendidos de UN dueño.
-   *
-   * Es la contraparte owner-scoped de la lista admin de
-   * `reconciliation.listSuspendedRuns()`, y la diferencia entre las dos es
-   * exactamente el `.eq('owner_ref', ownerId)` de acá. Existe además como el
-   * sitio donde `suspended-run.ownership.test.ts` puede medir que el filtro
-   * AÍSLA —no que esté escrito—, que es lo único que el guardián automático no
-   * puede ver.
-   *
-   * ⛔ NO devuelve `token_hash` hacia afuera pese a leer la fila entera: quien
-   * lista sus runs no necesita el material del que sale la credencial.
-   */
-  async listForOwner(ownerId: string): Promise<ListSuspendedRunsResult> {
-    const { data, error } = await supabase
-      .from('a2a_suspended_runs')
-      .select(ROW_COLUMNS)
-      .eq('owner_ref', ownerId)
-      .order('created_at', { ascending: false })
-      .limit(100);
-
-    if (error) {
-      log.error(
-        { detail: error.message },
-        '[suspended-run.listForOwner] query failed',
-      );
-      return { ok: false, reason: 'unavailable' };
-    }
-    const rows = (data as unknown as SuspendedRunRow[] | null) ?? [];
-    return {
-      ok: true,
-      rows: rows.map((r) => ({ ...r, token_hash: '' })),
-    };
   },
 };

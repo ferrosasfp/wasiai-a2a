@@ -124,3 +124,159 @@ lector futuro podría "corregir" hacia atrás:
 3. **La bandera NO gatea `POST /compose/resume`.** Apagarla tiene que dejar de
    CREAR runs suspendidos, no dejar varados a los que ya gastaron plata del
    caller.
+
+---
+
+# Fix-pack del AR — 2026-08-23
+
+### [2026-08-23 18:05] Fix-pack — Un `RAISE` en PL/pgSQL ROLLBACKEA lo que escribí dos líneas antes
+
+- **Error**: `claim_suspended_run` hacía
+  `UPDATE … SET status='expired'` y, dos líneas después,
+  `RAISE EXCEPTION 'RUN_EXPIRED'`. Escribí el docblock afirmando que "la
+  transición y el raise JUNTOS son lo que hace que se emita EXACTAMENTE UN
+  residuo". Es al revés: el `RAISE` sin bloque `EXCEPTION` aborta la transacción
+  entera —y PostgREST corre cada `rpc()` en la suya—, así que ese UPDATE se
+  descartaba SIEMPRE. `expired` era un estado inalcanzable y cada reintento con
+  el mismo token vencido emitía OTRO `compose_stranded_payment`: un caller
+  autenticado podía encender `strandedExposureBreached` en `/health` a voluntad.
+- **Causa raíz**: dos, y la segunda es la grave.
+  1. Asumí la semántica transaccional de PL/pgSQL en vez de ejecutarla. El
+     exemplar del que dije copiar (`wkh137_agent_links.sql:91-93`) hace lo
+     CONTRARIO y lo dice en un comentario —`-- open + expirado → LINK_EXPIRED
+     (no consume)`, sin UPDATE— y yo leí esa línea como una diferencia de
+     producto, no como la propiedad que es.
+  2. **Escribí los dos testigos DESPUÉS de la implementación y a su imagen.**
+     `T-MIG-5` comparaba posiciones de literales en un string (`marcaExpired >
+     expiredGuard`): mide el orden del TEXTO, y ninguna mutación de semántica
+     puede ponerlo rojo. Y el doble `montarRpc` hacía `fila.status='expired'` y
+     DESPUÉS devolvía el error, o sea que modelaba mi intención en vez del
+     motor — con lo cual `T-RUN-9` ("dos intentos siguen siendo uno") pasaba en
+     verde sobre el bug. Los dos testigos confirmaban la implementación, no la
+     propiedad.
+- **Fix**: la transición salió del RPC. La aplica `suspendedRunService.expire`
+  con un `UPDATE … WHERE token_hash=… AND owner_ref=… AND status='suspended'`
+  **condicional**, y el residuo se emite sólo si afectó una fila: "exactamente
+  uno" pasó de ser una promesa a ser el número de filas que devuelve el motor.
+  Verificado ejecutando contra un Postgres 16 real: 5 sesiones concurrentes
+  sobre la misma fila dan `1 0 0 0 0`. `T-MIG-5` se reescribió como invariante
+  ESTRUCTURAL ("ninguna rama que levante puede escribir", parseando los bloques
+  `IF … END IF;`) y el doble ahora aplica cada RPC sobre un borrador que
+  DESCARTA si la función levanta.
+- **Aplicar en**: cualquier función `plpgsql` de este repo que mezcle escritura
+  y `RAISE`. Y, más general: **antes de escribir el testigo de una propiedad de
+  un motor, escribir la MUTACIÓN que tendría que ponerlo rojo y correrla.** Un
+  doble que modela lo que quiero que pase no es un testigo, es un espejo. Acá el
+  costo de no hacerlo fue que el gate estuvo VERDE con un BLOQUEANTE de
+  seguridad adentro durante toda la HU.
+
+---
+
+### [2026-08-23 18:20] Fix-pack — Cambié un middleware por otro y me llevé el DÉBITO sin notarlo
+
+- **Error**: en `POST /compose/resume` puse `requireA2AKey` en lugar de
+  `requirePaymentOrA2AKey`, y lo documenté como "un bug de plata evitado"
+  (cierto: la cadena ingenua cobraba `PLACEHOLDER_FEE_USD` = $1 por cada
+  reanudación). Lo que no vi es el otro lado del par: `executePipeline` saltea
+  el débito de su índice 0 (`i > 0`, CD-7) **porque da por sentado que el
+  middleware de pago lo cobró**. Sin ese middleware, el primer step del tramo
+  restante se ejecutaba, `signAndSettleDownstream` le pagaba al agente desde el
+  wallet del operador, `totalCost` lo sumaba y el fee de protocolo se cobraba
+  sobre esa base — y `budgetService.debit` no se llamaba nunca. Un step gratis
+  por reanudación, repetible.
+- **Causa raíz**: evalué el reemplazo por lo que el middleware **autentica**
+  (idéntico: master/sesión/delegación, mismo poblado de `a2aKeyRow`) y no por lo
+  que **hace además**. Su propio docblock lo dice textual —"SIN
+  chain-resolution, SIN débito, SIN spend-limits, SIN x402"— y yo lo leí como la
+  lista de lo que me ahorraba, no como la lista de lo que alguien más tenía que
+  cubrir. Y mi propio testigo tenía escrita la premisa que estaba rompiendo:
+  `compose.suspend.test.ts` afirma `mockDebit` una sola vez para dos steps con
+  el comentario *"el step 0 lo debita el middleware"*.
+- **Fix**: el route debita explícitamente el primer step restante antes de
+  llamar a `compose()`, espejando el step-0 de `/compose` (mismo par
+  precio/destino, mismo gas overhead, mismo precio congelado, mismo
+  `refundComposeStep0` en las ramas de fallo y de 504). El guard `i > 0` no se
+  tocó: sigue byte-idéntico a `5578998:571`. La opción de re-usar el middleware
+  de pago con un preHandler de precio es **estructuralmente imposible acá**, y
+  eso quedó escrito: para saber cuál es el primer step restante hay que claimear
+  el run, y el claim necesita el `owner_ref` del caller, que lo puebla el propio
+  middleware de auth.
+- **Aplicar en**: **todo cambio de middleware en una cadena de preHandlers de un
+  endpoint que mueva plata.** El criterio no es "¿autentica igual?" sino "¿qué
+  MÁS hacía el que saco, y quién lo hace ahora?". Concretamente: `grep` del
+  docblock del middleware viejo buscando los verbos que enumera, y por cada uno
+  preguntarse quién lo cubre después del cambio.
+
+---
+
+### [2026-08-23 18:30] Fix-pack — El testigo estaba en los DOS extremos del cable y no en el medio
+
+- **Error**: `compose.resume.test.ts` moquea `composeService.compose` ENTERO y
+  `compose.suspend.test.ts` nunca ejercita una reanudación con `scopingKeyRow` +
+  `chainId`. Los dos archivos estaban llenos de aserciones sobre dinero y
+  ninguno podía ver que el tramo reanudado no debitaba: el route no ve el
+  pipeline y el pipeline no ve al route.
+- **Causa raíz**: dividí los tests por CAPA (route / service) siguiendo la
+  estructura de los archivos que ya existían, y la propiedad que había que medir
+  —conservación: N steps ejecutados ⇒ N débitos— vive exactamente en la juntura.
+  Cada archivo era honesto sobre lo que no cubría; ninguno cubría lo que
+  importaba.
+- **Fix**: el escenario `P0-3` en `src/__tests__/e2e/compose-flow.test.ts`, que
+  ya monta el `composeService` REAL detrás de la ruta real. Afirma conservación
+  (2 débitos para 2 steps, montos, destinos canónicos y `owner_ref`), no "se
+  llamó al spy". Verificado que se pone ROJO con el código anterior.
+- **Aplicar en**: cuando una propiedad de dinero cruza dos capas, el testigo va
+  en la juntura, no en las dos puntas. Y la pregunta que lo detecta antes:
+  **"¿qué mock tendría que sacar para que este test pudiera fallar?"** Si la
+  respuesta es "el del módulo que hace la operación que estoy afirmando", el
+  test no la está afirmando.
+
+---
+
+### [2026-08-23 18:40] Fix-pack — Los mismos números de `reconciliation.ts` se corrieron OTRA VEZ
+
+- **Error**: el fix-pack volvió a insertar en `src/services/reconciliation.ts`
+  (el gate de la bandera + el campo `queried`) y `npm test` se puso rojo en
+  `G-08` y `G-09` con **7** cadenas: las 6 de siempre más la de esta HU. Es
+  literalmente el mismo error que ya está documentado más arriba, en la misma
+  HU, con la misma causa.
+- **Causa raíz**: la entrada anterior dice "derivar, no sumar" y la seguí — pero
+  la escribí como una lección sobre CÓMO arreglarlo, no como un PASO PREVIO. La
+  forma correcta es al revés: `grep -n "\.from('" <archivo>` **antes** de
+  editar, para saber si el archivo tiene excepciones escritas a mano, y volver a
+  correrlo después.
+- **Fix**: derivados de nuevo del archivo y cruzados uno por uno por SÍMBOLO
+  contenedor (`readLeasedRow`, `listPending`, `listAmbiguous`, `resolveIntent`
+  ×2, `driftCheck`, `listSuspendedRuns`). Y además re-derivé las CUATRO citas
+  `:NNN-NNN` que las propias razones hacen hacia docblocks, que el guardián no
+  mira, abriendo cada rango para confirmar que el texto sigue diciendo lo que la
+  razón afirma.
+- **Aplicar en**: `reconciliation.ts` es un archivo con 7 excepciones escritas a
+  mano; **cualquier** inserción lo rompe. Lo mismo pasó con dos citas
+  `archivo:línea` hacia el guard `i > 0`: no lo moví, pero las 14 líneas de
+  comentario que agregué DOCE líneas más arriba lo corrieron de `:602` a `:616`.
+  El auto-blindaje de esta misma HU ya nombra el patrón ("las citas que rompés
+  vos al arreglar otra cosa"); acá insertar por debajo del ancla era imposible,
+  porque lo que se explica vive antes. Se re-apuntaron las dos, y el registro
+  dice POR QUÉ.
+
+---
+
+### [2026-08-23 18:45] Fix-pack — Leí un archivo con `cat -n` y me devolvió el archivo SIN los comentarios
+
+- **Error**: leí `test/wkh225-suspended-runs.migration.test.ts` con `cat -n`
+  para copiar el bloque de `T-MIG-5` y reemplazarlo. El reemplazo falló con
+  `AssertionError` porque el texto que copié no existe en el archivo: la salida
+  que vi tenía el `it(...)` sin sus tres líneas de comentario interno.
+- **Causa raíz**: `cat` está interceptado por el proxy de tokens y su salida es
+  un RESUMEN, no el archivo. El fallo es silencioso: el contenido se ve
+  plausible, numerado y bien formado.
+- **Fix**: leer siempre con `sed -n 'A,Bp'` / `awk` (o `/usr/bin/cat`), y —lo
+  que efectivamente lo cazó— hacer que el script de edición **falle** si el
+  ancla no está (`assert old in s`) en vez de reemplazar con `str.replace` a
+  ciegas, que habría escrito el archivo sin tocar nada y dejado el testigo viejo.
+- **Aplicar en**: toda lectura de un archivo cuyo contenido se vaya a usar como
+  ancla de edición. Y en general: **un `replace` que no encuentra su ancla tiene
+  que ROMPER, no ser un no-op** — un no-op silencioso acá habría dejado
+  `T-MIG-5` midiendo posiciones de literales y yo habría reportado que lo
+  reescribí.

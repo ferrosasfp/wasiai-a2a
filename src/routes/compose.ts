@@ -979,6 +979,145 @@ function buildSuspensionAuthz(
  * Los tres eslabones tienen que decir lo mismo o el más hablador anula a los
  * otros dos.
  */
+/**
+ * 🔴 FIX-PACK AR/BLQ-ALTO-2 — EL DÉBITO DEL PRIMER STEP DEL TRAMO REANUDADO.
+ *
+ * ── EL AGUJERO QUE CIERRA
+ *
+ * `executePipeline` SIEMPRE arranca en `i = 0`, y su débito per-step está detrás
+ * de `if (i > 0 && …)` (CD-11/CD-7) porque en `/compose` el índice 0 lo debita el
+ * middleware de pago. En la reanudación NO hay middleware que lo debite:
+ * `requireA2AKey` es "SIN débito" y lo dice en su propio docblock
+ * (`src/middleware/a2a-key.ts`). Resultado medido: el primer step del tramo
+ * restante se ejecutaba, `signAndSettleDownstream` le pagaba al agente desde el
+ * wallet del operador, `totalCost` lo sumaba y el fee de protocolo se cobraba
+ * sobre esa base — y `budgetService.debit` NUNCA se llamaba. Un step gratis por
+ * reanudación, repetible a voluntad con un agente propio que devuelva
+ * `{a2a_suspend:true}` como step 0.
+ *
+ * ── LA OPCIÓN QUE SE ELIGIÓ, Y POR QUÉ NO LA OTRA
+ *
+ * El AR ofrecía dos: (i) re-usar `requirePaymentOrA2AKey` con un preHandler que
+ * inyecte `composeEstimatedCostUsd`, o (ii) debitar explícitamente en el
+ * handler. Se eligió (ii), y (i) es **estructuralmente imposible acá**: para
+ * saber cuál es el primer step restante hay que CLAIMEAR el run, y el claim
+ * necesita el `owner_ref` del caller autenticado (CD-4), que lo puebla el propio
+ * middleware de auth. Un preHandler de precio tendría que consultar la base
+ * ANTES de saber quién pregunta, que es justo lo que AC-4 prohíbe. `/compose`
+ * puede hacerlo porque su primer step viene en el body.
+ *
+ * ⛔ EL GUARD `i > 0` DE `services/compose.ts` NO SE TOCA (CD-7): sigue
+ * byte-idéntico. Este débito vive AFUERA del bucle, exactamente como el del
+ * middleware para `/compose`.
+ *
+ * ── LO QUE SE ESPEJA DE `/compose`, LÍNEA POR LÍNEA
+ *
+ *  · el precio y el destino salen del MISMO par que usa `resolveComposePriceHandler`
+ *    (`resolveAgentPriceUsdc` + `resolveAgentDestination` + `deriveComposeDestination`),
+ *    así el string del cap por destino coincide byte a byte entre débito y refund;
+ *  · el gas overhead per-step se suma igual que en el step-0 y en los steps 1..N;
+ *  · el precio CONGELADO gana sobre el vivo cuando existe (WKH-303), y llega ya
+ *    re-indexado desde la fila (fix-pack BLQ-BAJO-1);
+ *  · el fallback honesto `PLACEHOLDER_FEE_USD` para un precio 0 de un agente que
+ *    SÍ existe (CD-4), y NADA de débito para un agente que no resuelve — ése lo
+ *    404ea el pipeline sin haber cobrado;
+ *  · y los tres campos del `request` (`resolvedChainId`, `composeEstimatedCostUsd`,
+ *    `composeDestination`) se setean SÓLO si el débito se aplicó, porque son lo
+ *    que `refundComposeStep0` lee. Setearlos antes dejaría a `resolveStep0DebitUsd`
+ *    devolviendo `PLACEHOLDER_FEE_USD` ($1) y el refund devolvería plata que
+ *    nunca se debitó — el mismo bug con el signo cambiado.
+ */
+type ResumeStep0Debit =
+  | { ok: true; debitedUsd: number }
+  /** Pre-débito: no se pudo cotizar. NADA se tocó ⇒ el run puede reabrirse. */
+  | { ok: false; reason: 'unresolvable' }
+  /** El débito se pidió y la base lo RECHAZÓ (nada aplicado). */
+  | { ok: false; reason: 'rejected'; error: string; capExceeded: boolean };
+
+async function debitResumedFirstStep(
+  request: FastifyRequest,
+  step: ResolvedComposeStep | undefined,
+  chainId: number | undefined,
+  frozenFirstPriceUsd: unknown,
+): Promise<ResumeStep0Debit> {
+  const keyRow = request.a2aKeyRow;
+  // Misma precondición que el guard del bucle (`scopingKeyRow && chainId !==
+  // undefined`): sin key o sin cadena resuelta, el pipeline original tampoco
+  // debitó ninguno de sus steps, y cobrar acá sería asimétrico.
+  if (!keyRow || chainId === undefined || step === undefined) {
+    return { ok: true, debitedUsd: 0 };
+  }
+  const slug = step.agent;
+  if (typeof slug !== 'string' || slug.length === 0) {
+    return { ok: true, debitedUsd: 0 };
+  }
+
+  let price: number | null;
+  let resolved: { registry: string; slug: string; invokeUrl?: string } | null;
+  let gasOverhead: number;
+  try {
+    price = await resolveAgentPriceUsdc(slug, step.registry);
+    resolved = await resolveAgentDestination(slug, step.registry);
+    // G-02 fail-closed: en mainnet sin overhead configurado esto LANZA, y
+    // dejarlo propagar cobraría un step cuyo gas no se recupera.
+    gasOverhead = await getStepGasOverheadUsd(chainId);
+  } catch {
+    return { ok: false, reason: 'unresolvable' };
+  }
+
+  // El agente no existe (o el catálogo lo da como fantasma): CERO débito. El
+  // pipeline lo va a 404ear por su cuenta, sin haber cobrado nada — el mismo
+  // desenlace que el guard `price === 0 && resolved === null` de `/compose`.
+  // El chequeo es por FORMA y no `=== null`: un catálogo que devuelva
+  // `undefined` es tan "no resuelve" como uno que devuelva `null`, y tratarlo
+  // distinto sería debitar por un agente que nadie pudo cotizar.
+  if (typeof price !== 'number' || !resolved)
+    return { ok: true, debitedUsd: 0 };
+
+  const destination = deriveComposeDestination(resolved);
+  const frozen =
+    typeof frozenFirstPriceUsd === 'number' &&
+    Number.isFinite(frozenFirstPriceUsd) &&
+    frozenFirstPriceUsd > 0
+      ? frozenFirstPriceUsd
+      : null;
+  const invalidPrice = !Number.isFinite(price) || price <= 0;
+  if (frozen === null && invalidPrice) {
+    request.log.warn(
+      { reason: 'registry-miss', slug, step: 0 },
+      'compose-resume.price.fallback',
+    );
+  }
+  const amountUsd =
+    (frozen ?? (invalidPrice ? PLACEHOLDER_FEE_USD : price)) + gasOverhead;
+
+  const debited = await budgetService.debit(
+    keyRow.id,
+    chainId,
+    amountUsd,
+    request.delegationContext,
+    request.keySessionContext,
+    destination,
+    keyRow.owner_ref, // Ownership Guard: el owner_ref del caller AUTENTICADO.
+  );
+  if (!debited.success) {
+    return {
+      ok: false,
+      reason: 'rejected',
+      error: debited.error ?? 'insufficient budget',
+      capExceeded: debited.error === 'DEST_CAP_EXCEEDED',
+    };
+  }
+
+  // ⛔ RECIÉN ACÁ. Ver el docblock: estos tres campos son la ENTRADA de
+  // `refundComposeStep0`, y ponerlos antes del débito haría que un fallo del
+  // débito habilitara un refund de plata que nunca salió.
+  request.resolvedChainId = chainId;
+  request.composeEstimatedCostUsd = amountUsd;
+  request.composeDestination = destination;
+  return { ok: true, debitedUsd: amountUsd };
+}
+
 const RESUME_CLAIM_HTTP: Record<
   'not_found' | 'expired' | 'already_used' | 'unavailable',
   { status: number; code: string }
@@ -1235,6 +1374,19 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         // pipeline sin telemetría.
         noteDownstreamSkips(request, result.steps, downstreamSkipCauses);
         return reply.status(202).send({
+          // 🔴 FIX-PACK AR/MNR-5 — `success` VIAJA. Las otras dos ramas hacen
+          // `...result` y por eso lo llevan; ésta enumera los campos y se lo
+          // había comido. Todo DT-A1 se justifica sobre que una suspensión es
+          // `success: true` (si fuera `false`, `recordStrandedRunIfAny` haría
+          // sonar la alerta de plata varada en cada KYC que funciona bien), y
+          // ese `true` no salía por HTTP: un cliente que discrimine por
+          // `body.success` leía `undefined`.
+          //
+          // ⛔ `output` sigue SIN viajar, y no es un olvido: lo que el caller
+          // tiene que leer es `suspended.artifact`. `output` es la salida cruda
+          // del step que suspendió, y el 202 no es el lugar para estrenarla.
+          success: result.success,
+          verificationStatus: result.verificationStatus,
           suspended: result.suspended,
           // ⛔ Viaja UNA sola vez, en el body de un POST. Nunca en una URL,
           // nunca en un log. No es recuperable después.
@@ -1538,6 +1690,72 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         : [];
       const costoPrevio = Number(run.total_cost_usdc ?? 0);
       const latenciaPrevia = Number(run.total_latency_ms ?? 0);
+      // 🔴 FIX-PACK AR/BLQ-MED-1 — EL TECHO DEL CALLER SOBREVIVE A LA ESPERA.
+      // Sin la columna, el tramo reanudado corría con `maxBudget` ausente y
+      // `totalCost` en 0: el techo del caller Y el del operador valían una vez
+      // por MITAD, o sea el doble para un run suspendido. `null` ⇒ el caller no
+      // declaró ninguno, que es el caso normal.
+      const techoDelCaller =
+        run.max_budget_usdc === null ? undefined : Number(run.max_budget_usdc);
+      // Fix-pack AR/BLQ-BAJO-1: llegan YA re-indexados contra `remaining_steps`
+      // (los recortó `suspendIfEnvelope` con el mismo `slice`), así que el
+      // índice 0 de acá es el precio del índice 0 de aquél.
+      const preciosCongelados = Array.isArray(run.frozen_step_prices)
+        ? (run.frozen_step_prices as number[])
+        : undefined;
+      // Fix-pack AR/MNR-8: el array PRESTADO para los motivos internos de skip.
+      // El tramo reanudado perdía la telemetría de skips que la primera mitad sí
+      // anotaba, porque se le pasaba un `[]` fijo a `noteDownstreamSkips`.
+      const downstreamSkipCauses: DownstreamSkipCode[] = [];
+
+      // ── 🔴 EL DÉBITO DEL PRIMER STEP RESTANTE (fix-pack AR/BLQ-ALTO-2) ────
+      // Va ANTES de `compose()` y espeja lo que el middleware de pago hace por
+      // `/compose`: el bucle saltea el índice 0 (CD-7, guard intacto) porque da
+      // por sentado que alguien lo cobró. Acá ese alguien es esta llamada.
+      const step0 = await debitResumedFirstStep(
+        request,
+        remaining[0],
+        run.chain_id ?? undefined,
+        preciosCongelados?.[0],
+      );
+      if (!step0.ok && step0.reason === 'unresolvable') {
+        // Pre-débito: NADA se tocó. `reopen` (y no `failed`) es exactamente el
+        // caso para el que existe — un guard que corre antes de cualquier
+        // débito o invoke. El run vuelve a `suspended` con el MISMO token y el
+        // MISMO `expires_at` (reabrir no compra tiempo), así que el caller puede
+        // reintentar cuando el catálogo o el oráculo de gas vuelvan.
+        await suspendedRunService.settle(run.id, run.owner_ref, 'reopen', null);
+        return reply.status(503).send({
+          error: 'Registry or gas oracle unavailable',
+          error_code: 'REGISTRY_UNAVAILABLE',
+          requestId: request.id,
+        });
+      }
+      if (!step0.ok) {
+        // El débito se PIDIÓ y la base lo rechazó ⇒ nada se aplicó, pero ya
+        // pasamos el punto en el que `reopen` es seguro: la doctrina de este
+        // repo reserva `reopen` para los guards PRE-débito, y reabrir sobre un
+        // débito cuya disposición no podemos probar es ofrecer un segundo cobro.
+        // `failed` es terminal, igual que para cualquier otro fallo del tramo.
+        await suspendedRunService.settle(
+          run.id,
+          run.owner_ref,
+          'failed',
+          `resumed step debit failed: ${step0.error}`,
+        );
+        return reply.status(step0.capExceeded ? 402 : 400).send({
+          success: false,
+          output: null,
+          error: `Step 0 debit failed: ${step0.error}`,
+          ...(step0.capExceeded
+            ? { errorCode: 'DEST_CAP_EXCEEDED' as const }
+            : {}),
+          steps: stepsPrevios,
+          totalCostUsdc: costoPrevio,
+          totalLatencyMs: latenciaPrevia,
+          requestId: request.id,
+        });
+      }
 
       // ── AC-8 · SÓLO LOS STEPS QUE FALTAN ─────────────────────────────────
       // El pipeline arranca con `remaining_steps` y NADA MÁS. Los steps 0..i ya
@@ -1561,14 +1779,29 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         scopingKeyRow: keyRow,
         chainId: run.chain_id ?? undefined,
         logger: request.log,
+        // Fix-pack AR/MNR-8: el array prestado, igual que `/compose`.
+        downstreamSkipCauses,
+        // Fix-pack AR/MNR-2: la MISMA credencial cruda que la primera mitad
+        // propagó a los registries system-trusted. Sin esto, un run que arrancó
+        // mandando `x-a2a-key` terminaba sin mandarlo, y las dos mitades del
+        // mismo pipeline se veían distintas desde el otro lado.
+        ...(extractRawKey(request) === undefined
+          ? {}
+          : { a2aKey: extractRawKey(request) }),
+        // 🔴 Fix-pack AR/BLQ-MED-1 — los DOS lados del guard de presupuesto: el
+        // techo que declaró el caller y lo que ese mismo run YA gastó contra él.
+        // Con `maxBudget` ausente y `preSpentUsd` en 0 (lo de antes), el techo
+        // del caller no existía y el del operador se reiniciaba.
+        ...(techoDelCaller === undefined ? {} : { maxBudget: techoDelCaller }),
+        preSpentUsd: costoPrevio,
         contractingChain: Array.isArray(run.contracting_chain)
           ? (run.contracting_chain as string[])
           : [],
         contractingDepth: run.contracting_depth,
         selfHostHint: run.self_host_hint ?? request.hostname,
-        ...(Array.isArray(run.frozen_step_prices)
-          ? { frozenStepPricesUsd: run.frozen_step_prices as number[] }
-          : {}),
+        ...(preciosCongelados === undefined
+          ? {}
+          : { frozenStepPricesUsd: preciosCongelados }),
         ...(request.delegationContext === undefined
           ? {}
           : { delegationContext: request.delegationContext }),
@@ -1578,9 +1811,17 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       });
 
       if (reply.sent) {
-        // El 504 salió mientras la cola corría. NO hay step-0 que reembolsar
-        // acá (esta ruta no debita ninguno), y el run queda `resuming`: la fila
+        // El 504 salió mientras la cola corría. El run queda `resuming`: la fila
         // se cierra como fallida para que no la reclame nadie más.
+        //
+        // 🔴 Fix-pack AR/BLQ-ALTO-2: ahora esta ruta SÍ debita un step-0, así
+        // que este camino también tiene que reembolsarlo. Misma fórmula que
+        // `/compose`: `max(0, debitado - lo ya settleado)`, así que lo entregado
+        // nunca se devuelve. Sólo corre si el débito se aplicó de verdad — los
+        // tres campos que `refundComposeStep0` lee se setean únicamente ahí.
+        if (step0.debitedUsd > 0) {
+          await refundComposeStep0(request, result.totalCostUsdc);
+        }
         await suspendedRunService.settle(
           run.id,
           run.owner_ref,
@@ -1606,9 +1847,16 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       const totalCostUsdc = costoPrevio + result.totalCostUsdc;
       const totalLatencyMs = latenciaPrevia + result.totalLatencyMs;
 
-      noteDownstreamSkips(request, result.steps, []);
+      noteDownstreamSkips(request, result.steps, downstreamSkipCauses);
 
       if (!result.success) {
+        // Fix-pack AR/BLQ-ALTO-2: el step-0 de ESTE tramo se debitó acá arriba,
+        // así que la rama de fallo lo reembolsa igual que `/compose`. Sin esto,
+        // un pipeline reanudado que falla dejaba al caller cobrado por un step
+        // que no entregó nada.
+        if (step0.debitedUsd > 0) {
+          await refundComposeStep0(request, result.totalCostUsdc);
+        }
         let status = 400;
         if (result.errorCode === 'SCOPE_DENIED') status = 403;
         else if (result.errorCode === 'DEST_CAP_EXCEEDED') status = 402;

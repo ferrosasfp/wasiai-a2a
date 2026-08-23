@@ -76,9 +76,21 @@ vi.mock('../services/agent-price.js', () => ({
 }));
 vi.mock('../services/budget.js', () => ({
   budgetService: {
+    // Fix-pack AR/BLQ-ALTO-2: el `debit` entra al doble porque ahora esta ruta
+    // SÍ debita el primer step del tramo restante. Antes no existía acá, y por
+    // eso ningún test de este archivo podía notar que no se llamaba.
+    debit: vi.fn().mockResolvedValue({ success: true }),
     credit: vi.fn().mockResolvedValue({ success: true }),
     creditWithDest: vi.fn().mockResolvedValue({ success: true }),
+    creditDelegation: vi.fn().mockResolvedValue({ success: true }),
+    creditSession: vi.fn().mockResolvedValue({ success: true }),
   },
+}));
+vi.mock('../lib/gas-overhead.js', () => ({
+  getStepGasOverheadUsd: vi.fn(async () => 0),
+}));
+vi.mock('../services/refund-outbox.js', () => ({
+  refundOutbox: { enqueueRefund: vi.fn(async () => undefined) },
 }));
 vi.mock('../services/fee-charge.js', () => ({
   chargeProtocolFee: vi.fn(),
@@ -98,6 +110,11 @@ import {
   signResumeToken,
 } from '../lib/resume-token.js';
 import { supabase } from '../lib/supabase.js';
+import {
+  resolveAgentDestination,
+  resolveAgentPriceUsdc,
+} from '../services/agent-price.js';
+import { budgetService } from '../services/budget.js';
 import { composeService } from '../services/compose.js';
 import { chargeProtocolFee } from '../services/fee-charge.js';
 import { suspendedRunService } from '../services/suspended-run.js';
@@ -109,6 +126,10 @@ const mockSettle = vi.mocked(suspendedRunService.settle);
 const mockFee = vi.mocked(chargeProtocolFee);
 const mockFrom = vi.mocked(supabase.from);
 const mockRpc = vi.mocked(supabase.rpc);
+const mockDebit = vi.mocked(budgetService.debit);
+const mockCredit = vi.mocked(budgetService.creditWithDest);
+const mockPrice = vi.mocked(resolveAgentPriceUsdc);
+const mockDest = vi.mocked(resolveAgentDestination);
 
 const OWNER = 'owner-a';
 const KEY_ID = 'key-1';
@@ -143,6 +164,7 @@ function claimRow(over: Record<string, unknown> = {}) {
     remaining_steps: [{ agent: 'payout', input: {} }],
     frozen_step_prices: null,
     total_cost_usdc: '1.25000000',
+    max_budget_usdc: null,
     total_latency_ms: 30,
     contracting_chain: ['gw-a', 'gw-b', 'gw-c', 'gw-d'],
     contracting_depth: 4,
@@ -178,6 +200,18 @@ beforeEach(() => {
   savedSecret = process.env[RESUME_ENV_VAR];
   process.env[RESUME_ENV_VAR] = 'secreto-de-test';
   nextKeyRow = { id: KEY_ID, owner_ref: OWNER };
+  // El catálogo del step restante, para el débito del "step 0" del tramo.
+  mockPrice.mockResolvedValue(2);
+  mockDest.mockResolvedValue({
+    registry: 'wasiai',
+    slug: 'payout',
+    invokeUrl: 'https://agents.example/payout',
+  } as never);
+  mockDebit.mockResolvedValue({ success: true });
+  // Default explícito: `vi.clearAllMocks()` borra las LLAMADAS pero no las
+  // implementaciones, así que sin esto un `mockResolvedValue` de un test se
+  // filtraba al siguiente y el orden de los casos decidía el resultado.
+  mockClaim.mockResolvedValue({ ok: true, run: claimRow() as never });
   mockCompose.mockResolvedValue(okResult());
   mockSettle.mockResolvedValue({ ok: true });
   mockFee.mockResolvedValue({
@@ -609,5 +643,147 @@ describe('POST /compose · el 202 cuando el pipeline queda esperando', () => {
       if (guardado === undefined) delete process.env.COMPOSE_SUSPEND_ENABLED;
       else process.env.COMPOSE_SUSPEND_ENABLED = guardado;
     }
+  });
+});
+
+// ─── fix-pack AR/BLQ-ALTO-2 · el débito del primer step del tramo ─────────
+//
+// ⚠️ ESTA CAPA MIDE LO QUE EL ROUTE DECIDE. Que la CONSERVACIÓN se cumpla —N
+// steps ejecutados ⇒ N débitos— corriendo el bucle de verdad lo mide
+// `src/__tests__/e2e/compose-flow.test.ts` (P0-3), que monta el
+// `composeService` REAL detrás de esta misma ruta. Los dos hacen falta: acá se
+// ve el monto, el destino y el ORDEN; allá se ve que no falte ninguno.
+
+describe('fix-pack AR/BLQ-ALTO-2 · el tramo reanudado cobra su propio step 0', () => {
+  it('T-RES-13: se debita UNA vez, ANTES de compose(), con precio+destino+owner del caller', async () => {
+    mockClaim.mockResolvedValue({ ok: true, run: claimRow() as never });
+
+    await resume(mint());
+
+    expect(mockDebit).toHaveBeenCalledTimes(1);
+    expect(mockDebit).toHaveBeenCalledWith(
+      KEY_ID,
+      2368,
+      2, // precio vivo del primer `remaining_step` (+0 de gas overhead)
+      undefined,
+      undefined,
+      'wasiai/payout',
+      OWNER, // Ownership Guard: el owner_ref del caller AUTENTICADO
+    );
+    // 🔴 EL ORDEN. Cobrar después de ejecutar sería fee-on-delivery, y este
+    // repo debita antes del invoke en todos sus caminos.
+    const ordenDebito = mockDebit.mock.invocationCallOrder[0] ?? 0;
+    const ordenCompose = mockCompose.mock.invocationCallOrder[0] ?? 0;
+    expect(ordenDebito).toBeLessThan(ordenCompose);
+  });
+
+  it('T-RES-14 (WKH-303): el precio CONGELADO del step 0 del tramo gana sobre el vivo', async () => {
+    // Los precios llegan YA re-indexados contra `remaining_steps` (fix-pack
+    // BLQ-BAJO-1), así que el índice 0 de acá es el primer step restante.
+    mockClaim.mockResolvedValue({
+      ok: true,
+      run: claimRow({ frozen_step_prices: [0.5] }) as never,
+    });
+
+    await resume(mint());
+
+    expect(mockDebit.mock.calls[0]?.[2]).toBe(0.5);
+    // Y el pipeline recibe el MISMO array, sin re-indexar de nuevo.
+    expect(mockCompose.mock.calls[0]?.[0]?.frozenStepPricesUsd).toEqual([0.5]);
+  });
+
+  it('T-RES-15: un agente que el catálogo no resuelve NO se debita (el pipeline lo 404ea)', async () => {
+    mockDest.mockResolvedValue(null as never);
+
+    await resume(mint());
+
+    expect(mockDebit).not.toHaveBeenCalled();
+    // Y no se inventa un refund de algo que nunca se debitó.
+    expect(mockCredit).not.toHaveBeenCalled();
+  });
+
+  it('T-RES-16: si el catálogo o el oráculo de gas TIRAN, es 503 y el run se REABRE', async () => {
+    mockPrice.mockRejectedValue(new Error('registry down'));
+
+    const res = await resume(mint());
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error_code).toBe('REGISTRY_UNAVAILABLE');
+    expect(mockDebit).not.toHaveBeenCalled();
+    expect(mockCompose).not.toHaveBeenCalled();
+    // 🔴 `reopen`, NO `failed`: es un guard PRE-débito y nada se tocó, así que
+    // el mismo token tiene que seguir sirviendo cuando el catálogo vuelva.
+    // Con `failed` el run quedaría muerto y la plata de la primera mitad,
+    // varada, por una caída transitoria de un servicio de lectura.
+    expect(mockSettle).toHaveBeenCalledWith(RUN_ID, OWNER, 'reopen', null);
+  });
+
+  it('T-RES-17: un débito RECHAZADO cierra el run como `failed` y no ejecuta el pipeline', async () => {
+    mockDebit.mockResolvedValue({
+      success: false,
+      error: 'DEST_CAP_EXCEEDED',
+    });
+
+    const res = await resume(mint());
+
+    expect(res.statusCode).toBe(402);
+    expect(res.json().errorCode).toBe('DEST_CAP_EXCEEDED');
+    expect(mockCompose).not.toHaveBeenCalled();
+    // `failed` y no `reopen`: ya se pidió un débito, y la doctrina de este repo
+    // reserva `reopen` para lo que corre ANTES de cualquier débito.
+    expect(mockSettle).toHaveBeenCalledWith(
+      RUN_ID,
+      OWNER,
+      'failed',
+      expect.stringContaining('DEST_CAP_EXCEEDED'),
+    );
+    // Nada que devolver: el débito rechazado no aplicó nada.
+    expect(mockCredit).not.toHaveBeenCalled();
+  });
+
+  it('T-RES-18: sin `chain_id` en la fila no se debita — simetría con la primera mitad', async () => {
+    // El pipeline original tampoco debitó ninguno de sus steps sin cadena
+    // resuelta (`chainId !== undefined` es precondición del guard del bucle).
+    mockClaim.mockResolvedValue({
+      ok: true,
+      run: claimRow({ chain_id: null }) as never,
+    });
+
+    await resume(mint());
+
+    expect(mockDebit).not.toHaveBeenCalled();
+  });
+
+  it('T-RES-19 (BLQ-MED-1): el techo del caller y lo YA gastado viajan al pipeline', async () => {
+    mockClaim.mockResolvedValue({
+      ok: true,
+      run: claimRow({ max_budget_usdc: '7.50000000' }) as never,
+    });
+
+    await resume(mint());
+
+    const arg = mockCompose.mock.calls[0]?.[0];
+    expect(arg?.maxBudget).toBe(7.5);
+    // 🔴 Los DOS lados. Con el techo pero sin `preSpentUsd`, el guard seguiría
+    // comparando contra la mitad y el techo valdría el doble.
+    expect(arg?.preSpentUsd).toBeCloseTo(1.25, 6);
+  });
+
+  it('T-RES-20: sin techo declarado, `maxBudget` NO se inventa (queda ausente)', async () => {
+    await resume(mint());
+    const arg = mockCompose.mock.calls[0]?.[0];
+    expect(arg?.maxBudget).toBeUndefined();
+    expect('maxBudget' in (arg ?? {})).toBe(false);
+  });
+
+  it('T-RES-21 (MNR-2/MNR-8): la credencial cruda y el array de skips viajan al tramo', async () => {
+    await resume(mint());
+    const arg = mockCompose.mock.calls[0]?.[0];
+    // La primera mitad del MISMO run mandaba `x-a2a-key` a los registries
+    // system-trusted; el tramo reanudado tiene que mandarlo igual.
+    expect(arg?.a2aKey).toBe('wasi_a2a_test');
+    // Y el array PRESTADO de los motivos internos de skip: sin él, el tramo
+    // reanudado perdía la telemetría que la primera mitad sí anotaba.
+    expect(Array.isArray(arg?.downstreamSkipCauses)).toBe(true);
   });
 });

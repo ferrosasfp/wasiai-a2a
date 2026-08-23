@@ -1113,6 +1113,26 @@ export interface ComposeRequest {
    */
   frozenStepPricesUsd?: readonly number[] | undefined;
   /**
+   * WKH-225 (fix-pack AR/BLQ-MED-1): lo que ESTE MISMO run ya gastó ANTES de
+   * este tramo. Sólo lo puebla `POST /compose/resume`, con el
+   * `total_cost_usdc` de la fila suspendida.
+   *
+   * 🔴 PARTICIPA DE UNA SOLA DECISIÓN: el guard de presupuesto pre-débito. NO
+   * entra en `totalCostUsdc` del resultado (el route suma las dos mitades para
+   * el reporte y para la base del fee), NO cambia ningún monto debitado y NO
+   * toca el guard `i > 0` del doble-débito del step 0.
+   *
+   * POR QUÉ HACE FALTA: `executePipeline` arranca `totalCost` en 0 siempre. Con
+   * un run suspendido eso hacía que `min(maxBudget del caller, techo del
+   * operador)` se evaluara contra la mitad, no contra el run — o sea, los dos
+   * techos valían el DOBLE. Sumarlo acá es lo único que los vuelve a hacer
+   * valer una vez por run.
+   *
+   * Ausente ⇒ `0` ⇒ aritmética BYTE-IDÉNTICA a la de `/compose`, que es el 100%
+   * del tráfico que no viene de una reanudación.
+   */
+  preSpentUsd?: number | undefined;
+  /**
    * WKH-318: el caller declara su tolerancia a un catálogo parcial. `true` ⇒ si
    * el catálogo no es `complete`, se aborta ANTES del primer `invokeAgent` y el
    * route reembolsa el step-0. Ausente/`false` ⇒ comportamiento de hoy.
@@ -1531,7 +1551,7 @@ export interface OrchestrateRequest {
    * chainId resuelto (request.resolvedChainId), propagado a compose para que el
    * débito per-step de steps 1..N funcione. WKH-102 (DT-1): se propaga SIEMPRE
    * (master y delegación, single-chain semantics — modelo WKH-59), no solo bajo
-   * delegación. El guard `i>0` de src/services/compose.ts:602 protege el step 0 contra
+   * delegación. El guard `i>0` de src/services/compose.ts:616 protege el step 0 contra
    * double-charge (CD-1, intacto).
    */
   chainId?: number | undefined;
@@ -1823,47 +1843,6 @@ export interface ComposeSuspension {
 }
 
 /**
- * Fila de `a2a_suspended_runs`.
- *
- * Las columnas NUMERIC (`total_cost_usdc`) llegan como `string` en runtime desde
- * Supabase aunque el tipo generado las declare `number` — mismo criterio que
- * `AgentLinkRow` y `KeySessionRow`, y la razón por la que se seleccionan con
- * `::text` (WKH-196: PostgREST entrega los NUMERIC como número JSON y
- * `JSON.parse` redondea).
- *
- * Los cuatro JSONB se tipan `unknown` a propósito: son datos que salieron de
- * una fila y vuelven a entrar al pipeline. Tiparlos como lo que esperamos que
- * sean convertiría una fila corrupta en un `any` que nadie mira.
- */
-export interface SuspendedRunRow {
-  id: string;
-  token_hash: string;
-  owner_ref: string;
-  key_id: string;
-  caller_kind: 'delegation' | 'session' | 'key';
-  caller_id: string;
-  compose_run_id: string;
-  step_index: number;
-  steps_json: unknown;
-  last_output: unknown;
-  remaining_steps: unknown;
-  frozen_step_prices: unknown;
-  total_cost_usdc: string;
-  total_latency_ms: number;
-  contracting_chain: unknown;
-  contracting_depth: number;
-  self_host_hint: string | null;
-  chain_id: number | null;
-  status: 'suspended' | 'resuming' | 'resumed' | 'failed' | 'expired';
-  ttl_seconds: number;
-  expires_at: string;
-  resumed_at: string | null;
-  error_message: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-/**
  * Fila devuelta por el RPC `claim_suspended_run` (suspended→resuming).
  *
  * Trae TODO lo que hace falta para reconstruir el `ComposeRequest` de la cola
@@ -1888,6 +1867,15 @@ export interface SuspendedRunClaim {
   remaining_steps: unknown;
   frozen_step_prices: unknown;
   total_cost_usdc: string;
+  /**
+   * Fix-pack AR/BLQ-MED-1 — el techo declarado por el caller, o `null`.
+   *
+   * Sin él, el tramo reanudado corría con `maxBudget` ausente y `totalCost` en
+   * 0: el techo del caller Y el del operador valían UNA VEZ POR MITAD, o sea el
+   * DOBLE para un run suspendido. Llega como `string` porque el RPC lo devuelve
+   * con `::text` (WKH-196), igual que `total_cost_usdc`.
+   */
+  max_budget_usdc: string | null;
   total_latency_ms: number;
   contracting_chain: unknown;
   contracting_depth: number;

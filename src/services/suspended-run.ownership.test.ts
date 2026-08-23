@@ -15,11 +15,24 @@
  *
  * ── LO QUE ESTE ARCHIVO NO PUEDE DECIR ─────────────────────────────────────
  *
- * Las dos RPC no pasan por el falso: son `supabase.rpc`, y acá se moquean por
- * su CONTRATO (qué error levanta la base). Que la base levante ESE error lo
- * verifica `test/wkh225-suspended-runs.migration.test.ts` sobre el `.sql`. Los
- * dos juntos cubren el camino; ninguno solo alcanza, y decirlo es parte del
- * control.
+ * Las dos RPC no pasan por el falso: son `supabase.rpc`, y ni siquiera se
+ * moquean acá — ningún test de este archivo las toca. Que la base levante los
+ * errores del claim en el orden correcto lo verifica
+ * `test/wkh225-suspended-runs.migration.test.ts` sobre el `.sql`, y que el
+ * SERVICE los traduzca, `suspended-run.test.ts`. Ninguno de los tres solo
+ * alcanza, y decirlo es parte del control.
+ *
+ * ⚠️ EL FALSO NO ES POSTGRES. Modela `applyFilters` con `===` sobre las columnas
+ * pedidas, y eso alcanza para lo único que este archivo afirma: que el UPDATE
+ * lleve los filtros y que su VALOR aísle. Lo que NO puede decir es que el gate
+ * `status = 'suspended'` sea atómico bajo concurrencia — eso se midió a mano
+ * contra un Postgres 16 real (5 sesiones simultáneas ⇒ una sola afecta fila).
+ *
+ * Fix-pack AR/MNR-1: acá vivían T-OWN-1..3 midiendo `listForOwner`, una función
+ * SIN NINGÚN CONSUMIDOR de producción. Se borró la función y se movió la
+ * medición al único sitio owner-scoped que sí corre en producción: el UPDATE
+ * condicional de `expire`, que además es una ESCRITURA — donde un filtro de
+ * dueño mal puesto no devuelve datos ajenos, los DESTRUYE.
  *
  * Naming: T-OWN-1..T-OWN-4.
  */
@@ -29,9 +42,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../lib/supabase.js', () => ({
   supabase: { from: vi.fn(), rpc: vi.fn() },
 }));
+vi.mock('./event.js', () => ({
+  eventService: { track: vi.fn(async () => ({})) },
+}));
 
 import { supabase } from '../lib/supabase.js';
+import type { StepResult } from '../types/index.js';
 import { createOwnerScopedFake } from './__tests__/owner-scoped-fake.js';
+import { eventService } from './event.js';
 import { suspendedRunService } from './suspended-run.js';
 
 const OWNER_A = 'owner-A-0xaaaa';
@@ -53,6 +71,7 @@ const COLUMNS = [
   'remaining_steps',
   'frozen_step_prices',
   'total_cost_usdc',
+  'max_budget_usdc',
   'total_latency_ms',
   'contracting_chain',
   'contracting_depth',
@@ -82,11 +101,15 @@ function runRow(
     caller_id: 'key-1',
     compose_run_id: '33333333-3333-3333-3333-333333333333',
     step_index: 0,
-    steps_json: [],
+    // CON evidencia on-chain: es la precondición para que la transición a
+    // `expired` emita un residuo. Sin ella, "cero eventos" sería cierto por el
+    // motivo equivocado y el test no mediría el aislamiento.
+    steps_json: [PASO_PAGADO],
     last_output: null,
     remaining_steps: [],
     frozen_step_prices: null,
     total_cost_usdc: '1.00000000',
+    max_budget_usdc: null,
     total_latency_ms: 10,
     contracting_chain: [],
     contracting_depth: 0,
@@ -102,7 +125,20 @@ function runRow(
   };
 }
 
+const PASO_PAGADO = {
+  agent: {
+    slug: 'remit-kyc-validator',
+    registry: 'wasiai',
+    payment: { chain: 'base-sepolia' },
+  },
+  output: {},
+  costUsdc: 1.25,
+  latencyMs: 30,
+  downstreamTxHash: '0xdeadbeef',
+} as unknown as StepResult;
+
 const mockFrom = vi.mocked(supabase.from);
+const mockTrack = vi.mocked(eventService.track);
 
 describe('suspendedRunService — aislamiento entre dueños', () => {
   let fake: ReturnType<typeof createOwnerScopedFake>;
@@ -123,52 +159,52 @@ describe('suspendedRunService — aislamiento entre dueños', () => {
     );
   });
 
-  it('T-OWN-1: `listForOwner` devuelve SÓLO las filas del dueño que pregunta', () => {
-    return (async () => {
-      const a = await suspendedRunService.listForOwner(OWNER_A);
-      expect(a.ok).toBe(true);
-      if (!a.ok) return;
-      expect(a.rows.map((r) => r.id)).toEqual([RUN_A]);
-
-      const b = await suspendedRunService.listForOwner(OWNER_B);
-      expect(b.ok).toBe(true);
-      if (!b.ok) return;
-      expect(b.rows.map((r) => r.id)).toEqual([RUN_B]);
-    })();
+  it('T-OWN-1: el `expire` de un dueño ajeno NO transiciona la fila del otro', async () => {
+    await suspendedRunService.expire('hash-de-a', OWNER_B);
+    // El VALOR del filtro, no su presencia: la fila de A sigue `suspended` y no
+    // se emitió residuo por ella. Con `.eq('owner_ref', …)` borrado del
+    // servicio, este UPDATE afectaría la fila de A y las dos cosas cambiarían.
+    expect(fake.rows('a2a_suspended_runs')[0]?.status).toBe('suspended');
+    expect(mockTrack).not.toHaveBeenCalled();
   });
 
-  it('T-OWN-2: un dueño sin runs recibe una lista VACÍA, no la del otro', async () => {
-    const res = await suspendedRunService.listForOwner('owner-C-0xcccc');
-    expect(res.ok).toBe(true);
-    if (!res.ok) return;
-    expect(res.rows).toEqual([]);
+  it('T-OWN-2: el `expire` del dueño CORRECTO sí transiciona, y sólo su fila', async () => {
+    await suspendedRunService.expire('hash-de-a', OWNER_A);
+    const filas = fake.rows('a2a_suspended_runs');
+    expect(filas.find((r) => r.id === RUN_A)?.status).toBe('expired');
+    // La fila del otro dueño no se movió: el `token_hash` sólo no alcanzaría
+    // como control, porque es único; lo que se mide es que el UPDATE no barrió.
+    expect(filas.find((r) => r.id === RUN_B)?.status).toBe('suspended');
+    expect(mockTrack).toHaveBeenCalledTimes(1);
   });
 
-  it('T-OWN-3: `listForOwner` no devuelve el material de la credencial', async () => {
-    // El dueño puede ver SUS runs; lo que no necesita es el hash del que sale
-    // el token. Que la fila lo tenga en la base no obliga a echarlo.
-    const res = await suspendedRunService.listForOwner(OWNER_A);
-    expect(res.ok).toBe(true);
-    if (!res.ok) return;
-    expect(res.rows[0]?.token_hash).toBe('');
-    expect(JSON.stringify(res.rows)).not.toContain('hash-de-a');
+  it('T-OWN-3 (BLQ-ALTO-1): el segundo `expire` afecta CERO filas y NO vuelve a emitir', async () => {
+    await suspendedRunService.expire('hash-de-a', OWNER_A);
+    expect(mockTrack).toHaveBeenCalledTimes(1);
+    // 🔴 El gate es `.eq('status', 'suspended')`, y es lo que vuelve
+    // "exactamente un residuo" una propiedad del MOTOR y no una promesa del
+    // servicio: la fila ya está `expired`, así que el WHERE no matchea.
+    await suspendedRunService.expire('hash-de-a', OWNER_A);
+    await suspendedRunService.expire('hash-de-a', OWNER_A);
+    expect(mockTrack).toHaveBeenCalledTimes(1);
+    expect(fake.rows('a2a_suspended_runs')[0]?.status).toBe('expired');
   });
 
-  it('T-OWN-4: el `expire` de un run ajeno NO lee la fila del otro dueño', async () => {
-    // `expire` emite el residuo de un run vencido leyendo `steps_json`. Si su
-    // select no cruzara el token_hash con el dueño, el dueño B podría provocar
-    // la lectura —y la emisión del evento— de la fila de A.
+  it('T-OWN-4: la cadena del `expire` es un UPDATE con los TRES filtros', async () => {
     await suspendedRunService.expire('hash-de-a', OWNER_B);
     const resueltas = fake.resolved();
     expect(resueltas.length).toBeGreaterThan(0);
     const ultima = resueltas[resueltas.length - 1];
-    // La cadena pidió los DOS filtros, y con el dueño equivocado no matcheó nada.
+    // El verbo importa tanto como los filtros: antes esta cadena era un
+    // `select`, y por eso `expired` era un estado inalcanzable.
+    expect(ultima?.kind).toBe('update');
+    expect(ultima?.patch).toEqual({ status: 'expired' });
     expect(ultima?.filters).toEqual(
       expect.arrayContaining([
         ['token_hash', 'hash-de-a'],
         ['owner_ref', OWNER_B],
+        ['status', 'suspended'],
       ]),
     );
-    expect((ultima as unknown as { rows?: unknown[] })?.rows ?? []).toEqual([]);
   });
 });

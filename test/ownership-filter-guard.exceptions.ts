@@ -309,7 +309,7 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 623,
+    line: 640,
     table: 'a2a_payment_intent_debit_signatures',
     verb: 'select',
     category: 'admin-cross-tenant',
@@ -319,27 +319,27 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 673,
+    line: 690,
     table: 'a2a_payment_intent_debit_signatures',
     verb: 'select',
     category: 'admin-cross-tenant',
     reason:
-      'listPending: docblock :663-665 — "Cross-tenant DELIBERADO (patrón listHolds): sin filtro ' +
+      'listPending: docblock :680-682 — "Cross-tenant DELIBERADO (patrón listHolds): sin filtro ' +
       'owner_ref, superficie de ALTO PRIVILEGIO gateada por requireAdminToken en la ruta".',
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 714,
+    line: 731,
     table: 'a2a_payment_intents',
     verb: 'select',
     category: 'admin-cross-tenant',
     reason:
-      'listAmbiguous: docblock :708-710 — "Cross-tenant DELIBERADO (mismo patrón y misma ' +
+      'listAmbiguous: docblock :725-727 — "Cross-tenant DELIBERADO (mismo patrón y misma ' +
       'justificación que listPending)". Ruta dashboard.ts:598.',
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 1020,
+    line: 1072,
     table: 'a2a_payment_intent_debit_signatures',
     verb: 'select',
     category: 'admin-cross-tenant',
@@ -349,17 +349,17 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 1483,
+    line: 1535,
     table: 'a2a_payment_intent_debit_signatures',
     verb: 'select',
     category: 'admin-cross-tenant',
     reason:
       'driftCheck: reporte global del drift entre el débito off-chain y el balance on-chain, por ' +
-      'key. Sólo reporta, nunca corrige (docblock :1474-1476). Ruta dashboard.ts:598.',
+      'key. Sólo reporta, nunca corrige (docblock :1527-1528). Ruta dashboard.ts:598.',
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 925,
+    line: 973,
     table: 'a2a_suspended_runs',
     verb: 'select',
     category: 'admin-cross-tenant',
@@ -368,9 +368,10 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
       'listSettleUnknown/listPending/listAmbiguous — superficie de ALTO PRIVILEGIO gateada por ' +
       'requireAdminToken en la ruta (dashboard.ts, GET /dashboard/api/reconciliation). El ' +
       'operador necesita ver los runs esperando de TODOS los owners; un filtro por dueño ' +
-      'vaciaría el reporte, porque no hay un caller cuyo owner_ref usar. La contraparte ' +
-      'owner-scoped existe y SÍ filtra: suspendedRunService.listForOwner ' +
-      '(src/services/suspended-run.ts), medida por src/services/suspended-run.ownership.test.ts. ' +
+      'vaciaría el reporte, porque no hay un caller cuyo owner_ref usar. El ÚNICO otro sitio ' +
+      'que toca esta tabla desde un caller autenticado SÍ filtra por dueño: ' +
+      'suspendedRunService.expire (src/services/suspended-run.ts) cruza token_hash con ' +
+      'owner_ref y con status, medido por src/services/suspended-run.ownership.test.ts. ' +
       'El select no trae `token_hash`: el panel no necesita el material de una credencial ajena.',
   },
   {
@@ -472,14 +473,14 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
   },
   {
     file: 'src/services/reconciliation.ts',
-    line: 1263,
+    line: 1315,
     table: 'a2a_payment_intent_debit_signatures',
     verb: 'update',
     category: 'ligadura-de-fila',
     reason:
       'Lease de evidencia del hop 2: compare-and-set sobre (key_id, debit_nonce, ' +
       'debit_settle_status="resolving_settle"), los tres derivados de la fila que el proceso ya ' +
-      'leyó y claimeó. Es la guarda anti-doble-pago (docblock :1257-1260).',
+      'leyó y claimeó. Es la guarda anti-doble-pago (docblock :1309-1312).',
   },
 
   // ── chequeo-en-js (3) ───────────────────────────────────────────────────

@@ -79,6 +79,7 @@ function openInput(
     remainingSteps: [],
     frozenStepPrices: null,
     totalCostUsdc: 2.5,
+    maxBudgetUsdc: null,
     totalLatencyMs: 120,
     contractingChain: [],
     contractingDepth: 0,
@@ -100,20 +101,68 @@ function insertFake(result: { data: unknown; error: unknown }): void {
   >);
 }
 
-// ── La fila y el doble de las 2 RPC ───────────────────────────────────────
+// ── La fila, el doble de las 2 RPC y el del UPDATE condicional ────────────
 
 interface FilaFalsa {
   id: string;
   owner_ref: string;
   status: string;
   expires_at: string;
+  compose_run_id: string;
+  steps_json: unknown;
+}
+
+/** Lo que la base devolvió, o `null` si el error se inyectó. */
+interface OpcionesDelDoble {
+  /** Fuerza un error de PostgREST en el UPDATE de `expire()`. */
+  updateError?: string;
 }
 
 /**
- * El MISMO orden de guards que la migración. `nowMs` es el reloj de "Postgres":
- * el vencimiento se compara acá y no en el service, igual que en la base.
+ * El MISMO orden de guards que la migración, sobre una fila en memoria, MÁS la
+ * semántica transaccional que hace falta para poder distinguir el bug del
+ * arreglo.
+ *
+ * ── 🔴 POR QUÉ EL DOBLE APLICA LAS ESCRITURAS SOBRE UN BORRADOR
+ *
+ * La versión anterior de este doble hacía `fila.status = 'expired'` y DESPUÉS
+ * devolvía el error, o sea que modelaba lo que el Dev quiso que pasara y no lo
+ * que Postgres hace. Con eso, `T-RUN-9` ("dos intentos siguen siendo uno") era
+ * VACUO: pasaba en verde sobre un `.sql` cuyo UPDATE la base descartaba.
+ *
+ * Acá cada RPC escribe sobre una COPIA y sólo commitea si vuelve sin levantar.
+ * Un `RAISE EXCEPTION` sin bloque `EXCEPTION` aborta la transacción, y PostgREST
+ * corre cada `rpc()` en una transacción propia — verificado ejecutando la
+ * migración contra un Postgres 16 real. Con este doble, el `.sql` viejo (el que
+ * escribía `expired` justo antes del `RAISE`) deja `T-RUN-9` en ROJO, que es
+ * exactamente lo que un testigo tiene que poder hacer.
+ *
+ * ── Y EL `from()` SIRVE EL UPDATE CONDICIONAL DE `expire()`
+ *
+ * Aplica los filtros pedidos con `===`, uno por uno, y devuelve las filas
+ * afectadas. Un `.eq('status','suspended')` borrado del servicio haría que la
+ * segunda pasada afectara fila y emitiera un segundo residuo.
  */
-function montarRpc(fila: FilaFalsa | null, nowMs = Date.now()): void {
+function montarRpc(
+  fila: FilaFalsa | null,
+  nowMs = Date.now(),
+  opciones: OpcionesDelDoble = {},
+): void {
+  /** Commit/rollback: la copia sólo se vuelca si la "función" no levantó. */
+  function enTransaccion<T>(
+    cuerpo: (borrador: FilaFalsa) => { levanta: string } | T,
+  ): { levanta: string } | T | { sinFila: true } {
+    if (fila === null) return { sinFila: true };
+    const borrador: FilaFalsa = { ...fila };
+    const salida = cuerpo(borrador);
+    if (typeof salida === 'object' && salida !== null && 'levanta' in salida) {
+      // ⛔ ROLLBACK. Todo lo que el cuerpo escribió en el borrador se descarta.
+      return salida;
+    }
+    Object.assign(fila, borrador);
+    return salida;
+  }
+
   mockRpc.mockImplementation((async (
     fn: string,
     args: Record<string, unknown>,
@@ -121,53 +170,110 @@ function montarRpc(fila: FilaFalsa | null, nowMs = Date.now()): void {
     if (fn === 'claim_suspended_run') {
       if (fila === null)
         return { data: null, error: { message: 'RUN_NOT_FOUND' } };
-      if (fila.owner_ref !== args.p_owner_ref) {
-        // MISMO literal que "no existe". Es lo que hace disclosure-safe al 404.
+      const r = enTransaccion<{ data: unknown; error: null }>((borrador) => {
+        if (borrador.owner_ref !== args.p_owner_ref) {
+          // MISMO literal que "no existe". Es lo que hace disclosure-safe al 404.
+          return { levanta: 'RUN_NOT_FOUND' };
+        }
+        if (
+          borrador.status === 'suspended' &&
+          nowMs >= new Date(borrador.expires_at).getTime()
+        ) {
+          return { levanta: 'RUN_EXPIRED' };
+        }
+        // Ya REGISTRADO como vencido: mismo desenlace que el primer intento.
+        if (borrador.status === 'expired') return { levanta: 'RUN_EXPIRED' };
+        if (borrador.status !== 'suspended') {
+          return { levanta: 'RUN_ALREADY_USED' };
+        }
+        borrador.status = 'resuming';
+        return {
+          data: [{ id: borrador.id, owner_ref: borrador.owner_ref }],
+          error: null,
+        };
+      });
+      if ('levanta' in r) return { data: null, error: { message: r.levanta } };
+      if ('sinFila' in r)
         return { data: null, error: { message: 'RUN_NOT_FOUND' } };
-      }
-      if (
-        fila.status === 'suspended' &&
-        nowMs >= new Date(fila.expires_at).getTime()
-      ) {
-        fila.status = 'expired';
-        return { data: null, error: { message: 'RUN_EXPIRED' } };
-      }
-      if (fila.status !== 'suspended') {
-        return { data: null, error: { message: 'RUN_ALREADY_USED' } };
-      }
-      fila.status = 'resuming';
-      return {
-        data: [{ id: fila.id, owner_ref: fila.owner_ref }],
-        error: null,
-      };
+      return r;
     }
     if (fn === 'settle_suspended_run') {
       if (fila === null) return { error: { message: 'RUN_NOT_FOUND' } };
-      if (fila.owner_ref !== args.p_owner_ref) {
-        return { error: { message: 'OWNERSHIP_MISMATCH: run not owned' } };
-      }
-      if (fila.status !== 'resuming') return { error: null };
-      fila.status =
-        args.p_outcome === 'resumed'
-          ? 'resumed'
-          : args.p_outcome === 'reopen'
-            ? 'suspended'
-            : 'failed';
-      return { error: null };
+      const r = enTransaccion<{ error: null }>((borrador) => {
+        if (borrador.owner_ref !== args.p_owner_ref) {
+          return { levanta: 'OWNERSHIP_MISMATCH' };
+        }
+        if (borrador.status !== 'resuming') return { error: null };
+        borrador.status =
+          args.p_outcome === 'resumed'
+            ? 'resumed'
+            : args.p_outcome === 'reopen'
+              ? 'suspended'
+              : 'failed';
+        return { error: null };
+      });
+      if ('levanta' in r) return { error: { message: r.levanta } };
+      if ('sinFila' in r) return { error: { message: 'RUN_NOT_FOUND' } };
+      return r;
     }
     return { data: null, error: null };
   }) as unknown as typeof mockRpc);
-}
 
-/** Un `select().eq().eq().maybeSingle()` con la fila que le digan. */
-function selectFake(result: { data: unknown; error: unknown }): void {
-  const maybeSingle = vi.fn(async () => result);
-  const eq2 = vi.fn(() => ({ maybeSingle }));
-  const eq1 = vi.fn(() => ({ eq: eq2 }));
-  const select = vi.fn(() => ({ eq: eq1 }));
-  mockFrom.mockReturnValue({ select } as unknown as ReturnType<
-    typeof mockFrom
-  >);
+  // El UPDATE condicional de `expire()`: `.update().eq().eq().eq().select()`.
+  mockFrom.mockImplementation((() => {
+    const filtros: Array<[string, unknown]> = [];
+    let parche: Record<string, unknown> = {};
+    const builder = {
+      update: (next: Record<string, unknown>) => {
+        parche = next;
+        return builder;
+      },
+      eq: (columna: string, valor: unknown) => {
+        filtros.push([columna, valor]);
+        return builder;
+      },
+      select: () => builder,
+      // biome-ignore lint/suspicious/noThenProperty: doble del builder awaitable de supabase
+      then: <R>(onFulfilled: (v: unknown) => R): Promise<R> => {
+        if (opciones.updateError !== undefined) {
+          return Promise.resolve(
+            onFulfilled({
+              data: null,
+              error: { message: opciones.updateError },
+            }),
+          );
+        }
+        if (fila === null) {
+          return Promise.resolve(onFulfilled({ data: [], error: null }));
+        }
+        // La clave del gate: `token_hash` no está en la fila en memoria, así que
+        // sólo se comparan las columnas que la fila declara. `owner_ref` y
+        // `status` SÍ están, y son las dos que aíslan.
+        const matchea = filtros.every(
+          ([columna, valor]) =>
+            !(columna in fila) ||
+            (fila as unknown as Record<string, unknown>)[columna] === valor,
+        );
+        if (!matchea) {
+          return Promise.resolve(onFulfilled({ data: [], error: null }));
+        }
+        Object.assign(fila, parche);
+        return Promise.resolve(
+          onFulfilled({
+            data: [
+              {
+                id: fila.id,
+                compose_run_id: fila.compose_run_id,
+                steps_json: fila.steps_json,
+              },
+            ],
+            error: null,
+          }),
+        );
+      },
+    };
+    return builder;
+  }) as unknown as typeof mockFrom);
 }
 
 function stepPagado(txHash: string): StepResult {
@@ -285,13 +391,19 @@ describe('T-RUN · open()', () => {
 describe('T-RUN · claim()', () => {
   const FUTURO = '2099-01-01T00:00:00.000Z';
 
-  it('T-RUN-1 (AC-5): un segundo claim sobre la misma fila da `already_used`', async () => {
-    const fila: FilaFalsa = {
+  function filaViva(expira: string): FilaFalsa {
+    return {
       id: 'run-1',
       owner_ref: OWNER,
       status: 'suspended',
-      expires_at: FUTURO,
+      expires_at: expira,
+      compose_run_id: COMPOSE_RUN,
+      steps_json: [],
     };
+  }
+
+  it('T-RUN-1 (AC-5): un segundo claim sobre la misma fila da `already_used`', async () => {
+    const fila = filaViva(FUTURO);
     montarRpc(fila);
     const primero = await suspendedRunService.claim(TOKEN_HASH, OWNER);
     expect(primero.ok).toBe(true);
@@ -301,12 +413,7 @@ describe('T-RUN · claim()', () => {
   });
 
   it('T-RUN-2 (AC-6): "no existe" y "otro dueño" son INDISTINGUIBLES', async () => {
-    const fila: FilaFalsa = {
-      id: 'run-1',
-      owner_ref: OWNER,
-      status: 'suspended',
-      expires_at: FUTURO,
-    };
+    const fila = filaViva(FUTURO);
     montarRpc(fila);
     const ajeno = await suspendedRunService.claim(TOKEN_HASH, OTRO_OWNER);
     montarRpc(null);
@@ -344,84 +451,90 @@ describe('T-RUN · claim()', () => {
 describe('T-RUN · el residuo del vencimiento', () => {
   const PASADO = '2020-01-01T00:00:00.000Z';
 
-  function filaVencida(): FilaFalsa {
+  function filaVencida(steps: unknown = [stepPagado('0xdeadbeef')]): FilaFalsa {
     return {
       id: 'run-1',
       owner_ref: OWNER,
       status: 'suspended',
       expires_at: PASADO,
+      compose_run_id: COMPOSE_RUN,
+      steps_json: steps,
     };
   }
 
-  it('T-RUN-9 (AC-7): con evidencia on-chain se emite EXACTAMENTE UN residuo, y dos intentos siguen siendo uno', async () => {
+  it('T-RUN-9 (AC-7 · fix-pack AR/BLQ-ALTO-1): la fila queda TERMINAL y el residuo es UNO, con N intentos', async () => {
     const fila = filaVencida();
     montarRpc(fila);
-    selectFake({
-      data: {
-        id: 'run-1',
-        compose_run_id: COMPOSE_RUN,
-        steps_json: [stepPagado('0xdeadbeef')],
-      },
-      error: null,
-    });
 
     const primero = await suspendedRunService.claim(TOKEN_HASH, OWNER);
     expect(primero).toEqual({ ok: false, reason: 'expired' });
+    // 🔴 LA MITAD QUE EL TESTIGO VIEJO NO PODÍA VER. `expired` sólo es
+    // alcanzable si la transición vive AFUERA del RPC que levanta: con el `.sql`
+    // anterior (UPDATE + RAISE en la misma transacción) esta línea da
+    // `'suspended'`, porque el doble descarta lo que la función escribió antes
+    // de levantar — que es lo que Postgres hace.
     expect(fila.status).toBe('expired');
     expect(mockTrack).toHaveBeenCalledTimes(1);
     expect(mockTrack.mock.calls[0]?.[0]?.eventType).toBe(
       'compose_stranded_payment',
     );
 
-    // 🔴 El segundo intento. Sin este caso, "exactamente uno" es una afirmación
-    // sin testigo: la fila ya está `expired`, así que el claim cae en el guard
-    // de "ya usado" y NO vuelve a emitir.
-    const segundo = await suspendedRunService.claim(TOKEN_HASH, OWNER);
-    expect(segundo).toEqual({ ok: false, reason: 'already_used' });
+    // 🔴 Y LA OTRA MITAD: TRES intentos más. El `.sql` anterior emitía UN
+    // RESIDUO POR INTENTO (la fila nunca salía de `suspended`), y eso es lo que
+    // dejaba a un caller autenticado encender `strandedExposureBreached` en
+    // `/health` a voluntad. Acá el UPDATE condicional afecta 0 filas.
+    for (let intento = 0; intento < 3; intento++) {
+      const otro = await suspendedRunService.claim(TOKEN_HASH, OWNER);
+      // Y el caller recibe el MISMO desenlace que la primera vez: un token
+      // vencido da 410 la primera vez y la cuarta, no un 409 que diga que el run
+      // "se usó" cuando lo que pasó es que se le venció.
+      expect(otro).toEqual({ ok: false, reason: 'expired' });
+    }
     expect(mockTrack).toHaveBeenCalledTimes(1);
+    expect(fila.status).toBe('expired');
   });
 
-  it('SIN evidencia on-chain no se emite NADA', async () => {
-    montarRpc(filaVencida());
-    selectFake({
-      data: {
-        id: 'run-1',
-        compose_run_id: COMPOSE_RUN,
-        // Un step sin `downstreamTxHash` ni `txHash` no entra al residuo.
-        steps_json: [
-          { agent: { slug: 'x' }, output: {}, costUsdc: 0, latencyMs: 1 },
-        ],
-      },
-      error: null,
-    });
+  it('SIN evidencia on-chain no se emite NADA, pero la fila IGUAL queda terminal', async () => {
+    // Un step sin `downstreamTxHash` ni `txHash` no entra al residuo.
+    const fila = filaVencida([
+      { agent: { slug: 'x' }, output: {}, costUsdc: 0, latencyMs: 1 },
+    ]);
+    montarRpc(fila);
     const res = await suspendedRunService.claim(TOKEN_HASH, OWNER);
     expect(res).toEqual({ ok: false, reason: 'expired' });
     expect(mockTrack).not.toHaveBeenCalled();
+    // Que no haya plata varada NO significa que el run no venció: la transición
+    // se aplica igual, y por eso el segundo claim no vuelve a pasar por acá.
+    expect(fila.status).toBe('expired');
   });
 
-  it('si la fila no se puede leer, el vencimiento se reporta IGUAL (expire nunca lanza)', async () => {
-    montarRpc(filaVencida());
-    selectFake({ data: null, error: { message: 'boom' } });
+  it('si el UPDATE falla, el vencimiento se reporta IGUAL (expire nunca lanza)', async () => {
+    const fila = filaVencida();
+    montarRpc(fila, Date.now(), { updateError: 'boom' });
     await expect(suspendedRunService.claim(TOKEN_HASH, OWNER)).resolves.toEqual(
       { ok: false, reason: 'expired' },
     );
     expect(mockTrack).not.toHaveBeenCalled();
+    // La fila NO se movió: el error de la base no se inventa una transición.
+    expect(fila.status).toBe('suspended');
   });
 
   it('si `track` rechaza, el vencimiento se reporta igual — fire-and-forget con catch', async () => {
     montarRpc(filaVencida());
-    selectFake({
-      data: {
-        id: 'run-1',
-        compose_run_id: COMPOSE_RUN,
-        steps_json: [stepPagado('0xdeadbeef')],
-      },
-      error: null,
-    });
     mockTrack.mockRejectedValueOnce(new Error('events down'));
     await expect(suspendedRunService.claim(TOKEN_HASH, OWNER)).resolves.toEqual(
       { ok: false, reason: 'expired' },
     );
+  });
+
+  it('T-RUN-10 (AC-6): un dueño ajeno sobre un run vencido NO emite el residuo del otro', async () => {
+    const fila = filaVencida();
+    montarRpc(fila);
+    // El claim ni siquiera llega al guard de vencimiento: el dueño no coincide.
+    const res = await suspendedRunService.claim(TOKEN_HASH, OTRO_OWNER);
+    expect(res).toEqual({ ok: false, reason: 'not_found' });
+    expect(mockTrack).not.toHaveBeenCalled();
+    expect(fila.status).toBe('suspended');
   });
 });
 
@@ -434,6 +547,8 @@ describe('T-RUN · settle()', () => {
       owner_ref: OWNER,
       status: 'resuming',
       expires_at: '2099-01-01T00:00:00.000Z',
+      compose_run_id: COMPOSE_RUN,
+      steps_json: [],
     };
     montarRpc(fila);
     expect(
@@ -454,6 +569,8 @@ describe('T-RUN · settle()', () => {
       owner_ref: OWNER,
       status: 'resuming',
       expires_at: '2099-01-01T00:00:00.000Z',
+      compose_run_id: COMPOSE_RUN,
+      steps_json: [],
     };
     montarRpc(fila);
     expect(

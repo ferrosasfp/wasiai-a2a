@@ -259,10 +259,18 @@ export const CITED_LINES: readonly CitedLine[] = [
     // prosa sobre el over-fetch. El guard anti-doble-débito vive en
     // `src/services/compose.ts:571`. Es el caso que `E-WRONG_FILE` existe para
     // explicar: buscar `i > 0` en `src/routes/compose.ts` da CERO.
+    //
+    // ⚠️ RE-APUNTADA de `:602` a `:616` en el fix-pack AR de WKH-225. NO se
+    // movió el guard: la línea sigue byte-idéntica a `5578998:571`. Lo que la
+    // corrió son las 14 líneas de comentario del `preSpentUsd` que se agregaron
+    // al guard de presupuesto, DOCE líneas más arriba en la misma función. Es
+    // el caso del auto-blindaje "las citas que rompés vos al arreglar otra
+    // cosa": acá insertar por debajo del ancla era imposible, porque lo que se
+    // explica vive antes.
     from: 'src/types/index.ts',
-    cite: 'src/services/compose.ts:602',
+    cite: 'src/services/compose.ts:616',
     target: 'src/services/compose.ts',
-    line: 602,
+    line: 616,
     mustContain: ['if (i > 0 &&', 'scopingKeyRow'],
     symbolPath: ['composeService', 'executePipeline'],
   },
@@ -309,10 +317,13 @@ export const CITED_LINES: readonly CitedLine[] = [
     // ⚠️ La afirmación de fondo de la prosa era CORRECTA: `stepDebitedUsd` vale
     // 0 para `i === 0`. Lo único falso era el número — que es exactamente el
     // modo de falla que hace que «abrir y comparar» confirme la mentira.
+    //
+    // ⚠️ RE-APUNTADA de `:602` a `:616` en el fix-pack AR de WKH-225, por el
+    // mismo desplazamiento que la entrada de arriba. El guard no se tocó.
     from: 'src/services/compose.ts',
-    cite: ':602',
+    cite: ':616',
     target: 'src/services/compose.ts',
-    line: 602,
+    line: 616,
     mustContain: ['if (i > 0 &&', 'scopingKeyRow'],
     symbolPath: ['composeService', 'executePipeline'],
   },

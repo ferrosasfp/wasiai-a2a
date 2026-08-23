@@ -35,6 +35,10 @@ import { resolveEscrowContract } from '../adapters/escrow-verifier.js';
 import { getAdaptersBundle, getDefaultChainKey } from '../adapters/registry.js';
 import { verifyDefaultChainSettle } from '../adapters/settle-verifier.js';
 import { getLogger } from '../lib/logger.js';
+// WKH-225 (fix-pack AR/BLQ-MED-2): la MISMA bandera que gatea la creación de
+// runs suspendidos, importada del módulo que la define para que el lector y el
+// productor no puedan divergir en el string ni en el `=== 'true'` estricto.
+import { isComposeSuspendEnabled } from '../lib/resume-token.js';
 // HU-203: la familia de `event_type` que dejan las retenciones de settle. Se importa
 // del MISMO módulo que las escribe para que el productor y el lector no puedan
 // divergir en el string.
@@ -475,6 +479,19 @@ export interface SuspendedRunsReport {
   rows: SuspendedRunListRow[];
   total: number;
   truncated: boolean;
+  /**
+   * 🔴 FIX-PACK AR/BLQ-MED-2 — ¿SE PREGUNTÓ?
+   *
+   * `false` significa "la feature está apagada y esta lista no se consultó",
+   * que NO es lo mismo que `rows: []` con `queried: true` ("se consultó y no
+   * hay ninguno"). Sin este campo las dos se ven idénticas desde el panel, y el
+   * operador leería "no hay pipelines esperando" cuando la verdad es "no
+   * preguntamos". Es la misma distinción que ya hace `protocolFeeStatus` entre
+   * `not_charged` y `unknown`.
+   *
+   * Las otras tres listas del reporte no lo necesitan: ninguna está gateada.
+   */
+  queried: boolean;
 }
 
 /** Techo de filas del reporte ambiguo (el `total` exacto viaja igual). */
@@ -742,7 +759,26 @@ export const reconciliationService = {
     // rejection) y SIN `try` alrededor: si esta query falla, el error TIENE que
     // subir. Un `catch` diría "no hay pipelines esperando" cuando la verdad es
     // "no pudimos saberlo".
-    const suspendedRuns = await this.listSuspendedRuns();
+    //
+    // 🔴 FIX-PACK AR/BLQ-MED-2 — GATEADA POR LA BANDERA, y las otras tres NO.
+    //
+    // Es la única de las cuatro que consulta una tabla que ESTA MISMA HU crea.
+    // Sin el gate, desplegar este commit ANTES de aplicar la migración —un orden
+    // perfectamente posible: Railway despliega por push y la migración se aplica
+    // a mano— convertía `GET /dashboard/api/reconciliation` de 200 en 500, y con
+    // él se caían las TRES listas que ya funcionaban. Una HU con la bandera en
+    // OFF por default no puede tumbar la superficie de reconciliación entera.
+    //
+    // ⛔ NO es un `try/catch`: la invariante de que un error de query TIRE es
+    // correcta y se hereda intacta. Lo que se gatea es que la CUARTA PREGUNTA no
+    // exista cuando la feature no existe. Con la bandera encendida, un error de
+    // query sigue tirando igual que antes.
+    //
+    // ⛔ Y NO devuelve `rows: []` a secas: devuelve `queried: false`, para que
+    // "no preguntamos" no se lea como "no hay ninguno".
+    const suspendedRuns = isComposeSuspendEnabled()
+      ? await this.listSuspendedRuns()
+      : { rows: [], total: 0, truncated: false, queried: false };
     return {
       settleUnknown,
       strandedRuns,
@@ -902,9 +938,16 @@ export const reconciliationService = {
    * los dos en la misma lista haría que el operador viera como pérdida algo que
    * está funcionando.
    *
+   * ⚠️ FIX-PACK AR/BLQ-MED-2 — SU ÚNICO CALL-SITE LA GATEA por
+   * `isComposeSuspendEnabled()`. Con la bandera apagada esta función NO CORRE, y
+   * por lo tanto no hay una sola query nueva contra la base (AC-9). Este método
+   * no se gatea a sí mismo a propósito: gatear adentro le haría devolver una
+   * lista vacía indistinguible de "no hay ninguno", y ésa es la mentira que
+   * `queried: false` existe para evitar.
+   *
    * Hereda las TRES invariantes de las otras listas, y ninguna se puede debilitar:
    *   1. NO gateada por `isEscrowSettleEnabled()` — este camino no tiene nada
-   *      que ver con el escrow y corre siempre;
+   *      que ver con el escrow y corre siempre que la feature esté encendida;
    *   2. `total` exacto (`count:'exact'`) + `truncated` — una lista de plata
    *      comprometida que se corta en silencio afirma algo falso sobre su
    *      propia completitud;
@@ -917,8 +960,13 @@ export const reconciliationService = {
    * ⚠️ CROSS-TENANT DELIBERADO, y por eso lleva su entrada escrita a mano en
    * `test/ownership-filter-guard.exceptions.ts`: es el mismo patrón que
    * `listSettleUnknown` / `listPending` / `listAmbiguous`, o sea una superficie
-   * de ALTO PRIVILEGIO gateada por `requireAdminToken` en la ruta. La
-   * contraparte owner-scoped existe y filtra: `suspendedRunService.listForOwner`.
+   * de ALTO PRIVILEGIO gateada por `requireAdminToken` en la ruta.
+   *
+   * ⚠️ Fix-pack AR/MNR-1: acá decía que la contraparte owner-scoped era
+   * `suspendedRunService.listForOwner`. Esa función NO TENÍA NINGÚN CONSUMIDOR
+   * de producción —sólo esta frase y sus propios tests— así que se borró, y con
+   * ella la frase. Hoy el único lector owner-scoped de `a2a_suspended_runs` es
+   * `suspendedRunService.expire`, que cruza `token_hash` con `owner_ref`.
    */
   async listSuspendedRuns(): Promise<SuspendedRunsReport> {
     const { data, error, count } = await supabase
@@ -951,6 +999,10 @@ export const reconciliationService = {
       })),
       total,
       truncated: total > rows.length,
+      // Se llegó hasta acá ⇒ la query CORRIÓ y no tiró. Una lista vacía con
+      // `queried: true` afirma "no hay ninguno"; ésa es la afirmación que este
+      // método puede hacer y la apagada no.
+      queried: true,
     };
   },
 

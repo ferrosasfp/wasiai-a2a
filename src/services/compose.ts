@@ -353,6 +353,9 @@ export const composeService = {
     const {
       steps,
       maxBudget,
+      // WKH-225 (fix-pack AR/BLQ-MED-1): lo que ESTE MISMO run ya gastó antes de
+      // este tramo. Sólo lo puebla `POST /compose/resume`; ausente ⇒ 0.
+      preSpentUsd,
       a2aKey,
       scopingKeyRow,
       chainId,
@@ -558,7 +561,18 @@ export const composeService = {
       // que es de otra HU. El mensaje distinguible alcanza para el operador.
       const effectivePipelineBudget =
         resolveEffectivePipelineBudgetUsd(maxBudget);
-      const wouldNeed = totalCost + agent.priceUsdc + stepGasOverhead;
+      // 🔴 WKH-225 (fix-pack AR/BLQ-MED-1): `+ (preSpentUsd ?? 0)`, y ESE es todo
+      // el cambio de esta línea. `totalCost` arranca en 0 en CADA llamada a
+      // `executePipeline`, así que un run que se suspendió y se reanudó evaluaba
+      // `min(maxBudget del caller, techo del operador)` contra la mitad y no
+      // contra el run: los DOS techos valían el doble. Sumar lo ya gastado es lo
+      // único que los vuelve a hacer valer una vez por run.
+      //
+      // Ausente ⇒ `0` ⇒ aritmética BYTE-IDÉNTICA a la de antes para `/compose`,
+      // que es el 100% del tráfico que no viene de una reanudación. Y NO toca
+      // ningún monto debitado: sólo el guard que corta ANTES del débito.
+      const wouldNeed =
+        (preSpentUsd ?? 0) + totalCost + agent.priceUsdc + stepGasOverhead;
       if (wouldNeed > effectivePipelineBudget) {
         const ceilingBinds = !maxBudget || effectivePipelineBudget < maxBudget;
         return {
@@ -716,7 +730,7 @@ export const composeService = {
             // `settle_signature` base58 de una transferencia real: la
             // reconciliación cruza ambos. `stepDebitedUsd` es el DÉBITO DEL CALLER
             // y vale 0 para `i === 0` (lo debita el middleware vía
-            // composeEstimatedCostUsd, guard `i > 0` de :602) ⇒ un compose de UN
+            // composeEstimatedCostUsd, guard `i > 0` de :616) ⇒ un compose de UN
             // step con agente Solana emitía `amount_usd = 0` junto a una firma
             // real. Además incluye el gas overhead del gateway, que nunca se le
             // paga al agente.
@@ -1345,8 +1359,28 @@ export const composeService = {
       steps: ctx.results,
       lastOutput: ctx.lastOutput,
       remainingSteps: ctx.steps.slice(ctx.i + 1),
-      frozenStepPrices: ctx.request.frozenStepPricesUsd ?? null,
+      // 🔴 FIX-PACK AR/BLQ-BAJO-1 — EL MISMO `slice(i + 1)` QUE `remainingSteps`.
+      //
+      // Se guardaba el array ENTERO, y el pipeline reanudado lo lee con
+      // `frozenStepPricesUsd?.[i]` donde `i` es el índice del TRAMO RESTANTE,
+      // reiniciado a 0. Con `[p0,p1,p2,p3]` y una suspensión en el step 1, el
+      // step 3 se habría debitado a `p1`: un array de precios de dinero indexado
+      // contra otro espacio de índices. Recortarlo acá lo vuelve imposible por
+      // construcción — los dos arrays salen del MISMO `slice`, así que el índice
+      // `k` de uno es el del otro y no hay nada que re-indexar al restaurar.
+      //
+      // Hoy es inalcanzable (`request.frozenStepPricesUsd` sólo lo puebla
+      // `/orchestrate`, que por DT-A2 no puede suspender), y por eso mismo la
+      // corrección va acá y no en el consumidor: el defecto estaba CABLEADO
+      // esperando que el productor existiera.
+      frozenStepPrices:
+        ctx.request.frozenStepPricesUsd === undefined
+          ? null
+          : ctx.request.frozenStepPricesUsd.slice(ctx.i + 1),
       totalCostUsdc: ctx.totalCost,
+      // Fix-pack AR/BLQ-MED-1: el techo del caller viaja con el run. Sin esto el
+      // tramo reanudado corría sin techo declarado.
+      maxBudgetUsdc: ctx.request.maxBudget ?? null,
       totalLatencyMs: ctx.totalLatency,
       // 🔴 LOS TRES DE LA TRAZA ANTI-BUCLE. Sin persistirlos, la reanudación
       // arrancaría con cadena vacía y profundidad 0 — o sea reiniciando el

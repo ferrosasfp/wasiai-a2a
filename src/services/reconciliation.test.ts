@@ -14,7 +14,7 @@
  * ni `resolved_refunded` en el lado settle. NO usa `expect(true).toBe(true)`.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const logSpy = vi.hoisted(() => ({
   error: vi.fn(),
@@ -1709,6 +1709,27 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
   // los intents y el candado quedaría verde por el motivo equivocado.
   // ══════════════════════════════════════════════════════════════════
 
+  /**
+   * 🔴 FIX-PACK AR/BLQ-MED-2 — LA CUARTA LISTA AHORA ESTÁ GATEADA, y por eso
+   * estos casos tienen que encender la bandera a mano.
+   *
+   * Es la única de las cuatro que consulta una tabla que ESTA MISMA HU crea.
+   * Desplegar el código antes de aplicar la migración —Railway despliega por
+   * push, la migración se aplica a mano— convertía
+   * `GET /dashboard/api/reconciliation` de 200 en 500, y con él se caían las
+   * TRES listas que ya funcionaban.
+   */
+  let banderaPrevia: string | undefined;
+  // biome-ignore lint/suspicious/noDuplicateTestHooks: el describe ya tiene un beforeEach de mocks; este es SÓLO la bandera, y fusionarlos la encendería para los 80 casos que no la necesitan
+  beforeEach(() => {
+    banderaPrevia = process.env.COMPOSE_SUSPEND_ENABLED;
+    process.env.COMPOSE_SUSPEND_ENABLED = 'true';
+  });
+  afterEach(() => {
+    if (banderaPrevia === undefined) delete process.env.COMPOSE_SUSPEND_ENABLED;
+    else process.env.COMPOSE_SUSPEND_ENABLED = banderaPrevia;
+  });
+
   function suspendedRow(overrides: Record<string, unknown> = {}) {
     return {
       id: 'run-1',
@@ -1810,6 +1831,54 @@ describe('HU-201 listAmbiguous (superficie de los deposits retenidos)', () => {
     });
     const out = await reconciliationService.listAmbiguous();
     expect(out.suspendedRuns.rows).toHaveLength(1);
+  });
+
+  it('T-REC-2d (fix-pack AR/BLQ-MED-2): con la bandera APAGADA no hay UNA SOLA query nueva, y el reporte lo DICE', async () => {
+    delete process.env.COMPOSE_SUSPEND_ENABLED;
+    const cap = wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        { rows: [], count: 0 },
+      ],
+      // Si el gate no existiera, ESTA respuesta se consumiría y el `error`
+      // haría tirar a `listAmbiguous` — que es exactamente lo que pasaba al
+      // desplegar el código antes que la migración.
+      suspendedCall: { error: { message: 'relation does not exist' } },
+    });
+
+    const out = await reconciliationService.listAmbiguous();
+
+    // 🔴 AC-9 literal: cero queries nuevas con la bandera en OFF. `null` es el
+    // valor con el que nace la captura: si la query hubiera corrido, acá
+    // diría `'a2a_suspended_runs'`.
+    expect(cap.suspended.table).toBeNull();
+    // Y las TRES listas que ya funcionaban siguen respondiendo.
+    expect(out.rows).toEqual([]);
+    expect(out.settleUnknown.rows).toEqual([]);
+    expect(out.strandedRuns.rows).toEqual([]);
+    // ⛔ Y la lista apagada dice "no preguntamos", no "no hay ninguno". Sin
+    // este campo las dos se ven idénticas desde el panel.
+    expect(out.suspendedRuns).toEqual({
+      rows: [],
+      total: 0,
+      truncated: false,
+      queried: false,
+    });
+  });
+
+  it('T-REC-2e: con la bandera ENCENDIDA, la lista dice que SÍ se preguntó', async () => {
+    wireIntents([], 0, {
+      eventCalls: [
+        { rows: [], count: 0 },
+        { rows: [], count: 0 },
+      ],
+      // Cero filas, pero la query CORRIÓ. Esa es la otra mitad de la
+      // distinción: `rows: []` con `queried: true` sí afirma "no hay ninguno".
+      suspendedCall: { rows: [], count: 0 },
+    });
+    const out = await reconciliationService.listAmbiguous();
+    expect(out.suspendedRuns.queried).toBe(true);
+    expect(out.suspendedRuns.rows).toEqual([]);
   });
 
   it('T-REC-3 (CD-12): `SETTLE_UNKNOWN_EVENT_TYPES` sigue teniendo los MISMOS miembros', async () => {

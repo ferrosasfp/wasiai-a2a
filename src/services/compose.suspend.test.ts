@@ -318,6 +318,9 @@ describe('WKH-225 · la suspensión no es un fallo (AC-1)', () => {
     // Y el `compose_run_id`, que es la clave de idempotencia del fee.
     expect(typeof arg?.composeRunId).toBe('string');
     expect((arg?.composeRunId ?? '').length).toBeGreaterThan(10);
+    // Fix-pack AR/BLQ-MED-1: este pipeline no declaró techo ⇒ `null`, no
+    // `undefined`. La columna es nullable y la distinción importa.
+    expect(arg?.maxBudgetUsdc).toBeNull();
   });
 
   it('T-SUSP-4 (AC-2): la respuesta trae artefacto, runId y vencimiento', async () => {
@@ -660,5 +663,82 @@ describe('WKH-225 · la traza restaurada tiene EFECTO (AC-12, CD-17)', () => {
       headers?: Record<string, string>;
     };
     expect(headersSinDepth.headers?.['x-a2a-contracting-depth']).toBe('1');
+  });
+});
+
+// ─── fix-pack AR: lo que el run se LLEVA a la espera ──────────────────────
+
+describe('WKH-225 fix-pack AR · lo que se persiste con el run', () => {
+  it('T-SUSP-MAXBUDGET (BLQ-MED-1): el techo declarado por el caller viaja a la fila', async () => {
+    wireAgents(makeAgent({ slug: 'kyc' }), makeAgent({ slug: 'payout' }));
+    mockFetchOk(SOBRE);
+
+    await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'payout', input: {} },
+      ],
+      maxBudget: 5,
+      suspension: SUSPENSION,
+    });
+
+    // Sin esto, el tramo reanudado corre con `maxBudget` ausente: el techo del
+    // caller no existe y el del operador se evalúa una vez POR MITAD.
+    expect(mockOpen.mock.calls[0]?.[0]?.maxBudgetUsdc).toBe(5);
+  });
+
+  it('T-SUSP-FROZEN (BLQ-BAJO-1): los precios congelados se persisten RE-INDEXADOS contra los steps restantes', async () => {
+    wireAgents(
+      makeAgent({ slug: 's0' }),
+      makeAgent({ slug: 's1' }),
+      makeAgent({ slug: 's2' }),
+      makeAgent({ slug: 's3' }),
+    );
+    mockFetchOk({ result: 's0' });
+    mockFetchOk(SOBRE); // suspende en el índice 1
+
+    await composeService.compose({
+      steps: [
+        { agent: 's0', input: {} },
+        { agent: 's1', input: {} },
+        { agent: 's2', input: {} },
+        { agent: 's3', input: {} },
+      ],
+      scopingKeyRow: makeKeyRow(),
+      chainId: CHAIN_ID,
+      frozenStepPricesUsd: [0.1, 0.2, 0.3, 0.4],
+      suspension: SUSPENSION,
+    });
+
+    const arg = mockOpen.mock.calls[0]?.[0];
+    // 🔴 EL MISMO `slice(i + 1)` QUE `remainingSteps`, y ése es el invariante:
+    // los dos arrays tienen que salir del mismo corte, porque el pipeline
+    // reanudado los indexa con la MISMA `i`. Con el array entero persistido, el
+    // step `s3` se habría debitado a 0.2 (el precio congelado de `s1`).
+    expect(arg?.remainingSteps).toEqual([
+      { agent: 's2', input: {} },
+      { agent: 's3', input: {} },
+    ]);
+    expect(arg?.frozenStepPrices).toEqual([0.3, 0.4]);
+    // El control que hace falsable la frase: los dos arrays tienen el MISMO
+    // largo. Un `slice` distinto en cualquiera de los dos rompe acá.
+    expect((arg?.frozenStepPrices as number[]).length).toBe(
+      (arg?.remainingSteps as unknown[]).length,
+    );
+  });
+
+  it('sin precios congelados, la columna sigue siendo NULL (el 100% del tráfico de hoy)', async () => {
+    wireAgents(makeAgent({ slug: 'kyc' }), makeAgent({ slug: 'payout' }));
+    mockFetchOk(SOBRE);
+
+    await composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'payout', input: {} },
+      ],
+      suspension: SUSPENSION,
+    });
+
+    expect(mockOpen.mock.calls[0]?.[0]?.frozenStepPrices).toBeNull();
   });
 });
