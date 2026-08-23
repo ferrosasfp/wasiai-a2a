@@ -6,7 +6,12 @@
 
 ## Resumen ejecutivo
 
-Implementado el estado suspendido de un paso del `/compose` pipeline: un paso puede devolver un enlace y quedar esperando a una persona, en lugar de terminar el request HTTP. El desenlace nuevo es aditivo en `ComposeResult` (tercer valor junto a `success: true/false`) y aislado en `/compose/resume`, una ruta nueva que reanuda desde el estado perseguido. Tabla nueva en **bdwv** con claim atómico por RPC y single-use verificado contra Postgres 16. **Pipeline cerrado en la rama** (`feat/225-paso-suspendible-y-reanudable`) con 12 ACs en PASS, 0 hallazgos bloqueantes abiertos, 5 MENORes declarados como deuda (`TD-225-01`, `TD-225-02`, `MNR-6`, `NC-1`, `NC-4`) y **sin mergear a main** por decisión del founder (meta 2026-08-25 cerrada; fecha de corte 2026-08-31).
+Implementado el estado suspendido de un paso del `/compose` pipeline: un paso puede devolver un enlace y quedar esperando a una persona, en lugar de terminar el request HTTP. El desenlace nuevo es aditivo en `ComposeResult` (tercer valor junto a `success: true/false`) y aislado en `/compose/resume`, una ruta nueva que reanuda desde el estado perseguido. Tabla nueva diseñada para **bdwv** con claim atómico por RPC y single-use verificado contra Postgres 16. **Pipeline cerrado en la rama** (`feat/225-paso-suspendible-y-reanudable`) con 12 ACs en PASS, 0 hallazgos bloqueantes abiertos, 5 MENORes declarados como deuda (`TD-225-01`, `TD-225-02`, `MNR-6`, `NC-1`, `NC-4`).
+
+**⛔ ESTADO ACTUAL DE PRODUCCIÓN**: 
+- **Migración NO aplicada**: La tabla `a2a_suspended_runs` **no existe en bdwv**. Todo el código de esta HU está en rama, nada corre contra la base real.
+- **AC-10 implementado pero INERTE**: La clasificación de `kyc-hosted-redirect` y `legacy-single-shot-kyc` está codificada en `src/lib/capability-risk.ts`, pero `/discover` no las ve. Hace falta una **acción manual de OPS**: republicar la ficha del agente en bdwv para que `capabilities` incluya `kyc-hosted-redirect`. Ver `src/services/registry.ts:36-42` (*"COPIA MANUAL … nada la sincroniza"*).
+- **No mergeada a main**: Decisión del founder (meta 2026-08-25 cerrada; fecha de corte 2026-08-31). El merge requiere además la aplicación de la migración y la acción de OPS nominada arriba.
 
 ---
 
@@ -295,5 +300,19 @@ Cuatro categorías de hallazgos del F3 que la próxima HU debe evitar:
 - **Rama**: `feat/225-paso-suspendible-y-reanudable` · **SHA**: `ee8a10a`
 - **Estado**: DONE (pipeline cerrado en rama, **NO mergeada a main**)
 - **Deuda nominal**: 5 items (`TD-225-01/02`, `MNR-6`, `NC-1/4`)
-- **Fecha meta**: 2026-08-25 (blanda), 2026-08-31 (dura, merge esperado post-incubadora)
+
+### Pre-requisitos para merge a main
+
+**⚠️ El merge requiere tres acciones antes de que la HU se considere lista para producción:**
+
+1. **Aplicar migración a bdwv**: `supabase/migrations/20260823000000_wkh225_suspended_runs.sql`
+   - Crea tabla `a2a_suspended_runs` con índices, RLS y RPCs
+   - Actualmente la tabla NO existe en bdwv
+   
+2. **Acción de OPS**: Republicar ficha del agente en bdwv
+   - Necesario para que `/discover` vea `kyc-hosted-redirect` en el manifiesto del agente de KYC
+   - Ubicación del paso manual: `src/services/registry.ts:36-42` (textual: *"COPIA MANUAL … nada la sincroniza"*)
+   - AC-10 implementado en código, pero inerte en prod sin esta acción
+
+3. **Fecha de corte**: 2026-08-31 (dura, merge esperado post-incubadora; meta blanda 2026-08-25)
 
