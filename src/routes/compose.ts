@@ -967,19 +967,6 @@ function buildSuspensionAuthz(
 }
 
 /**
- * WKH-225 — el mapeo del desenlace del claim a HTTP.
- *
- * Exemplar: `src/routes/agent-links.ts`, que ya traduce el mismo vocabulario
- * (`LINK_NOT_FOUND` → 404, `LINK_EXPIRED` → 410, `LINK_ALREADY_USED` → 409,
- * indisponible → 503) con bodies `{ error_code }` en snake.
- *
- * 🔴 AC-6: el body del `not_found` es BYTE-IDÉNTICO al de un run inexistente,
- * porque son EL MISMO body — el service ya colapsó los dos casos en el mismo
- * `reason`, y el service pudo hacerlo porque el RPC levanta el mismo literal.
- * Los tres eslabones tienen que decir lo mismo o el más hablador anula a los
- * otros dos.
- */
-/**
  * 🔴 FIX-PACK AR/BLQ-ALTO-2 — EL DÉBITO DEL PRIMER STEP DEL TRAMO REANUDADO.
  *
  * ── EL AGUJERO QUE CIERRA
@@ -1011,6 +998,14 @@ function buildSuspensionAuthz(
  * middleware para `/compose`.
  *
  * ── LO QUE SE ESPEJA DE `/compose`, LÍNEA POR LÍNEA
+ *
+ * 🔒 ESTAS CINCO VIÑETAS SON CINCO ASERCIONES, no prosa (fix-pack CR/CR-3):
+ * `test/wkh225-resume-step0-mirrors-compose.test.ts` las verifica en los DOS
+ * lados en cada `npm test`. Una lista mantenida a mano es cierta el día que se
+ * escribe y se vuelve falsa sin que nadie la edite; ésta se pone roja. Si sacás
+ * una viñeta de acá, sacá su entrada de allá en el MISMO commit — y al revés.
+ * Lo que el guardián NO mide (valores, y una divergencia que conserve los
+ * símbolos) está escrito en su docblock; leelo antes de apoyarte en su verde.
  *
  *  · el precio y el destino salen del MISMO par que usa `resolveComposePriceHandler`
  *    (`resolveAgentPriceUsdc` + `resolveAgentDestination` + `deriveComposeDestination`),
@@ -1144,6 +1139,19 @@ async function debitResumedFirstStep(
   return { ok: true, debitedUsd: amountUsd };
 }
 
+/**
+ * WKH-225 — el mapeo del desenlace del claim a HTTP.
+ *
+ * Exemplar: `src/routes/agent-links.ts`, que ya traduce el mismo vocabulario
+ * (`LINK_NOT_FOUND` → 404, `LINK_EXPIRED` → 410, `LINK_ALREADY_USED` → 409,
+ * indisponible → 503) con bodies `{ error_code }` en snake.
+ *
+ * 🔴 AC-6: el body del `not_found` es BYTE-IDÉNTICO al de un run inexistente,
+ * porque son EL MISMO body — el service ya colapsó los dos casos en el mismo
+ * `reason`, y el service pudo hacerlo porque el RPC levanta el mismo literal.
+ * Los tres eslabones tienen que decir lo mismo o el más hablador anula a los
+ * otros dos.
+ */
 const RESUME_CLAIM_HTTP: Record<
   'not_found' | 'expired' | 'already_used' | 'unavailable',
   { status: number; code: string }
@@ -1711,22 +1719,22 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       const remaining = Array.isArray(run.remaining_steps)
         ? (run.remaining_steps as ResolvedComposeStep[])
         : [];
-      const stepsPrevios = Array.isArray(run.steps_json)
+      const priorSteps = Array.isArray(run.steps_json)
         ? (run.steps_json as StepResult[])
         : [];
-      const costoPrevio = Number(run.total_cost_usdc ?? 0);
-      const latenciaPrevia = Number(run.total_latency_ms ?? 0);
+      const priorCostUsd = Number(run.total_cost_usdc ?? 0);
+      const priorLatencyMs = Number(run.total_latency_ms ?? 0);
       // 🔴 FIX-PACK AR/BLQ-MED-1 — EL TECHO DEL CALLER SOBREVIVE A LA ESPERA.
       // Sin la columna, el tramo reanudado corría con `maxBudget` ausente y
       // `totalCost` en 0: el techo del caller Y el del operador valían una vez
       // por MITAD, o sea el doble para un run suspendido. `null` ⇒ el caller no
       // declaró ninguno, que es el caso normal.
-      const techoDelCaller =
+      const callerCeiling =
         run.max_budget_usdc === null ? undefined : Number(run.max_budget_usdc);
       // Fix-pack AR/BLQ-BAJO-1: llegan YA re-indexados contra `remaining_steps`
       // (los recortó `suspendIfEnvelope` con el mismo `slice`), así que el
       // índice 0 de acá es el precio del índice 0 de aquél.
-      const preciosCongelados = Array.isArray(run.frozen_step_prices)
+      const frozenPrices = Array.isArray(run.frozen_step_prices)
         ? (run.frozen_step_prices as number[])
         : undefined;
       // Fix-pack AR/MNR-8: el array PRESTADO para los motivos internos de skip.
@@ -1742,7 +1750,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         request,
         remaining[0],
         run.chain_id ?? undefined,
-        preciosCongelados?.[0],
+        frozenPrices?.[0],
       );
       if (!step0.ok && step0.reason === 'unresolvable') {
         // Pre-débito: NADA se tocó. `reopen` (y no `failed`) es exactamente el
@@ -1778,9 +1786,9 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
           ...(step0.capExceeded
             ? { errorCode: 'DEST_CAP_EXCEEDED' as const }
             : {}),
-          steps: stepsPrevios,
-          totalCostUsdc: costoPrevio,
-          totalLatencyMs: latenciaPrevia,
+          steps: priorSteps,
+          totalCostUsdc: priorCostUsd,
+          totalLatencyMs: priorLatencyMs,
           requestId: request.id,
         });
       }
@@ -1820,16 +1828,16 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         // techo que declaró el caller y lo que ese mismo run YA gastó contra él.
         // Con `maxBudget` ausente y `preSpentUsd` en 0 (lo de antes), el techo
         // del caller no existía y el del operador se reiniciaba.
-        ...(techoDelCaller === undefined ? {} : { maxBudget: techoDelCaller }),
-        preSpentUsd: costoPrevio,
+        ...(callerCeiling === undefined ? {} : { maxBudget: callerCeiling }),
+        preSpentUsd: priorCostUsd,
         contractingChain: Array.isArray(run.contracting_chain)
           ? (run.contracting_chain as string[])
           : [],
         contractingDepth: run.contracting_depth,
         selfHostHint: run.self_host_hint ?? request.hostname,
-        ...(preciosCongelados === undefined
+        ...(frozenPrices === undefined
           ? {}
-          : { frozenStepPricesUsd: preciosCongelados }),
+          : { frozenStepPricesUsd: frozenPrices }),
         ...(request.delegationContext === undefined
           ? {}
           : { delegationContext: request.delegationContext }),
@@ -1871,9 +1879,9 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       );
 
       // AC-8: el registro COMPLETO del pipeline, no sólo su cola.
-      const stepsCompletos = [...stepsPrevios, ...result.steps];
-      const totalCostUsdc = costoPrevio + result.totalCostUsdc;
-      const totalLatencyMs = latenciaPrevia + result.totalLatencyMs;
+      const allSteps = [...priorSteps, ...result.steps];
+      const totalCostUsdc = priorCostUsd + result.totalCostUsdc;
+      const totalLatencyMs = priorLatencyMs + result.totalLatencyMs;
 
       noteDownstreamSkips(request, result.steps, downstreamSkipCauses);
 
@@ -1890,7 +1898,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
         else if (result.errorCode === 'DEST_CAP_EXCEEDED') status = 402;
         return reply.status(status).send({
           ...result,
-          steps: stepsCompletos,
+          steps: allSteps,
           totalCostUsdc,
           totalLatencyMs,
           requestId: request.id,
@@ -1911,14 +1919,60 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
       //
       // Best-effort, igual que en `/compose`: un fallo del cobro deja
       // `protocolFeeStatus: 'unknown'` y NUNCA rompe la respuesta.
+      //
+      // 🔴 FIX-PACK CR/CR-2 — EL REPARTO Y EL RECIBO, QUE ESTE BLOQUE NO TENÍA.
+      //
+      // Este bloque era una copia SIMPLIFICADA del de `/compose`, y la
+      // simplificación se había comido dos cosas: el gate `splitsActive()` +
+      // `resolveAgentSplitContext(...)` que arma `creator`/`referral`, y el
+      // recibo `protocol_fee`. Sin el contexto, `fee-charge.ts` re-rutea el bps
+      // del creador y del referral a PLATAFORMA y deja filas `skipped` — lo dice
+      // su propio comentario, y no es una inferencia sobre código ajeno.
+      //
+      // ⚠️ LA DIMENSIÓN, MEDIDA, PORQUE CAMBIA CÓMO SE LEE ESTO. Con la config por
+      // defecto (`SPLIT_BPS_PLATFORM=10000`, CREATOR=0, REFERRAL=0) el gate
+      // `splitsActive()` es `false`, no hay query extra, `feeParams` sale con las
+      // mismas tres claves de antes y el resultado es BYTE-IDÉNTICO. O sea: hoy,
+      // en prod, esto NO cambia un centavo de sitio. La divergencia era LATENTE y
+      // se materializaba entera el día que alguien pusiera `SPLIT_BPS_CREATOR>0`
+      // — y ese día el síntoma (un creador que cobra por los runs normales y no
+      // por los reanudados) no lo iba a relacionar nadie con esta HU.
+      //
+      // Por eso el testigo (`T-RES-FEE-5`/`T-RES-FEE-6`) corre con una config
+      // NO-default: con la default pasaría igual estando roto, que es la
+      // definición de un test vacío.
+      //
+      // ⛔ LO QUE NO CAMBIA, y el AR ya aprobó (CD-18): el MONTO total
+      // (`feeBaseUsdc` sigue siendo el acumulado), el ORDEN del bloque, y la
+      // CLAVE de idempotencia (`compose_run_id`, nunca `request.id`).
       let protocolFeeStatus: 'charged' | 'not_charged' | 'unknown' = 'unknown';
       let protocolFeeUsdc: number | undefined;
       try {
-        const feeResult = await chargeProtocolFee({
+        // WKH-143 (DT-2/DT-5/CD-9/CD-1b), espejado de `/compose`: el creator del
+        // agente PRIMARIO, resuelto SOLO cuando `splitsActive()` (gate NO-throw).
+        //
+        // 🔴 `allSteps[0]`, NO `result.steps[0]`. El agente primario del run es el
+        // del PRIMER step del pipeline entero, y en una reanudación ese step ya
+        // corrió antes de la suspensión: vive en `priorSteps`, no en la cola.
+        // Usar `result.steps[0]` le pagaría el cut del creador al primer agente
+        // del TRAMO, que es otro agente. Misma razón por la que `feeBaseUsdc` es
+        // el total acumulado: el caller ejecutó UN pipeline, no dos.
+        let creator: SplitPartyRef | null = null;
+        let referral: SplitPartyRef | null = null;
+        if (splitsActive()) {
+          const splitCtx = await resolveAgentSplitContext(allSteps[0]?.agent);
+          creator = splitCtx.creator;
+          referral = splitCtx.referral;
+        }
+        // CD-8: asignación condicional (exactOptionalPropertyTypes).
+        const feeParams: FeeChargeParams = {
           orchestrationId: run.compose_run_id,
           feeBaseUsdc: totalCostUsdc,
           feeRate: getProtocolFeeRate(),
-        });
+        };
+        if (creator) feeParams.creator = creator;
+        if (referral) feeParams.referral = referral;
+        const feeResult = await chargeProtocolFee(feeParams);
         if (feeResult.status === 'failed') {
           // "No pude preguntar" ≠ "no pasó": la disposición es DESCONOCIDA y el
           // monto se omite.
@@ -1926,9 +1980,43 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
           log.error({ detail: feeResult.error }, 'resume fee charge failed');
         } else if (feeResult.status === 'skipped') {
           protocolFeeStatus = 'not_charged';
-        } else {
+        } else if (
+          feeResult.status === 'charged' ||
+          feeResult.status === 'already-charged'
+        ) {
           protocolFeeStatus = 'charged';
           protocolFeeUsdc = feeResult.feeUsdc;
+          // WKH-124: el recibo SOLO si `charged` de verdad (un `already-charged`
+          // ya emitió el suyo en la pasada que cobró). Fire-and-forget
+          // (CD-6/CD-7): su fallo o su latencia NUNCA afectan la respuesta.
+          if (feeResult.status === 'charged') {
+            receiptService
+              .emit({
+                ownerRef: keyRow.owner_ref,
+                agentKeyId: keyRow.id,
+                sessionId: null,
+                delegationId: null,
+                receiptType: 'protocol_fee',
+                amountUsd: feeResult.feeUsdc,
+                // ⚠️ LA ÚNICA DIVERGENCIA DELIBERADA con `/compose`, que usa
+                // `request.resolvedChainId ?? 0` a secas. Acá ese campo lo puebla
+                // `debitResumedFirstStep` y SÓLO si el débito se aplicó: un tramo
+                // cuyo primer step no se cobró (agente sin resolver, o `chain_id`
+                // nulo) dejaría el recibo en la cadena 0 teniendo la cadena real
+                // guardada en la fila. `run.chain_id` es esa cadena, y es la
+                // misma con la que se debitó la primera mitad.
+                chainId: request.resolvedChainId ?? run.chain_id ?? 0,
+                txHash: feeResult.txHash ?? null,
+                counterparty: process.env.WASIAI_PROTOCOL_FEE_WALLET ?? null,
+                orchestrationId: run.compose_run_id,
+              })
+              .catch((e) =>
+                log.warn(
+                  { detail: e instanceof Error ? e.message : e },
+                  '[receipts] emit failed',
+                ),
+              );
+          }
         }
       } catch (e) {
         log.error(
@@ -1939,7 +2027,7 @@ const composeRoutes: FastifyPluginAsync = async (fastify) => {
 
       return reply.send({
         ...result,
-        steps: stepsCompletos,
+        steps: allSteps,
         totalCostUsdc,
         totalLatencyMs,
         runId: run.id,

@@ -373,3 +373,129 @@ lector futuro podría "corregir" hacia atrás:
   justificaciones que se apoyaban en la ubicación vieja — no sólo los sitios que
   tocaste. Acá el `git diff` del fix-pack ni siquiera rozaba el párrafo falso:
   el fix lo volvió falso a distancia.
+
+---
+
+### [2026-08-23 13:25] Fix-pack CR (CR-1..CR-4 + OBS) — El espejo del fee se copió SIMPLIFICADO, y la simplificación no la declaró nadie
+
+- **Error**: el bloque de fee de `POST /compose/resume` era una copia recortada
+  del de `/compose` a la que le faltaban **dos** cosas: el gate `splitsActive()`
+  + `resolveAgentSplitContext(...)` que arma `creator`/`referral`, y el recibo
+  `protocol_fee`. Con splits configurados, un run reanudado le paga el **100 %
+  del fee a la plataforma** y deja filas `skipped`, mientras el mismo pipeline
+  sin suspensión lo reparte. Y el dueño de la key ve el débito sin recibo.
+- **Causa raíz**: **copiar un bloque del camino del dinero quedándome con las
+  ramas que el caso de prueba ejercitaba.** Los tres campos que yo estaba
+  mirando (`orchestrationId`, `feeBaseUsdc`, `feeRate`) eran los que CD-18 me
+  pedía razonar, y con la config por defecto —`10000/0/0`, que es la de prod—
+  las dos ramas que borré **no producen ninguna diferencia observable**: el gate
+  da `false`, no hay query extra, `feeParams` sale con las mismas tres claves.
+  O sea que el bloque recortado y el completo se comportan **igual** en todo lo
+  que yo podía correr. Eso es exactamente lo que hace que una copia
+  simplificada sobreviva a una revisión: no rompe nada **hoy**.
+  Peor: el comentario que dejé (*"Best-effort, igual que en `/compose`"*)
+  **invitaba a leer paridad donde no la había**, así que apagaba la próxima
+  lectura. Es la lección `prosa-que-afirma-de-mas` en el peor sitio posible.
+- **Fix**: el bloque espeja `/compose` completo — mismo gate, mismo helper,
+  mismo recibo — y **el monto, el orden y la clave de idempotencia
+  (`compose_run_id`) quedan byte-idénticos** (eso lo aprobó el AR, CD-18, y no
+  se reabrió). Un detalle que el espejo mecánico habría errado: el agente que se
+  le pasa a `resolveAgentSplitContext` es `allSteps[0]?.agent` —el primario del
+  RUN, que corrió **antes** de la suspensión— y no `result.steps[0]?.agent`, que
+  es el primero de la COLA y es otro agente; pasarle ése le pagaría el cut del
+  creador a quien no le corresponde. Misma razón por la que `feeBaseUsdc` es el
+  acumulado: el caller ejecutó UN pipeline, no dos.
+  **Los testigos corren con `SPLIT_BPS_CREATOR=3000`, config NO-default, y eso
+  es la mitad del arreglo**: con la default un test pasa igual con el bug puesto
+  y con el bug sacado. `T-RES-FEE-5b` fija la otra mitad (con la default el
+  reparto **ni se consulta**), que es a la vez el control de vacuidad del gate.
+  Cinco mutaciones, cinco rojos: sacar `feeParams.creator`; usar
+  `result.steps[0]` en vez de `allSteps[0]`; borrar el gate `splitsActive()`;
+  borrar el `receiptService.emit`; emitir el recibo también en
+  `already-charged`.
+- **Aplicar en**: **todo bloque que se copie de otro call-site del camino del
+  dinero.** La pregunta que lo caza no es "¿pasa la suite?" sino **"¿con qué
+  configuración se vuelve observable lo que borré?"** — y si la respuesta es
+  "con una que no es la de prod", entonces (a) el test tiene que correr con ESA
+  configuración, porque con la de prod es vacuo, y (b) hay que escribir la
+  dimensión, porque una divergencia latente que nadie nombra se materializa el
+  día que alguien cambia una env, y ese día **nadie va a relacionar el síntoma
+  con esta HU**. Corolario sobre la prosa: un comentario que dice *"igual que
+  en X"* es una afirmación falsable — o hay un control que la sostiene, o no se
+  escribe.
+
+### [2026-08-23 13:25] Fix-pack CR/CR-3 — Un inventario de cinco viñetas es un candado que se pudre solo
+
+- **Error**: `debitResumedFirstStep` espeja el step 0 de `/compose` a propósito
+  (el CR confirmó que separarlas es correcto), y lo ÚNICO que las ataba era una
+  lista de cinco viñetas en prosa dentro de su docblock. `grep` de
+  `debitResumedFirstStep|resolveComposePriceHandler` sobre los tests: **cero**.
+- **Causa raíz**: escribí el inventario creyendo que documentar la
+  correspondencia era protegerla. No lo es: la lista es cierta el día que se
+  escribe y **se vuelve falsa sin que nadie la edite**, en cuanto cambie
+  cualquiera de los dos lados. Este repo ya tenía la respuesta escrita
+  (`test/payment-guards-live-in-one-place.test.ts`) y no la busqué.
+- **Fix**: `test/wkh225-resume-step0-mirrors-compose.test.ts` convierte las cinco
+  viñetas en aserciones **sobre los dos lados**, con control de vacuidad por
+  criterio (el lado ORIGINAL también se exige presente: si el original pierde el
+  eslabón, el espejo quedaría "cumplido" contra la nada). El docblock de las
+  viñetas ahora apunta al guardián, y el guardián declara lo que **no** mide.
+  Diez mutaciones, diez rojos.
+  **Y una de las diez me corrigió el instrumento**: el patrón laxo
+  `/PLACEHOLDER_FEE_USD/` sobre el preHandler **sobrevivía** a sacar el fallback
+  del monto debitado, porque ese archivo nombra la constante una segunda vez
+  para el challenge x402. El patrón ahora apunta al MONTO
+  (`composeEstimatedCostUsd = PLACEHOLDER_FEE_USD`), no al nombre.
+- **Aplicar en**: (1) toda vez que un docblock enumere una correspondencia entre
+  dos sitios, **N viñetas son N aserciones sin escribir**; (2) un guardián de
+  presencia por NOMBRE es vacuo si el nombre aparece en el archivo por otro
+  motivo — el patrón tiene que apuntar al USO, y la única forma de saberlo es
+  correr la mutación, no leerlo.
+
+### [2026-08-23 13:25] Fix-pack CR/CR-1 — 13 líneas de docblock huérfanas por una inserción MÍA
+
+- **Error**: el JSDoc de `RESUME_CLAIM_HTTP` (con la explicación de AC-6, la
+  parte que importa) quedó a 166 líneas de lo que documenta, porque el fix-pack
+  del AR insertó `ResumeStep0Debit` + `debitResumedFirstStep` en el medio. Dos
+  JSDoc apilados: TypeScript ata el último, y esas 13 líneas no las leía nadie.
+- **Causa raíz**: `citas-rotas-por-tu-propia-edicion`, en su forma de
+  **desplazamiento**. No lo rompió lo que escribí: lo rompió lo que corrí.
+  Ningún barrido del diff lo caza, porque el diff de esas 13 líneas es CERO.
+- **Fix**: movido junto a su símbolo. El rename de CR-4 (8 identificadores en
+  castellano → inglés) se hizo en el mismo commit y es línea-neutro a propósito,
+  para no volver a mover nada.
+- **Aplicar en**: al insertar una función entre un docblock y su símbolo, mirar
+  **qué quedó arriba del punto de inserción**, no sólo qué se agregó. La señal
+  barata: dos `*/` seguidos de un `/**` sin código en el medio.
+
+### [2026-08-23 13:25] Fix-pack CR — Las dos OBSERVACIONES, resueltas o justificadas
+
+- **OBS-1 (la producción en 2,03× de SU presupuesto)** — **sin acción, y el
+  motivo es del propio CR**: el check 7 falló A FAVOR y midió por qué. El diff
+  entero está en 1,78× (bajo el umbral de 2×), el exceso se concentra en
+  `src/routes/compose.ts` y es casi entero `ResumeStep0Debit` +
+  `debitResumedFirstStep`, que **no existía en el SDD** — es el BLQ-ALTO-2 del
+  AR materializándose en código. Los tests están en 26,6 líneas por `it()`
+  contra 26,7 de la línea base del repo, y el 50 % de comentario es la mediana
+  medida de los archivos del money-path que la HU toca (`routes/compose.ts` ya
+  estaba en 50 % **antes**). ⛔ **No se recortó prosa por volumen**: lo único
+  que el CR marcó para borrar fueron las 13 líneas huérfanas (CR-1, movidas) y
+  las 6 de `asJsonColumn` (abajo). Recortar más sería tirar el material que
+  explica cinco BLOQUEANTEs reproducidos, que es lo que más caro sale perder.
+  Este fix-pack agrega, así que el ratio sube un poco más — y sube por un
+  candado ejecutable (CR-3) y por dos ramas de money-path que faltaban (CR-2),
+  no por prosa.
+- **OBS-2 (la aritmética del dato de escala del AR)** — **anotada, sin acción de
+  código**: el *"1030 líneas para 24 tests"* del `ar-report-it2.md` mezclaba
+  numerador BRUTO con denominador NETO. El CR ya lo midió y lo publicó
+  (`31` bruto/bruto, `37` neto/neto). No se edita el `ar-report-it2.md`: es el
+  registro de lo que el AR vio en su momento, y el CR es el sitio donde la
+  corrección queda. La lección para próximos reportes: **un ratio con numerador
+  y denominador de fuentes distintas no es un ratio**, y este salió 43 contra
+  un 31 real — un 39 % de inflación en un dato que se usó para decidir.
+- **`asJsonColumn` (`src/services/suspended-run.ts`)** — **resuelta**: de 9
+  líneas de docblock para un cuerpo de 1 a 4. Se fueron las que explicaban qué
+  hace `exactOptionalPropertyTypes` (conocimiento de TypeScript, no de este
+  repo); se quedó la DECISIÓN, que es la única parte que el próximo lector no
+  puede derivar: *cuando el pipeline no traía traza de contratación, lo que
+  queremos decir es que la columna es NULA*.

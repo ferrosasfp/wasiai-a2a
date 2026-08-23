@@ -99,6 +99,23 @@ vi.mock('../services/fee-charge.js', () => ({
 vi.mock('../services/suspended-run.js', () => ({
   suspendedRunService: { claim: vi.fn(), settle: vi.fn() },
 }));
+// Fix-pack CR/CR-2: el reparto del fee y el recibo. Los dos entran como dobles
+// porque acá se mide QUÉ le pasa el route a cada uno, no qué hacen ellos: la
+// resolución real del creator tiene su propia suite
+// (`src/services/agent-split-context.test.ts`) y el recibo la suya.
+//
+// ⚠️ `splitsActive()` NO se mockea: entra REAL desde `../config/split-config.js`
+// y lee `process.env`. Un doble del gate sería el gate comparándose consigo
+// mismo, y justo el gate es lo que decide si hay reparto o no.
+vi.mock('../services/agent-split-context.js', () => ({
+  resolveAgentSplitContext: vi.fn(async () => ({
+    creator: null,
+    referral: null,
+  })),
+}));
+vi.mock('../services/receipt.js', () => ({
+  receiptService: { emit: vi.fn(async () => undefined) },
+}));
 // El módulo real de supabase, para poder afirmar que NO se lo toca (AC-4).
 vi.mock('../lib/supabase.js', () => ({
   supabase: { from: vi.fn(), rpc: vi.fn() },
@@ -114,9 +131,11 @@ import {
   resolveAgentDestination,
   resolveAgentPriceUsdc,
 } from '../services/agent-price.js';
+import { resolveAgentSplitContext } from '../services/agent-split-context.js';
 import { budgetService } from '../services/budget.js';
 import { composeService } from '../services/compose.js';
 import { chargeProtocolFee } from '../services/fee-charge.js';
+import { receiptService } from '../services/receipt.js';
 import { suspendedRunService } from '../services/suspended-run.js';
 import composeRoutes from './compose.js';
 
@@ -130,6 +149,8 @@ const mockDebit = vi.mocked(budgetService.debit);
 const mockCredit = vi.mocked(budgetService.creditWithDest);
 const mockPrice = vi.mocked(resolveAgentPriceUsdc);
 const mockDest = vi.mocked(resolveAgentDestination);
+const mockSplitCtx = vi.mocked(resolveAgentSplitContext);
+const mockReceipt = vi.mocked(receiptService.emit);
 
 const OWNER = 'owner-a';
 const KEY_ID = 'key-1';
@@ -187,6 +208,12 @@ function okResult(over: Partial<ComposeResult> = {}): ComposeResult {
 
 let app: ReturnType<typeof Fastify>;
 let savedSecret: string | undefined;
+// Fix-pack CR/CR-2: `splitsActive()` entra REAL y lee estas dos del entorno. Se
+// guardan y se restauran por test, no por archivo: un test que deja
+// `SPLIT_BPS_CREATOR` puesto le cambia el resultado al siguiente y el ORDEN de
+// los casos pasa a decidir quién cobra el fee.
+const SPLIT_KEYS = ['SPLIT_BPS_PLATFORM', 'SPLIT_BPS_CREATOR'] as const;
+let savedSplits: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
   app = Fastify();
@@ -199,6 +226,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   savedSecret = process.env[RESUME_ENV_VAR];
   process.env[RESUME_ENV_VAR] = 'secreto-de-test';
+  savedSplits = {};
+  for (const k of SPLIT_KEYS) {
+    savedSplits[k] = process.env[k];
+    delete process.env[k];
+  }
+  mockSplitCtx.mockResolvedValue({ creator: null, referral: null });
+  mockReceipt.mockResolvedValue(undefined);
   nextKeyRow = { id: KEY_ID, owner_ref: OWNER };
   // El catálogo del step restante, para el débito del "step 0" del tramo.
   mockPrice.mockResolvedValue(2);
@@ -225,6 +259,11 @@ afterEach(() => {
   // entorno al siguiente archivo del mismo worker.
   if (savedSecret === undefined) delete process.env[RESUME_ENV_VAR];
   else process.env[RESUME_ENV_VAR] = savedSecret;
+  for (const k of SPLIT_KEYS) {
+    const v = savedSplits[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
 });
 
 function mint(over: { runId?: string; ttlSeconds?: number } = {}): string {
@@ -522,6 +561,105 @@ describe('CD-18 · el fee de protocolo', () => {
     const res2 = await resume(mint());
     expect(res2.statusCode).toBe(200);
     expect(res2.json().protocolFeeStatus).toBe('unknown');
+  });
+
+  // ── Fix-pack CR/CR-2 · el REPARTO y el RECIBO ─────────────────────────
+  //
+  // ⚠️ POR QUÉ ESTOS CUATRO CORREN CON UNA CONFIG NO-DEFAULT. Con la config
+  // por defecto (`10000/0/0`) el gate `splitsActive()` es `false`, el reparto no
+  // se consulta y `chargeProtocolFee` recibe EXACTAMENTE las tres claves de
+  // siempre: un test escrito con la default pasa igual con el bug puesto y con
+  // el bug sacado, o sea que no mide nada. La divergencia sólo es observable
+  // con `SPLIT_BPS_CREATOR > 0`, así que ahí es donde se la mide.
+
+  it('T-RES-FEE-5: con splits ACTIVOS, el fee del resume viaja CON creator y referral', async () => {
+    process.env.SPLIT_BPS_PLATFORM = '7000';
+    process.env.SPLIT_BPS_CREATOR = '3000';
+    mockSplitCtx.mockResolvedValue({
+      creator: { wallet: '0xCREADOR', ownerRef: 'owner-creador' },
+      referral: { wallet: '0xREFERIDO', ownerRef: 'owner-referido' },
+    });
+
+    await resume(mint());
+
+    const params = mockFee.mock.calls[0]?.[0];
+    // Sin estas dos claves, `fee-charge.ts` re-rutea el bps del creador y del
+    // referral a PLATAFORMA: un run reanudado le pagaría el 100 % del fee a la
+    // plataforma mientras el mismo pipeline sin suspensión lo reparte.
+    expect(params?.creator).toEqual({
+      wallet: '0xCREADOR',
+      ownerRef: 'owner-creador',
+    });
+    expect(params?.referral).toEqual({
+      wallet: '0xREFERIDO',
+      ownerRef: 'owner-referido',
+    });
+    // 🔴 Y el agente que se consulta es el PRIMARIO DEL RUN (`kyc`, el que
+    // corrió antes de la suspensión), NO el primero de la cola (`payout`).
+    // Pasarle `result.steps[0]` le pagaría el cut del creador a otro agente.
+    expect(mockSplitCtx).toHaveBeenCalledTimes(1);
+    expect(
+      (mockSplitCtx.mock.calls[0]?.[0] as { slug?: string } | undefined)?.slug,
+    ).toBe('kyc');
+  });
+
+  it('T-RES-FEE-5b: con la config por DEFECTO el reparto ni se consulta (el gate es real)', async () => {
+    // Control de la dimensión, y control de vacuidad del de arriba: si alguien
+    // borrara el gate `splitsActive()` y resolviera SIEMPRE, este se pone rojo.
+    // Y deja escrito, ejecutable, por qué el caso default no puede ser el
+    // testigo del reparto: acá `feeParams` tiene tres claves y ninguna es
+    // `creator`.
+    await resume(mint());
+
+    expect(mockSplitCtx).not.toHaveBeenCalled();
+    const params = mockFee.mock.calls[0]?.[0];
+    expect(Object.keys(params ?? {}).sort()).toEqual([
+      'feeBaseUsdc',
+      'feeRate',
+      'orchestrationId',
+    ]);
+  });
+
+  it('T-RES-FEE-6: un fee COBRADO emite el recibo `protocol_fee` del run', async () => {
+    mockFee.mockResolvedValue({
+      status: 'charged',
+      feeUsdc: 0.0325,
+      txHash: '0xFEE',
+    } as never);
+
+    await resume(mint());
+
+    expect(mockReceipt).toHaveBeenCalledTimes(1);
+    const rec = mockReceipt.mock.calls[0]?.[0];
+    expect(rec?.receiptType).toBe('protocol_fee');
+    expect(rec?.ownerRef).toBe(OWNER);
+    expect(rec?.agentKeyId).toBe(KEY_ID);
+    expect(rec?.amountUsd).toBeCloseTo(0.0325, 8);
+    expect(rec?.txHash).toBe('0xFEE');
+    // El recibo se correlaciona con la MISMA clave con la que se cobró: el id
+    // del run original. Con `request.id` el dueño de la key no podría cruzar el
+    // recibo con el cobro.
+    expect(rec?.orchestrationId).toBe(COMPOSE_RUN_ID);
+    // La cadena sale de la fila cuando el débito del tramo no la pobló.
+    expect(rec?.chainId).toBe(2368);
+  });
+
+  it('T-RES-FEE-6b: NO se emite recibo si el fee no se cobró en ESTA pasada', async () => {
+    // `already-charged` (el fee ya lo emitió la pasada que cobró), `skipped`
+    // (wallet sin configurar) y `failed` (disposición desconocida). Un recibo
+    // en cualquiera de los tres sería un comprobante de un pago que este
+    // request no hizo.
+    for (const st of [
+      { status: 'already-charged', feeUsdc: 0.0325 },
+      { status: 'skipped', feeUsdc: 0.0325, reason: 'WALLET_UNSET' },
+      { status: 'failed', error: 'x' },
+    ]) {
+      mockReceipt.mockClear();
+      mockFee.mockResolvedValue(st as never);
+      const res = await resume(mint());
+      expect(res.statusCode).toBe(200);
+      expect(mockReceipt).not.toHaveBeenCalled();
+    }
   });
 });
 

@@ -64,11 +64,8 @@ type JsonColumn =
 /**
  * `unknown` → columna JSONB, con `undefined` colapsado a `null`.
  *
- * El colapso es deliberado y no una conveniencia de tipos: con
- * `exactOptionalPropertyTypes`, mandar `undefined` en un campo del `Insert` no
- * es "no mandar el campo" —es mandarlo indefinido—, y lo que queremos decir
- * cuando el pipeline no traía traza de contratación es que la columna es NULA.
- * Son la misma fila; el que no lo son es el tipo.
+ * El colapso es la DECISIÓN, no una conveniencia de tipos: cuando el pipeline no
+ * traía traza de contratación, lo que queremos decir es que la columna es NULA.
  */
 function asJsonColumn(value: unknown): JsonColumn {
   return (value ?? null) as JsonColumn;
@@ -361,20 +358,20 @@ export const suspendedRunService = {
         return;
       }
 
-      const filas =
+      const rows =
         (data as unknown as Array<{
           id: string;
           compose_run_id: string;
           steps_json: unknown;
         }> | null) ?? [];
-      const fila = filas[0];
+      const row = rows[0];
       // 0 filas = la transición ya la aplicó otra pasada (o el dueño no es el
       // suyo, o el run nunca estuvo `suspended`). NO es un error y NO emite: es
       // justamente lo que hace que el residuo sea exactamente uno.
-      if (fila === undefined) return;
+      if (row === undefined) return;
 
-      const steps = Array.isArray(fila.steps_json)
-        ? (fila.steps_json as StepResult[])
+      const steps = Array.isArray(row.steps_json)
+        ? (row.steps_json as StepResult[])
         : [];
       const strandedSteps = collectStrandedSteps(steps);
       if (strandedSteps.length === 0) return;
@@ -382,7 +379,7 @@ export const suspendedRunService = {
       eventService
         .track(
           buildStrandedPaymentEvent({
-            composeRunId: fila.compose_run_id,
+            composeRunId: row.compose_run_id,
             strandedSteps,
             failedStepIndex: steps.length,
             error: 'suspended run expired without being resumed',
@@ -390,7 +387,7 @@ export const suspendedRunService = {
         )
         .catch((trackErr) =>
           log.error(
-            { err: trackErr, runId: fila.id },
+            { err: trackErr, runId: row.id },
             '[suspended-run.expire] a suspended run expired after a step had already been paid on-chain, and that could NOT be persisted as an event',
           ),
         );
