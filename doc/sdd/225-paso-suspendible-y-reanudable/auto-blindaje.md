@@ -105,3 +105,22 @@ No es una bitácora de progreso: sólo entra lo que se ROMPIÓ.
   moqueado**: `grep -rn "vi.mock('.*<modulo>'" src/` y mirar cuáles usan
   `importOriginal` y cuáles no. Y al leer la salida de `npm test`, mirar
   **`Test Files`**, no sólo `Tests`: una suite que no arranca no falla, desaparece.
+
+---
+
+### [2026-08-23 17:20] Cierre — lo que NO se rompió pero conviene que quede escrito
+
+Tres decisiones que se tomaron por MEDICIÓN y no por preferencia, y que un
+lector futuro podría "corregir" hacia atrás:
+
+1. **El `exp` del token NO corta el camino a la base.** Un token vencido igual
+   llega a `claim_suspended_run`. Cortar antes ahorraría una consulta y
+   perdería el ÚNICO momento en que la fila puede pasar a `expired` y dejar
+   constancia del pago varado. Testigo: `T-RES-4b`.
+2. **`requireA2AKey` y no `requirePaymentOrA2AKey` en el resume.** Medido en
+   `src/lib/step0-debit.ts`: sin `composeEstimatedCostUsd` inyectado, el monto
+   cae a `PLACEHOLDER_FEE_USD`. La cadena "igual que /compose menos el
+   preHandler de precio" le habría cobrado **un dólar a cada reanudación**.
+3. **La bandera NO gatea `POST /compose/resume`.** Apagarla tiene que dejar de
+   CREAR runs suspendidos, no dejar varados a los que ya gastaron plata del
+   caller.
