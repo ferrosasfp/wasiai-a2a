@@ -348,7 +348,7 @@ Real scripts from `package.json`:
 
 Without a real `SUPABASE_URL` the server still boots and answers `/health`, but anything touching catalog or budget fails: persistence is not optional.
 
-`.env.example` documents **186 variables** with their defaults (counted with `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`, and that same count is re-derived by `test/readme-numbers.test.ts` on every `npm test`), and the few that change money behavior are grouped together there.
+`.env.example` documents **189 variables** with their defaults (counted with `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`, and that same count is re-derived by `test/readme-numbers.test.ts` on every `npm test`), and the few that change money behavior are grouped together there.
 
 Two boot guards worth knowing before touching mainnet config:
 
@@ -375,12 +375,12 @@ State measured in this repo, not quoted from another document. Each number below
 
 | Metric | Value |
 |---|---|
-| Test files | **303 test files** in the root suite. Derived from the `include` of `vitest.config.ts` over the git index, and checked in both READMEs, by `test/readme-numbers.test.ts` |
+| Test files | **305 test files** in the root suite. Derived from the `include` of `vitest.config.ts` over the git index, and checked in both READMEs, by `test/readme-numbers.test.ts` |
 | Test cases | printed by `npm test`. Deliberately not written down here: it changes with every test added, and a test that pinned it would have to run the suite it is counting |
 | Coverage floor enforced by CI | statements **80%**, branches **70%**, functions **80%**, lines **80%** (`vitest.config.ts:26-31`). Below any of the four, `npm run test:coverage` exits non-zero and the `coverage` job fails |
 | Coverage measured | `npm run test:coverage` printed 87.49% statements, 79.64% branches, 92.48% functions and 89.02% lines on 2026-08-15 |
 | Typecheck | `tsc --noEmit` clean |
-| Lint | `npm run lint` (Biome) over **501 files**, which is the `src/**/*.ts` of `biome.json` |
+| Lint | `npm run lint` (Biome) over **503 files**, which is the `src/**/*.ts` of `biome.json` |
 | CI | the `ci` badge at the top is the live result of `.github/workflows/ci.yml`, and nothing in this table overrides it |
 
 Read the badge, not this table: if `ci` is red the workflow stopped at its first failing step, and every later step — the suite included — is reported as `skipped`, which is not the same as passed. The steps run in order (typecheck, lint, suite) with no `if: always()`, so a lint error alone is enough to leave the suite unrun on that commit.

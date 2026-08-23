@@ -2847,6 +2847,118 @@ export type Database = {
         };
         Relationships: [];
       };
+      /**
+       * WKH-225 — la tabla del run suspendido.
+       *
+       * ⚠️ VA AL FINAL DEL BLOQUE `Tables`, y no junto a `a2a_agent_links` como
+       * pedía la simetría. Es deliberado y se midió: `CLAUDE.md` cita una línea
+       * de ESTE archivo para señalar la columna de dueño de `registries`, y
+       * meter 95 líneas por encima la corre y pone el guardián de citas en rojo
+       * — con un diff en un archivo que esta HU no tiene por qué tocar.
+       * Insertar al final es LÍNEA-NEUTRO para todo lo de arriba.
+       *
+       * ⚠️ Y POR ESO ESTE COMENTARIO NO NOMBRA ESA COLUMNA. El oráculo de
+       * `test/ownership-filter-guard.test.ts` corta los bloques por su
+       * cabecera, así que TODO lo que quede entre el cierre de una tabla y la
+       * cabecera de la siguiente se le atribuye a la ANTERIOR. Escribir acá el
+       * nombre de la columna de dueño le inventaba una a `webhooks`, y el
+       * cruce de los dos lectores (G-11) se puso rojo por una línea de prosa.
+       */
+      a2a_suspended_runs: {
+        Row: {
+          caller_id: string;
+          caller_kind: string;
+          chain_id: number | null;
+          compose_run_id: string;
+          contracting_chain: Json | null;
+          contracting_depth: number;
+          created_at: string;
+          error_message: string | null;
+          expires_at: string;
+          frozen_prices_expires_at: string | null;
+          frozen_step_prices: Json | null;
+          id: string;
+          key_id: string;
+          last_output: Json | null;
+          owner_ref: string;
+          remaining_steps: Json;
+          resumed_at: string | null;
+          self_host_hint: string | null;
+          status: string;
+          step_index: number;
+          steps_json: Json;
+          token_hash: string;
+          total_cost_usdc: number;
+          total_latency_ms: number;
+          ttl_seconds: number;
+          updated_at: string;
+        };
+        Insert: {
+          caller_id: string;
+          caller_kind: string;
+          chain_id?: number | null;
+          compose_run_id: string;
+          contracting_chain?: Json | null;
+          contracting_depth?: number;
+          created_at?: string;
+          error_message?: string | null;
+          expires_at?: string;
+          frozen_prices_expires_at?: string | null;
+          frozen_step_prices?: Json | null;
+          id?: string;
+          key_id: string;
+          last_output?: Json | null;
+          owner_ref: string;
+          remaining_steps: Json;
+          resumed_at?: string | null;
+          self_host_hint?: string | null;
+          status?: string;
+          step_index: number;
+          steps_json: Json;
+          token_hash: string;
+          total_cost_usdc: number;
+          total_latency_ms: number;
+          ttl_seconds: number;
+          updated_at?: string;
+        };
+        Update: {
+          caller_id?: string;
+          caller_kind?: string;
+          chain_id?: number | null;
+          compose_run_id?: string;
+          contracting_chain?: Json | null;
+          contracting_depth?: number;
+          created_at?: string;
+          error_message?: string | null;
+          expires_at?: string;
+          frozen_prices_expires_at?: string | null;
+          frozen_step_prices?: Json | null;
+          id?: string;
+          key_id?: string;
+          last_output?: Json | null;
+          owner_ref?: string;
+          remaining_steps?: Json;
+          resumed_at?: string | null;
+          self_host_hint?: string | null;
+          status?: string;
+          step_index?: number;
+          steps_json?: Json;
+          token_hash?: string;
+          total_cost_usdc?: number;
+          total_latency_ms?: number;
+          ttl_seconds?: number;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'a2a_suspended_runs_key_id_fkey';
+            columns: ['key_id'];
+            isOneToOne: false;
+            referencedRelation: 'a2a_agent_keys';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
     };
     Views: {
       creator_pending_earnings: {
@@ -2983,6 +3095,53 @@ export type Database = {
           mint: string | null;
           attempts: number | null;
         }[];
+      };
+      /**
+       * WKH-225 — las 2 transiciones del run suspendido.
+       *
+       * 🔴 SIN ESTAS DOS DECLARACIONES `tsc` FALLA. `supabase.rpc()` está tipado
+       * `FnName extends keyof Schema['Functions']`, así que una RPC que existe en
+       * la base pero no acá no es "un tipo menos preciso": es un error de
+       * compilación en el call-site.
+       *
+       * `claim_suspended_run` toma DOS argumentos, a diferencia de
+       * `claim_agent_link` que toma uno: el resume lo hace el mismo dueño que
+       * suspendió, y el filtro por `owner_ref` vive DENTRO del claim para que un
+       * dueño ajeno reciba el mismo error que un run inexistente.
+       *
+       * `total_cost_usdc` viaja como `number` en el tipo generado y como `string`
+       * en runtime (convención NUMERIC de este archivo, WKH-196).
+       */
+      claim_suspended_run: {
+        Args: { p_token_hash: string; p_owner_ref: string };
+        Returns: {
+          id: string;
+          owner_ref: string;
+          key_id: string;
+          caller_kind: string;
+          caller_id: string;
+          compose_run_id: string;
+          step_index: number;
+          steps_json: Json;
+          last_output: Json | null;
+          remaining_steps: Json;
+          frozen_step_prices: Json | null;
+          total_cost_usdc: number;
+          total_latency_ms: number;
+          contracting_chain: Json | null;
+          contracting_depth: number;
+          self_host_hint: string | null;
+          chain_id: number | null;
+        }[];
+      };
+      settle_suspended_run: {
+        Args: {
+          p_id: string;
+          p_owner_ref: string;
+          p_outcome: string;
+          p_error: string | null;
+        };
+        Returns: undefined;
       };
       claim_agent_link: {
         Args: { p_token_hash: string };
