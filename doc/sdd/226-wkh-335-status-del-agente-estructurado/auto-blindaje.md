@@ -450,10 +450,10 @@ mapa no vea; en otro diff podría haberlas, y por eso el chequeo queda.
 eso la pregunta se contesta contra `main@N` **y** `HEAD@N`, las dos abiertas, y no contra un parecido.
 Hay **dos casos medidos en esta ronda donde el parecido habría mentido en las dos direcciones**:
 `compose.test.ts:106` y `compose.test.ts:17-23` estaban **rotas en `main`** y esta HU las volvió
-**correctas por accidente** (insertó exactamente las líneas que faltaban); y
-`prepare/route.test.ts:809 → route.ts:482-486` idem (+13 líneas la realinearon con el guard del
-`payoutId`, que en `main` vivía en `:469-473`). Las tres son falsos positivos, y las tres se ven como
-Clase 3 si uno mira sólo el mapa.
+**correctas por accidente** (insertó exactamente las líneas que faltaban). El tercero **NO fue
+accidente** (corregido en el fix-pack 4 · AR it3 · `MNR-1`): `prepare/route.test.ts:809` decía
+`route.ts:469-473` en `main` y **era CORRECTO** (ese rango es el guard fail-closed del `payoutId`), y el
+commit de Wave lo **re-ancló** a `:482-486`, que es el mismo guard hoy. Los tres son falsos positivos; sólo dos lo son por accidente.
 
 ### `wasiai-a2a` — la población, y su suma
 
@@ -558,11 +558,11 @@ próxima vez que se muevan. Si alguien las cuenta como falsos positivos, el repa
 README son `.md`, y el candado sólo escanea `.ts/.tsx` bajo `src|app|scripts|contracts`. Ahí se
 corrigió el número y queda declarado que nada las vigila.
 
-**Las 4 de Clase 2 de `chaski-v3`, medidas**: `docs/architecture.md:31` cita `prepare/route.ts:297`
-para `vm: "solana"`, que en `main` estaba en `:512` (hoy `:525`); `prepare/route.test.ts:497` afirma
-que `route.ts:63` *"es el cuerpo de `isRecord`"* y en `main` esa línea ya era un `import`; y los dos
+**Las Clase 2 de `chaski-v3`, medidas** — eran 4, el re-AR las dejó en **3**: `docs/architecture.md:31`
+cita `prepare/route.ts:297` para `vm: "solana"`, que en `main` estaba en `:512` (hoy `:525`); y los dos
 README citan `quote/route.ts:91-96` como el sitio que *"manda una `capability`"*, que en `main` era el
-`return` del 429 (el `capability` vive hoy en `:141`).
+`return` del 429 (el `capability` vive hoy en `:141`). ⛔ **CORREGIDO en el fix-pack 4 (AR it3 ·
+`BLQ-BAJO-1`)**: la cuarta, `prepare/route.test.ts:497`, **NO era "Clase 2 · NO tocada": SÍ la tocamos.**
 
 ### Verificación de que lo ANCLADO entra de verdad al candado (medido, no declarado)
 
@@ -628,17 +628,17 @@ citas, **todas siguen ciertas**:
 ### ⛔ QUÉ NO CUBRE ESTE BARRIDO — para que el próximo no lea el número como lista cerrada
 
 1. **Los tokens SUELTOS `:NNN` sin nombre de archivo.** La regex exige un nombre de archivo, así que
-   son invisibles. **No es teórico: 4 Clase 3 REALES salieron de ahí** (`prepare/route.ts` `:344`/`:347`
-   citados desde `flow-vm.ts:750` y `flow-vm.test.ts:2514`, los dos → `:345`/`:348`), y aparecieron
-   sólo porque estaban **al lado** de una cita que el filtro sí vio. Igual los `:627`/`:1785`/`:227`/
-   `:368-369`/`:370`/`:372` de `_INDEX.md`. **Un renglón con una cita rota suele tener otra al lado que
-   el instrumento no ve: al arreglar una, leer el renglón entero.**
+   son invisibles. **Cota MEDIDA (fix-pack 4 · AR it3 · `MNR-2`), que antes faltaba: 666 en `chaski-v3` y 7835 en `wasiai-a2a`** — `git ls-files` + patrón `` `:N` ``/`` `:N-M` ``; con el patrón sin rango da 592/4222, así que **la cota no significa nada sin el patrón escrito al lado**. Era el único de los 8 huecos declarado sin cota.
+   **No es teórico: 6 Clase 3 REALES salieron de ahí.** 4 en la ronda del fix-pack 3 (`prepare/route.ts` `:344`/`:347` citados desde `flow-vm.ts:750` y `flow-vm.test.ts:2514`, los dos → `:345`/`:348`; ídem los `:627`/`:1785`/`:227`/`:368-369`/`:370`/`:372` de `_INDEX.md`) y **2 más que este barrido dejó pasar dos veces**, que cazó el re-AR (`BLQ-MED-1`: `flow-vm.test.ts:3` y `:2060`, arregladas en el fix-pack 4).
+   **Y la adyacencia NO cierra el hueco, sólo lo acota**: las 4 primeras aparecieron porque estaban al lado de una cita que el filtro sí vio — y las 2 de `BLQ-MED-1` estaban exactamente en esa posición (una en la MISMA línea que una cita vista, la otra en la de al lado) y aun así no se leyeron.
+   **Un renglón con una cita rota suele tener otra al lado que el instrumento no ve: al arreglar una,
+   leer el renglón entero.** El hueco tiene HU propia: `ferrosasfp/wasiai-a2a#178` (referencia aportada por el encargo del fix-pack 4; sin red en esta corrida, no la contrasté contra la API de GitHub).
 2. **Las citas en prosa sin sintaxis** ("la línea de más abajo", "el guard de arriba"). Sin forma, sin
    barrido, sin cota superior conocida.
 3. **El estrato CONGELADO de `wasiai-a2a`: 1167 candidatas** en `doc/sdd/NNN-*/` y `doc/research/`.
    **Excluido POR REGLA y no clasificado** — son registros fechados de HUs pasadas (SDDs, AR/CR/QA
    reports, done-reports): re-anclarlos los volvería falsos *sobre el pasado*, ningún candado los mira,
-   y su tamaño (~22× el estrato vivo) probaría que la enorme mayoría es Clase 2 de otras HUs.
+   y —**EXPECTATIVA SIN MEDIR, no prueba** (fix-pack 4 · AR it3 · `MNR-3`)— se espera que la enorme mayoría sea Clase 2 de otras HUs: su tamaño (~22× el estrato vivo) hace la exclusión barata, pero **un tamaño no prueba una clase**; nadie clasificó esas 1167.
    `doc/sdd/_INDEX.md` **no** entra ahí: es el catálogo VIVO y se clasificó.
 4. **Las citas cuyo destino esta HU NO modificó** (13 846 + 954 tokens). No pueden ser Clase 3 por
    construcción, pero **sí** pueden ser Clase 2 y este barrido no dice absolutamente nada de ellas.
@@ -692,3 +692,83 @@ diff, y no ve los 8 conjuntos de la lista de acá abajo"**.
 el testigo que agregó el fix-pack anterior. Ninguno de los dos gates cambió de conteo por esta ronda
 —son 27 sustituciones de texto dentro de comentarios y prosa, cero código ejecutable—, y eso es
 exactamente lo que se espera de un fix-pack de citas.
+
+---
+
+## FIX-PACK 4 (2026-08-25) — cierre del re-AR it3
+
+**Alcance autorizado**: 3 arreglos de cita + 1 corrección de clasificación + 3 correcciones de prosa.
+**Todo intra-línea.** Verificado con `/usr/bin/git diff --numstat`: `add == del` en los 3 archivos
+tocados (`route.test.ts` 1/1, `flow-vm.test.ts` 2/2, `auto-blindaje.md` 14/14) ⇒ **cero desplazamiento**,
+ni en código ni en este documento. Que este `.md` también quede line-neutral **no es cortesía**: sus
+líneas están citadas por `ar-report-it3.md` (`:454-455`, `:561-565`, `:630-635`, `:641`, entre otras) y
+por `cr-report.md`; agregar un renglón en el medio las rompía a todas. Las entradas nuevas van al EOF.
+
+### [2026-08-25 · fix-pack 4] `BLQ-MED-1(b)` — apliqué el shift del archivo CITADOR a un token que apunta a OTRO archivo
+- **Error**: `chaski-v3/src/presentation/flow-vm.test.ts:2060` decía `` `:1224` ``. El referente es
+  `if (k !== "unverified") return k;` **de `flow-vm.ts`**, y `flow-vm.ts:1224` es el docblock de
+  `escrowOutcomeDisplay` — otra función, 21 líneas más abajo.
+- **Causa raíz**: un token suelto `` `:N` `` no dice a qué archivo apunta. Al re-anclar, tomé el shift
+  del archivo **donde vive el comentario** (`flow-vm.test.ts`, **+29**) en vez del shift del archivo
+  **citado** (`flow-vm.ts`, **+7**). El hermano de la línea inmediatamente anterior (`:2059`,
+  `` `flow-vm.ts:1206` `` → `` `:1213` ``) sí llevaba nombre de archivo y recibió el +7 correcto: dos
+  renglones consecutivos, dos shifts distintos, y el que se equivocó fue el que no nombraba su destino.
+- **Fix**: `` `:1224` `` → `` `:1203` ``. Verificado abriendo `flow-vm.ts:1203`: es exactamente
+  `if (k !== "unverified") return k;`, dentro de `escrowOutcome`, la función que la frase nombra.
+- **Aplicar en**: **antes de sumarle un shift a un token suelto, decidir a qué archivo apunta.** Si el
+  renglón mezcla tokens de dos archivos, cada uno lleva SU shift. Y si el destino tiene un símbolo
+  estable, anclarlo (`` (`símbolo`, `:N`) ``) para que `citas-ancladas.test.ts` lo vigile: hoy no lo ve
+  ningún candado, y por eso el verde de los dos gates no cubrió este defecto.
+
+### [2026-08-25 · fix-pack 4] `BLQ-MED-1(a)` — el token que se quedó sin su +29, en la nota que existe para eso
+- **Error**: `chaski-v3/src/presentation/flow-vm.test.ts:3` decía `` `:1873` ``. El referente
+  (`const TODOS: Record<EscrowOutcome, true> = {`) vive hoy en `:1902`.
+- **Causa raíz**: la línea 3 tiene **dos** tokens sueltos. Al hermano de la MISMA línea le apliqué el
+  +29 (`` `:1714` `` → `` `:1743` ``) y al otro no. El mismo referente `TODOS` fue re-anclado a `:1902`
+  en **otros tres** sitios de esta HU: no faltó el número, faltó terminar el renglón.
+- **Fix**: `` `:1873` `` → `` `:1902` ``. Verificado: `flow-vm.test.ts:1902` es la declaración de `TODOS`.
+- **Agravante que conviene no olvidar**: esa línea 3 **es** la nota anti-desplazamiento
+  (*"EN ESTA LÍNEA, no en una nueva … los citan otros dos tests sin ancla"*). El aviso quedó desplazado.
+- **Aplicar en**: la regla que este mismo documento declara (*"al arreglar una, leer el renglón
+  entero"*) **no se cumplió justamente donde estaba escrita**. Un renglón se cierra cuando se re-anclan
+  TODOS sus tokens, no cuando se re-ancla el que disparó la alarma.
+
+### [2026-08-25 · fix-pack 4] `BLQ-BAJO-1` — moví un token HISTÓRICO como si fuera un puntero, y lo clasifiqué "no tocado"
+- **Error**: `chaski-v3/app/api/payout/prepare/route.test.ts:497`. La frase es *"Acá **decía**
+  `route.ts:62`"* — el número es **contenido citado**, no un puntero. El commit de Wave (`b724068`) lo
+  movió a `` `route.ts:63` ``, volviendo **falsa** la mitad histórica de la oración (el texto original,
+  commit `8a6d85a`, era *"validado de TIPO en route.ts:62"*: `:63` nunca se dijo).
+- **Fix**: devuelto a `` `route.ts:62` ``.
+- **Y el defecto peor, el de clasificación**: la tabla de las "4 Clase 2 de `chaski-v3`" (`:561-565`)
+  declaraba esta línea como **"Clase 2 · NO tocada"**, y **sí se tocó** en esta rama. Una clasificación
+  que dice "no tocada" sobre algo que tocamos **es peor que el defecto que oculta**: hace que quien
+  audita confirme algo falso y cierre el barrido. Corregido en `:561-565` (las Clase 2 de `chaski-v3`
+  son **3**, no 4).
+- **Causa raíz**: el criterio correcto —**puntero se re-ancla, contenido citado se congela**— sí lo
+  apliqué en `wasiai-a2a` (`test/cited-lines-guard.test.ts:81`, y el patrón mixto de
+  `cited-lines-guard.citations.ts:260`: mover el puntero **y** conservar la historia). En `chaski-v3` lo
+  apliqué al revés. El criterio no viajó entre repos dentro de la misma HU.
+- **Aplicar en**: todo token precedido de un verbo en pasado (*"decía"*, *"era"*, *"la versión anterior
+  citaba"*) es **contenido**, no puntero: no se re-ancla. Y toda fila de una tabla de clasificación que
+  diga "no tocada" se contrasta contra `git log -L` del rango, no contra la memoria de lo que se editó.
+
+### [2026-08-25 · fix-pack 4] MENORes de prosa — `MNR-1`, `MNR-2`, `MNR-3`
+- **`MNR-1`** (`:451-456`): el tercer caso "contraintuitivo" tenía **veredicto correcto y mecanismo
+  falso**. `prepare/route.test.ts:809` decía `route.ts:469-473` en `main` y **era correcto** (verificado:
+  `8831729:…/route.ts:469-473` y `HEAD:…/route.ts:482-486` son byte por byte el mismo guard
+  fail-closed del `payoutId`); la Wave lo **re-ancló** deliberadamente. No hubo "correcta hoy por
+  accidente". **Un veredicto correcto sostenido por un mecanismo falso es un hallazgo, no un empate**:
+  la próxima vez que alguien reuse el mecanismo, decide mal.
+- **`MNR-2`** (`:630-635`): el hueco nº 1 era el único de los 8 **sin cota**, y es por donde salieron los
+  dos `BLQ-MED-1`. Cota medida acá: **666** en `chaski-v3` y **7835** en `wasiai-a2a`. Se escribió
+  **junto con el patrón** (`git ls-files` + `` `:N` ``/`` `:N-M` ``) porque el patrón sin rango da
+  **592/4222**: publicar el número solo habría creado la siguiente afirmación de instrumento sin
+  reproducir. Anotado además que ya tiene HU propia (`ferrosasfp/wasiai-a2a#178`) y declarado que **no
+  pude contrastarla contra la API** (sin red en esta corrida) — "no pude preguntar" no es "no existe".
+- **`MNR-3`** (`:641`): *"su tamaño (~22×) **probaría** que la enorme mayoría es Clase 2"*. Un tamaño no
+  prueba una clase. Reescrito como lo que es: **expectativa sin medir**; nadie clasificó esas 1167.
+
+### El reporte del re-AR estaba fuera del índice
+`ar-report-it3.md` estaba **untracked**. Este repo ya tuvo un gate verde falso por archivos fuera del
+índice y 7 familias de guards derivan de `git ls-files` ⇒ un `.md` sin stagear es invisible para todo
+barrido de citas, incluido el de este documento. Stageado con el resto en el mismo commit.
