@@ -165,7 +165,16 @@ por `cp` con `assert md5` — nunca con `git checkout --`, que borra lo que se e
   `paths:` ⇒ 1 rojo.
 - ⚠️ **PEDIDO AL FOUNDER, por escrito**: el piso de `DAILY_LIMIT` de §16 **sube de 1,46 a
   2,00 USD/día**. Con 2,00 quedan ~18 corridas de PR/día de margen sobre las 48 del reloj.
-  El presupuesto mensual (≥ 44 USDC / 30 días) no cambia: lo que cambia es el techo diario.
+- ⚠️ **Y el presupuesto mensual SÍ cambia** (AR-it2/MNR-4). Acá decía *«≥ 44 USDC / 30 días
+  no cambia: lo que cambia es el techo diario»*, y eso se contradecía con el renglón de
+  arriba en el mismo párrafo. Los dos números, derivados:
+  - **44 USDC cubre SÓLO el reloj**: 48 corridas/día × 0,0303 × 30 = **43,63**.
+  - **El techo real es 60 USDC/mes**: si el `DAILY_LIMIT` de 2,00 se consumiera entero
+    todos los días, 30 × 2,00 = **60,00**. Las 18 corridas de PR/día que el techo nuevo
+    habilita cuestan 18 × 0,0303 = 0,55/día = **16,4 USDC/mes** por encima del reloj.
+  - Fondear con 44 y usar las corridas de PR ⇒ la key se queda sin saldo antes de fin de
+    mes ⇒ `INSUFFICIENT_BUDGET` ⇒ 403 ⇒ fila 4 ⇒ **CONFIG/exit 3 cada 30 minutos**. La
+    sonda lo reporta bien (no dice "producción caída"), pero es ruido rojo permanente.
 
 ### [2026-08-25 20:22] Fix-pack — Un mutante que IMPRIME la credencial pasaba la suite
 
@@ -175,6 +184,16 @@ por `cp` con `assert md5` — nunca con `git checkout --`, que borra lo que se e
 - **Fix** (T-13): la env se lee en **un** solo lugar (`readCredential`), `cred.key` se usa
   en **un** solo lugar (el header del único POST), y lo que imprime la línea de clase no
   puede nombrar ninguno de los dos. **Medido**: el mutante del AR, reaplicado ⇒ **1 rojo**.
+- ⚠️ **HASTA DÓNDE LLEGA ESTO, corregido por AR-it2/MNR-2.** Acá se leía que *"la credencial
+  no puede llegar a stdout"*, y eso **afirma más de lo probado**. Lo probado es que no puede
+  llegar **DIRECTAMENTE**: T-13 es un testigo **estructural** que cuenta apariciones de los
+  dos literales `A2A_PROBE_KEY` y `cred.key` en el texto del script. Una fuga **lavada por
+  un alias** —`globalThis.__k = key` en `readCredential` y `${globalThis.__k}` en `emit`—
+  no nombra ninguno de los dos y **pasa en verde**: el AR lo midió, `47 passed (47)`.
+  La afirmación correcta es: *"la credencial no puede llegar a stdout por ninguna de las dos
+  vías nombradas"*. Cerrar la clase entera pide un test de **comportamiento** (correr `main()`
+  con una key sentinel y afirmar que no aparece en stdout+stderr), que es la HU aparte de
+  MNR-2 — ver la tabla de MENORes declarados.
 - **Aplicar en**: **todo `⛔ nunca …` de un docblock**. La regla del repo ya lo dice
   (CD-9); el modo de falla es que la frase se escribe con la conducta correcta y **el
   candado no existe**, así que la próxima edición que agregue "un dato más para debuggear"
@@ -194,6 +213,61 @@ por `cp` con `assert md5` — nunca con `git checkout --`, que borra lo que se e
   `SCRIPT_CODE`, **y recién entonces** la explicación escrita en el docblock.
 - **Aplicar en**: lo mismo que decía antes. La lección no falló por estar mal escrita:
   falló porque **no la releí al escribir el guardián siguiente, en la misma sesión**.
+
+### [2026-08-25 21:00] Fix-pack 2 — Apliqué mi propia lección a UNA fila de trece
+
+- **Error**: en el fix-pack anterior descubrí que *"la defensa en profundidad vuelve
+  equivalentes a los mutantes de la capa de arriba: si el test mira sólo el exit code, la
+  redundancia se pudre en silencio; hay que fijar la ATRIBUCIÓN"*. Lo escribí, y lo apliqué
+  **a la única fila donde lo descubrí** (2-bis, más la 0 que ya venía de T-7). El AR-it2
+  barrió las demás con 9 mutantes que **conservan `klass` y `exit` y sólo degradan el
+  mensaje**: **7 de 9 sobrevivían**. El más caro, E9:
+  ```
+  - 'DOWN: candidata a caída real — no hay campo estructurado que atribuya la causa'
+  + 'DOWN: producción está caída'
+  ```
+  ⇒ **`47 passed (47)`**. El número correcto por la razón equivocada — y en una sonda **la
+  razón ES el producto**: el mensaje es lo que se pega en el issue de GitHub (§9 del Story
+  File). Es el defecto de origen de esta HU, un nivel más arriba.
+- **Causa raíz**: la tabla T-5 asertaba `klass`, `exit` y `message.startsWith(klass + ':')`.
+  Las tres las satisface cualquier mensaje degradado que conserve el prefijo de clase. Y el
+  patrón de la lección es idéntico al de la entrada de las 20:24: **escribí el "Aplicar en"
+  y no lo apliqué al resto de la misma tabla, en la misma sesión.** Dos veces seguidas.
+- **Fix**: una cuarta columna en la tabla T-5 que ya existía — el **fragmento de atribución**
+  de cada fila, tomado del prefijo que `story-file.md:205-217` (§5) fija fila por fila, más
+  el dato interpolado que atribuye la causa (el status, el código, el campo, el slug), con
+  `expect(v.message).toContain(atribucion)`. 20 filas, 20 fragmentos.
+- **Y un candado sobre el candado**: una columna de `toContain` se degrada a nada con sólo
+  vaciar el fragmento (`toContain('')` es cierto para cualquier string, y `toContain('DOWN')`
+  ya lo garantiza el `startsWith`). Por eso el testigo nuevo también exige que cada fragmento
+  tenga ≥ 20 caracteres, **no** contenga el nombre de la clase, y **no aparezca en el mensaje
+  de ninguna otra fila** — si apareciera, no atribuiría nada.
+- **Medido, mutante por mutante** (arnés: copia previa a directorio propio, restauración por
+  `cp`, `md5` verificado después de cada uno; ⛔ nunca `git checkout --`; md5 final idéntico
+  al inicial). Baseline nuevo: **48 passed (48)**.
+
+  | Mutante | Fila | Antes | Ahora | Suite bajo el mutante |
+  |---|---|---|---|---|
+  | E8 | 0 | KILLED | **KILLED** | `2 failed \| 46 passed (48)` |
+  | E2 | 1 | 🔴 SURVIVED | **KILLED** | `2 failed \| 46 passed (48)` |
+  | E7 | 2 | 🔴 SURVIVED | **KILLED** | `2 failed \| 46 passed (48)` |
+  | E1 | 2-bis | KILLED | **KILLED** | `3 failed \| 45 passed (48)` |
+  | E3 | 3 | 🔴 SURVIVED | **KILLED** | `1 failed \| 47 passed (48)` |
+  | E4 | 4 | 🔴 SURVIVED | **KILLED** | `1 failed \| 47 passed (48)` |
+  | E9 | 9 | 🔴 SURVIVED | **KILLED** | `2 failed \| 46 passed (48)` |
+  | E6 | 10 | 🔴 SURVIVED | **KILLED** | `1 failed \| 47 passed (48)` |
+  | E5 | 12 | 🔴 SURVIVED | **KILLED** | `1 failed \| 47 passed (48)` |
+
+  **9 de 9 mueren, incluidos los 7 que sobrevivían.** Y dos meta-mutantes sobre el testigo
+  nuevo, para que no sea decorativo: vaciar el fragmento de la fila 9 a `''` ⇒ **1 rojo** (lo
+  caza el candado de vacuidad); borrar el `toContain` del bucle y reaplicar E9 ⇒
+  **`48 passed (48)`**, o sea que **esa línea es exactamente la que mata**, y no otra cosa
+  que ya estuviera ahí.
+- **Aplicar en**: **toda tabla parametrizada de un clasificador.** El exit code y la clase son
+  la mitad barata de verificar; la que se pudre sin ruido es el motivo. Y la lección de
+  proceso, que es la que falló dos veces: **cuando escribas un "Aplicar en", el primer lugar
+  donde aplicarlo son las otras filas del archivo que estás tocando, antes de cerrar la
+  sesión.**
 
 ---
 
@@ -217,7 +291,8 @@ primero que gana es que lo silencien — el riesgo #2 del propio SDD, materializ
 tocó, no se apagó y no se acotó. Queda escrito acá para que el merge no ocurra sin eso:
 
 - [ ] `A2A_PROBE_KEY` existe como **repo secret** (no environment secret)
-- [ ] presupuesto ≥ 44 USDC / 30 días
+- [ ] presupuesto **≥ 60 USDC / 30 días** — 44 cubre sólo el reloj (48 × 0,0303 × 30 =
+      43,63); el techo diario de 2,00 habilita 18 corridas de PR/día, y 30 × 2,00 = 60
 - [ ] `DAILY_LIMIT` ≥ **2,00 USD/día** (⚠️ el 1,46 de §16 quedó corto: ver la entrada del
       `pull_request` de arriba)
 - [ ] ⚠️ si la key se crea con `allowed_agent_slugs` o con tope por llamada, el 403
@@ -227,13 +302,15 @@ tocó, no se apagó y no se acotó. Queda escrito acá para que el merge no ocur
 
 ## Hallazgos MENORes declarados y NO tocados, con su razón
 
-Los tres son de los revisores, quedan abiertos a propósito y con dueño:
+Los cinco son de los revisores, quedan abiertos a propósito y con dueño:
 
 | ID | Qué | Por qué no entra |
 |---|---|---|
 | **CR/MNR-4** | `.replace('( ', '(')` en la fila 10 parchea un artefacto de formato del mensaje en vez de construirlo con las partes presentes | Es cosmético y no cambia ninguna clasificación ni ningún exit code. Tocarlo obliga a reescribir el armado del mensaje de la fila 10, que **sí** está cubierto por T-5, para ganar legibilidad y nada más. Deuda de estilo, declarada |
 | **AR/MNR-3** | `schemaSha256` cubre sólo el `inputSchema`: en un DRIFT del `outputSchema` la huella **no cambia**, y §6 promete que existe para contestar *"¿cambió el schema hoy?"* | Es un cambio de CONTRATO del log (§5 fija el formato de la línea final) y la respuesta correcta —dos huellas, o una sobre el card entero— la decide el Architect, no el fix-pack. ⚠️ Mientras tanto la huella contesta "no cambió" en el caso del `outputSchema`, que es una afirmación de más: **el mensaje de ese DRIFT sí dice cuál campo dejó de estar declarado**, así que la atribución no se pierde, sólo la huella no ayuda |
 | **AR/MNR-5** | Un `200` con cuerpo ilegible (HTML de un proxy) se clasifica DRIFT *"el catálogo ya no publica el inputSchema"* — una afirmación que no se midió | La dirección es segura (no es PASS ni DOWN) y el arreglo pide distinguir "no es JSON" de "es JSON sin el campo", o sea tocar `request()`, que hoy devuelve `null` a propósito para no filtrar cuerpos crudos (CD-8). Queda declarado: **el mensaje afirma de más en ese caso** |
+| **AR-it2/MNR-2** | T-13 es estructural: cuenta los literales `A2A_PROBE_KEY` y `cred.key` en el texto del script. Una fuga **lavada por un alias** (`globalThis.__k = key` en `readCredential`, impreso en `emit`) no nombra ninguno de los dos ⇒ **`47 passed (47)`** | El propio AR lo dice: **ningún test estructural sobre texto puede cazarlo**, porque el alias puede llamarse cualquier cosa. El que lo cierra es un test de **comportamiento** —correr `main()` con `A2A_PROBE_KEY` sentinel y `fetch` doblado, capturar stdout+stderr y afirmar que el sentinel no aparece—, que es una pieza nueva con su propio arnés de dobles, no una columna en una tabla. **Es una HU chica aparte, no un parche acá.** Mientras tanto la afirmación del docblock quedó acotada a lo probado (ver la entrada del 20:22): *"por ninguna de las dos vías nombradas"* |
+| **AR-it2/MNR-3** | `obs.selfTestFieldPresent = obs.selfTestField in input` mutado a `Boolean(input[obs.selfTestField])` ⇒ **`47 passed (47)`**: el testigo no distingue presencia de truthiness | **Inocuo hoy**: el único campo requerido del schema publicado es `amountUsd` y deriva a `25`, que es truthy, así que las dos variantes coinciden en todo input alcanzable. Se volvería visible sólo si el catálogo publicara un `minimum: 0` (el derivado sería `0` y el CONFIG diría "el campo no estaba" sobre un campo que sí estaba). **El código de HEAD es el correcto**; falta el testigo, que pide un fixture de schema nuevo. Declarado, con dueño |
 
 ---
 
@@ -245,17 +322,23 @@ comentario), y **derivado**, no copiado:
 | Archivo | Código antes | Código ahora | Presupuesto §15 |
 |---|---|---|---|
 | `scripts/probe-money-path.mjs` | 241 | **262** | 260 |
-| `test/probe-money-path.test.mjs` | 211 | **348** | 220 |
+| `test/probe-money-path.test.mjs` | 211 | **365** | 220 |
 | `.github/workflows/probe-money-path.yml` | 72 | **100** | 95 |
 | `package.json` + 2 README | 3 | 3 | 3 |
-| **Total** | 527 | **713** | 578 (techo 1156) |
+| **Total** | 527 | **730** | 578 (techo 1156) |
 
-**1,23x del presupuesto, bajo el techo.** El excedente es **+186 líneas y +137 son del
+**1,26x del presupuesto, bajo el techo.** El fix-pack 2 suma **+17 líneas, todas en el
+archivo de tests**: la columna de atribución de T-5 (20 fragmentos, uno por fila) y el
+candado que impide que esa columna se vacíe. Cero líneas de `src/`, de `scripts/` y del
+YAML — el código de HEAD ya era el correcto; lo que faltaba era el testigo.
+
+**1,23x era la medida antes del fix-pack 2, y decía:** El excedente es **+186 líneas y +137 son del
 archivo de tests**: 14 casos nuevos, y **cada uno existe porque un mutante lo pidió**. La
 pregunta que decide (*¿qué parte de esto seguiría existiendo si lo escribiera alguien que
 ya conoce esta librería?*) no aplica acá: nada de lo agregado es ceremonia de vitest ni de
 GitHub Actions. Son, uno por uno: los 7 estados de `/discover` que salían verdes, las dos
-grafías del 403, el campo de self-test ausente, la credencial que no puede imprimirse, el
+grafías del 403, el campo de self-test ausente, la credencial que no puede imprimirse
+**directamente** (el alias sigue abierto: MNR-2), el
 POST que no se reintenta, el `PROBE_AMOUNT_USD` no numérico, la captura de la línea de
 clase, el `paths:` del trigger y las dos consultas de `gh` que no pueden fallar en
 silencio. Del lado del script (+21) y del YAML (+28) el crecimiento es el cableado de esos

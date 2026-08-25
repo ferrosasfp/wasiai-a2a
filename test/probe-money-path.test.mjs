@@ -142,36 +142,72 @@ describe('WKH-364 · derivación del cuerpo desde el inputSchema (AC-1, CD-1)', 
 });
 
 describe('WKH-364 · la escalera de clasificación, fila por fila (AC-3)', () => {
+  /**
+   * La cuarta columna es la ATRIBUCIÓN, y existe por una razón medida: un mutante que
+   * conserva `klass` y `exit` y sólo degrada el mensaje pasaba la tabla entera en verde.
+   * El más caro convertía `DOWN: candidata a caída real — no hay campo estructurado que
+   * atribuya la causa` (fila 9) en `DOWN: producción está caída` — el número correcto por
+   * la razón equivocada, que es exactamente el falso rojo que esta HU existe para NO
+   * producir: el mensaje es lo que se pega en el issue. Cada fragmento sale del prefijo
+   * que `story-file.md:205-217` (§5) fija fila por fila, más el dato interpolado que
+   * atribuye la causa (el status, el código, el campo, el slug).
+   */
   const casos = [
-    ['fila 0 · sin credencial', { credentialPresent: false }, 'CONFIG', 3],
-    ['fila 0 · sin credencial en pull_request', { credentialPresent: false, githubEventName: 'pull_request' }, 'SKIP', 0],
-    ['fila 0-bis · PROBE_AMOUNT_USD no numérico es config, no contrato', { credentialPresent: true, amountInvalid: true }, 'CONFIG', 3],
-    ['fila 1 · /discover con error de red', { credentialPresent: true, discover: { networkError: 'ENOTFOUND' } }, 'DOWN', 2],
-    ['fila 1 · /discover 5xx', { credentialPresent: true, discover: { status: 503 } }, 'DOWN', 2],
-    ['fila 2 · /discover 404', { credentialPresent: true, discover: { status: 404 } }, 'DRIFT', 4],
-    ['fila 2 · 200 sin inputSchema', { credentialPresent: true, discover: { status: 200, inputSchema: null } }, 'DRIFT', 4],
-    ['fila 2-bis · /discover 403 del borde', { credentialPresent: true, discover: { status: 403 } }, 'DOWN', 2],
-    ['fila 2-bis · /discover 429 del borde', { credentialPresent: true, discover: { status: 429 } }, 'DOWN', 2],
-    ['fila 3 · campo requerido no derivable', { ...ok, derive: { reason: 'required-not-derivable', field: 'x', detail: 'string-libre-sin-enum' } }, 'DRIFT', 4],
-    ['fila 4 · 403 con error_code de credencial', { ...ok, compose: { status: 403, body: { error_code: 'DAILY_LIMIT' } } }, 'CONFIG', 3],
-    ['fila 5 · 402 (la key no fue aceptada)', { ...ok, compose: { status: 402, body: {} } }, 'CONFIG', 3],
-    ['fila 6 · INPUT_REJECTED es la sonda vieja', { ...ok, compose: { status: 400, body: { agentFailure: 'INPUT_REJECTED' } } }, 'DRIFT', 4],
-    ['fila 7 · AGENT_ERROR es el agente fallando', { ...ok, compose: { status: 400, body: { agentFailure: 'AGENT_ERROR' } } }, 'DOWN', 2],
-    ['fila 8 · el gateway rechazó el cuerpo', { ...ok, compose: { status: 400, body: { code: 'VALIDATION_ERROR' } } }, 'DRIFT', 4],
-    ['fila 9 · no-2xx sin campo que atribuya', { ...ok, compose: { status: 500, body: {} } }, 'DOWN', 2],
-    ['fila 9 · error de red en el pipeline', { ...ok, compose: { networkError: 'ECONNRESET' } }, 'DOWN', 2],
-    ['fila 10 · 200 con una cotización que no lo es', { ...ok, compose: { status: 200, body: {} }, quote: { ok: false, field: 'rate', reason: 'no es un número finito > 0' } }, 'DOWN', 2],
-    ['fila 11 · PASS', { ...ok, compose: { status: 200, body: {} }, quote: { ok: true } }, 'PASS', 0],
-    ['fila 12 · el default de la escalera NO es PASS', { ...ok }, 'DOWN', 2],
+    ['fila 0 · sin credencial', { credentialPresent: false }, 'CONFIG', 3, '(A2A_PROBE_KEY) — esto NO dice nada sobre producción'],
+    ['fila 0 · sin credencial en pull_request', { credentialPresent: false, githubEventName: 'pull_request' }, 'SKIP', 0, 'un pull_request DESDE UN FORK no recibe el secret del repo'],
+    ['fila 0-bis · PROBE_AMOUNT_USD no numérico es config, no contrato', { credentialPresent: true, amountInvalid: true }, 'CONFIG', 3, 'PROBE_AMOUNT_USD no es un número — es configuración de la sonda, no del catálogo'],
+    ['fila 1 · /discover con error de red', { credentialPresent: true, discover: { networkError: 'ENOTFOUND' } }, 'DOWN', 2, '/discover inalcanzable (ENOTFOUND)'],
+    ['fila 1 · /discover 5xx', { credentialPresent: true, discover: { status: 503 } }, 'DOWN', 2, '/discover inalcanzable (503)'],
+    ['fila 2 · /discover 404', { credentialPresent: true, discover: { status: 404 } }, 'DRIFT', 4, 'el catálogo ya no publica el inputSchema de remit-corridor-fx-solana'],
+    ['fila 2 · 200 sin inputSchema', { credentialPresent: true, discover: { status: 200, inputSchema: null } }, 'DRIFT', 4, 'el catálogo ya no publica el inputSchema de remit-corridor-fx-solana'],
+    ['fila 2-bis · /discover 403 del borde', { credentialPresent: true, discover: { status: 403 } }, 'DOWN', 2, '/discover no contestó 200 (403)'],
+    ['fila 2-bis · /discover 429 del borde', { credentialPresent: true, discover: { status: 429 } }, 'DOWN', 2, '/discover no contestó 200 (429)'],
+    ['fila 3 · campo requerido no derivable', { ...ok, derive: { reason: 'required-not-derivable', field: 'x', detail: 'string-libre-sin-enum' } }, 'DRIFT', 4, 'campo requerido no derivable: x (string-libre-sin-enum) — la sonda NO inventa valores'],
+    ['fila 4 · 403 con error_code de credencial', { ...ok, compose: { status: 403, body: { error_code: 'DAILY_LIMIT' } } }, 'CONFIG', 3, 'la credencial de la sonda (DAILY_LIMIT) — producción no está implicada'],
+    ['fila 5 · 402 (la key no fue aceptada)', { ...ok, compose: { status: 402, body: {} } }, 'CONFIG', 3, 'la credencial no fue aceptada (402)'],
+    ['fila 6 · INPUT_REJECTED es la sonda vieja', { ...ok, compose: { status: 400, body: { agentFailure: 'INPUT_REJECTED' } } }, 'DRIFT', 4, 'el agente rechazó el input DERIVADO del schema publicado'],
+    ['fila 7 · AGENT_ERROR es el agente fallando', { ...ok, compose: { status: 400, body: { agentFailure: 'AGENT_ERROR' } } }, 'DOWN', 2, 'el agente contestó un error que no es sobre el pedido'],
+    ['fila 8 · el gateway rechazó el cuerpo', { ...ok, compose: { status: 400, body: { code: 'VALIDATION_ERROR' } } }, 'DRIFT', 4, 'el gateway rechazó el cuerpo de la sonda (VALIDATION_ERROR)'],
+    ['fila 9 · no-2xx sin campo que atribuya', { ...ok, compose: { status: 500, body: {} } }, 'DOWN', 2, 'candidata a caída real — no hay campo estructurado que atribuya la causa'],
+    ['fila 9 · error de red en el pipeline', { ...ok, compose: { networkError: 'ECONNRESET' } }, 'DOWN', 2, 'candidata a caída real — no hay campo estructurado que atribuya la causa'],
+    ['fila 10 · 200 con una cotización que no lo es', { ...ok, compose: { status: 200, body: {} }, quote: { ok: false, field: 'rate', reason: 'no es un número finito > 0' } }, 'DOWN', 2, '200 con una cotización que no es una cotización (rate no es un número finito > 0)'],
+    ['fila 11 · PASS', { ...ok, compose: { status: 200, body: {} }, quote: { ok: true } }, 'PASS', 0, 'el camino del dinero cotiza'],
+    ['fila 12 · el default de la escalera NO es PASS', { ...ok }, 'DOWN', 2, 'la sonda no llegó a observar un 2xx de /compose con una cotización verificada'],
   ];
-  for (const [nombre, obs, klass, exit] of casos) {
-    it(`T-5: ${nombre} → ${klass} (exit ${exit})`, () => {
+  for (const [nombre, obs, klass, exit, atribucion] of casos) {
+    it(`T-5: ${nombre} → ${klass} (exit ${exit}) y ATRIBUYE la causa`, () => {
       const v = classify(obs);
       expect(v.klass).toBe(klass);
       expect(v.exit).toBe(exit);
       expect(v.message.startsWith(`${klass}:`)).toBe(true);
+      // Sin esta línea, `DOWN: producción está caída` en lugar de la fila 9 pasaba en verde.
+      expect(v.message).toContain(atribucion);
     });
   }
+
+  // Y el fragmento no puede degradarse a algo que se cumpla solo: `toContain('')` es
+  // cierto para cualquier string, y `toContain('DOWN')` lo garantiza el `startsWith` de
+  // arriba. Una columna vacua sería el mismo agujero con la forma de un testigo.
+  it('T-5: cada fila declara un fragmento de atribución que NO se cumple por sí solo', () => {
+    expect(casos.length).toBe(20);
+    for (const [nombre, , klass, , atribucion] of casos) {
+      expect(typeof atribucion, nombre).toBe('string');
+      expect(atribucion.trim().length, nombre).toBeGreaterThanOrEqual(20);
+      // No es el nombre de la clase ni el prefijo `KLASE: `, que ya están cubiertos.
+      expect(atribucion.includes(klass), nombre).toBe(false);
+      // Y DISTINGUE: el fragmento de una fila no puede aparecer en el mensaje de otra
+      // fila. Si apareciera, no atribuiría nada — sería un `toContain` que cualquier
+      // rama satisface, que es la misma vacuidad con otra forma.
+      const fila = nombre.split(' ·')[0];
+      for (const [otroNombre, otraObs] of casos) {
+        if (otroNombre.split(' ·')[0] === fila) continue;
+        expect(
+          classify(otraObs).message.includes(atribucion),
+          `${nombre} vs ${otroNombre}`,
+        ).toBe(false);
+      }
+    }
+  });
 
   it('T-5: SCOPE_DENIED es la credencial de la sonda, con CUALQUIERA de sus dos grafías', () => {
     // ⚠️ Este caso afirmaba lo contrario (exit 2) y candaba una misclasificación. Hay
