@@ -1044,6 +1044,48 @@ describe('compose route — AUDIT A1 step-0 refund on failure', () => {
     expect(mockCreditWithDest).not.toHaveBeenCalled();
   });
 
+  // WKH-335 (§9.3) — PRUEBA UNA SOLA COSA: que la ruta no DESCARTA el campo.
+  //
+  // ⛔ NO prueba que el service lo emita: en este archivo `composeService` es un
+  // `vi.mock` (arriba, en el bloque de mocks), así que el `agentFailure` de este
+  // `it` lo pone el doble. Que el service REAL lo emita lo prueba
+  // `src/services/compose.test.ts` (§9.1) y SÓLO ese archivo.
+  //
+  // El riesgo que sí cubre es real: un `schema.response` de Fastify strippea las
+  // claves que no declara. Hoy la ruta POST `/` no tiene ninguno y el body sale
+  // por `{ ...result, requestId }`; este `it` es el que se pone rojo si alguien
+  // le agrega uno.
+  it('T-335-ROUTE-SERIAL: el 400 serializa agentFailure y NO cambia el status (CD-18)', async () => {
+    nextKeyRow = undefined;
+    nextEstimatedCostUsd = undefined;
+    nextResolvedChainId = undefined;
+    mockCompose.mockResolvedValueOnce({
+      success: false,
+      output: null,
+      steps: [],
+      totalCostUsdc: 0,
+      totalLatencyMs: 0,
+      error: 'Step 0 failed: Agent corridor returned 400: Bad Request',
+      agentFailure: 'INPUT_REJECTED',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: { 'x-a2a-key': 'wasi_a2a_test' },
+      payload: { steps: [{ agent: 'kyc', input: {} }] },
+    });
+
+    // CD-18: el campo nuevo NO cambia ningún status HTTP — un fallo de pipeline
+    // sigue siendo 400.
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.agentFailure).toBe('INPUT_REJECTED');
+    // AC-4 / CD-3: aditivo — los campos de siempre siguen ahí, sin renombrar.
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('returned 400');
+  });
+
   it('T-A1-5: refund best-effort — credit falla → response NO cambia (sigue 400)', async () => {
     nextEstimatedCostUsd = 0.3;
     nextResolvedChainId = 2368;

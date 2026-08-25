@@ -290,7 +290,7 @@ export function resolveComposeAgentPoolLimit(): number {
  * Cuál es ese costo, con el input: registry con `maxLimit: 10` y 200 agentes
  * activos ⇒ el pool de esa fuente baja a 10 filas, el agente que quede afuera no
  * hidrata `payment.chain` y su leg downstream **se saltea o apunta al rail
- * equivocado**, en silencio (la disyunción entera, como en `compose.ts:125-126`;
+ * equivocado**, en silencio (la disyunción entera, como en `compose.ts:128-129`;
  * en el escenario que monta T-CLAMP-05 la rama que ocurre es la segunda: queda
  * el `chain:'avalanche'` hardcodeado de `getAgent`). Clase WKH-113 /
  * BLQ-BAJO-1. Queda como TD-318B-2.

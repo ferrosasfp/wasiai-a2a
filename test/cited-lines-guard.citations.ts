@@ -257,12 +257,13 @@ export const CITED_LINES: readonly CitedLine[] = [
     // `compose.ts:130`. Hay DOS `compose.ts` en el índice de git;
     // `src/routes/compose.ts:130` es `/**` y `src/services/compose.ts:130` es
     // prosa sobre el over-fetch. El guard anti-doble-débito vive en
-    // `src/services/compose.ts:571`. Es el caso que `E-WRONG_FILE` existe para
+    // `src/services/compose.ts:589` (era `:571` hasta WKH-335, que insertó un
+    // import y un helper por encima). Es el caso que `E-WRONG_FILE` existe para
     // explicar: buscar `i > 0` en `src/routes/compose.ts` da CERO.
     from: 'src/types/index.ts',
-    cite: 'src/services/compose.ts:571',
+    cite: 'src/services/compose.ts:589',
     target: 'src/services/compose.ts',
-    line: 571,
+    line: 589,
     mustContain: ['if (i > 0 &&', 'scopingKeyRow'],
     symbolPath: ['composeService', 'executePipeline'],
   },
@@ -310,9 +311,9 @@ export const CITED_LINES: readonly CitedLine[] = [
     // 0 para `i === 0`. Lo único falso era el número — que es exactamente el
     // modo de falla que hace que «abrir y comparar» confirme la mentira.
     from: 'src/services/compose.ts',
-    cite: ':571',
+    cite: ':589',
     target: 'src/services/compose.ts',
-    line: 571,
+    line: 589,
     mustContain: ['if (i > 0 &&', 'scopingKeyRow'],
     symbolPath: ['composeService', 'executePipeline'],
   },

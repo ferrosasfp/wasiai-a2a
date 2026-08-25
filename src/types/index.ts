@@ -686,6 +686,24 @@ export type DiscoverySourceFailure =
   | 'bad_payload'
   | 'unknown';
 
+/**
+ * WKH-335: la CLASE del fallo del agente INVOCADO por un step de `/compose`.
+ *
+ * ⚠️ El prefijo `agent` en el campo que la consume (`ComposeResult.agentFailure`)
+ * es imprescindible: en este archivo "failure" a secas ya significa "de una
+ * fuente de discovery" (`DiscoverySourceFailure`, acá arriba).
+ *
+ * Dos valores y no el status crudo: el número desnudo obliga a cada consumidor a
+ * re-implementar la clasificación, y cada uno la haría distinta. El status sigue
+ * disponible server-side dentro de `error` y en los logs, que es donde el
+ * operador lo necesita.
+ *
+ * `AGENT_ERROR` y no `AGENT_UNAVAILABLE`: un 401/403 del agente no es "no
+ * disponible", es "nos dijo que no por algo que no es el contenido del pedido".
+ * No afirma de quién es la culpa ni si el agente está vivo.
+ */
+export type AgentFailureKind = 'INPUT_REJECTED' | 'AGENT_ERROR';
+
 export interface DiscoverySource {
   name: string;
   state: DiscoverySourceState;
@@ -1235,6 +1253,49 @@ export interface ComposeResult {
     /** Clave origen leída de la salida del step anterior. */
     source?: string;
   };
+  /**
+   * WKH-335 (AC-1/AC-2): responde UNA pregunta — *"¿el agente invocado leyó el
+   * pedido y rechazó su CONTENIDO?"* — para que un consumidor no tenga que
+   * parsear el texto de `error` para saber si reintentar con el MISMO input
+   * puede cambiar algo.
+   *
+   * NO es `errorCode`, y no son intercambiables: `errorCode` enumera motivos por
+   * los que el **gateway mismo** rechaza el pipeline (scope, cap de destino,
+   * bucle de contratación); `agentFailure` describe qué contestó el **agente
+   * invocado**. Dos preguntas, dominios distintos. Un pipeline puede traer los
+   * dos, uno, o ninguno.
+   *
+   * Clasificación (allow-list, la fuente es `lib/agent-http-error.ts`):
+   *
+   * | status del agente | valor |
+   * |---|---|
+   * | 400, 422 | `'INPUT_REJECTED'` |
+   * | cualquier otro no-2xx (401, 402, 403, 404, 408, 429, 5xx…) | `'AGENT_ERROR'` |
+   * | no hubo status HTTP | AUSENTE |
+   *
+   * **Invariante de ausencia**: `agentFailure` presente ⇒ el agente invocado
+   * contestó con un status HTTP no-2xx **en el intento que decidió el
+   * desenlace**. ⛔ El recíproco NO vale, por eso es `⇒` y no `⟺`: un
+   * `422 → regen → ECONNRESET` tuvo un no-2xx del agente y aun así deja el
+   * campo AUSENTE. Ausente (red, DNS, timeout, SSRF, bucle de contratación,
+   * fallo de mapeo de input, o un retry que reemplazó el veredicto del primer
+   * intento) significa *"no sé qué contestó el agente en el intento que
+   * decidió"*, que es DISTINTO de `'AGENT_ERROR'` (*"contestó, y no fue sobre
+   * tu pedido"*). La clave se OMITE; nunca vale `undefined` explícito.
+   *
+   * En el camino con reintento adaptativo refleja el desenlace del **retry**, no
+   * el del primer intento: el input fue regenerado en el medio, así que el
+   * veredicto del primer intento ya no describe lo que se mandó la segunda vez.
+   *
+   * ⛔ No unificar esta clasificación con la compuerta de `parseFieldErrors`
+   * (`lib/field-error-parser.ts`): divergen a propósito. Ver el docblock de
+   * `lib/agent-http-error.ts`.
+   *
+   * Plano y sin `step` a propósito: `/compose` aborta en el PRIMER step que falla
+   * y los dos `return` de error devuelven sólo los steps COMPLETADOS ⇒ el índice
+   * del que falló es exactamente `steps.length`.
+   */
+  agentFailure?: AgentFailureKind;
   /** WKH-114: completitud a nivel pipeline (AC-5), DISTINTA de success. */
   verificationStatus?: PipelineVerificationStatus;
   /**
@@ -1447,7 +1508,7 @@ export interface OrchestrateRequest {
    * chainId resuelto (request.resolvedChainId), propagado a compose para que el
    * débito per-step de steps 1..N funcione. WKH-102 (DT-1): se propaga SIEMPRE
    * (master y delegación, single-chain semantics — modelo WKH-59), no solo bajo
-   * delegación. El guard `i>0` de src/services/compose.ts:571 protege el step 0 contra
+   * delegación. El guard `i>0` de src/services/compose.ts:589 protege el step 0 contra
    * double-charge (CD-1, intacto).
    */
   chainId?: number | undefined;

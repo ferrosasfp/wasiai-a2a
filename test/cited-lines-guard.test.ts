@@ -124,7 +124,7 @@
  *  3. EL VALOR SEMÁNTICO DE LA AFIRMACIÓN. Se verifica que la línea citada diga
  *     lo declarado; NO que la prosa alrededor sea verdadera. Un comentario con
  *     el número BIEN y la conclusión FALSA pasa en verde. Peor: es el modo de
- *     falla dominante — en el caso medido de `src/services/compose.ts:688` la
+ *     falla dominante — en el caso medido de `src/services/compose.ts:706` la
  *     afirmación de fondo era correcta y lo único falso era el número, que es
  *     justo lo que hace que «abrir y comparar» confirme la mentira.
  *  4. EL 94 % RESTANTE DE `src`+`test` (704 de 749 anclas medidas) y el 99,8 %
@@ -165,21 +165,21 @@
  *     frágil que este guardián existe para no volver a guardar.
  * 14. 🎯 LOS 4 ARCHIVOS DE ESTE GUARDIÁN. No están en `CORTE_A_PATHS`, y son los
  *     citadores más densos que este commit agregó al repo: medido con
- *     `scanSource` sobre ellos mismos, **260 tokens** (`test` 76 · `citations`
- *     100 · `exceptions` 46 · `scanner` 38) contra 57 en TODO el Corte A. O sea
+ *     `scanSource` sobre ellos mismos, **261 tokens** (`test` 76 · `citations`
+ *     101 · `exceptions` 46 · `scanner` 38) contra 57 en TODO el Corte A. O sea
  *     que el guardián más que cuadruplicó la población de citas del repo en
- *     archivos que él mismo no mira. (Foto del 2026-08-19, RE-DERIVADA tres
+ *     archivos que él mismo no mira. (Foto del 2026-08-25, RE-DERIVADA cuatro
  *     veces —243 antes del fix-pack del re-AR, 247 después, 260 después del
- *     fix-pack de prosa del CR— corriendo `scanSource` sobre los cuatro paths.
+ *     fix-pack de prosa del CR, 261 tras el fix-pack 3 de WKH-335— con `scanSource`.
  *     Que este número se mueva cada vez que alguien escribe una línea de prosa
- *     acá es exactamente lo que el ítem denuncia, y las tres fotos lo prueban.)
+ *     acá es exactamente lo que el ítem denuncia, y las cuatro fotos lo prueban.)
  *     **Se decidió declararlo y NO incluirlos, y la razón es medida, no de
- *     esfuerzo** — el desglose de los 260:
+ *     esfuerzo** — el desglose de los 261:
  *       · **89** son literalmente el valor del campo `cite` de una entrada de
  *         `CITED_LINES`. Ésos YA tienen testigo, y mejor que el de acá: `G-C5`
  *         verifica esa misma cita contra el archivo apuntado y `G-C7` se pone
  *         rojo si el token desaparece de su citador.
- *       · **101** son `:N` sueltos (P3/P4) sin archivo: números de línea citados
+ *       · **102** son `:N` sueltos (P3/P4) sin archivo: números de línea citados
  *         dentro de la prosa que explica el algoritmo.
  *       · **29** nombran archivos que el ÍNDICE DE GIT no tiene, y son TRES
  *         grupos, no dos. (Re-derivado el 2026-08-19 — la versión anterior
@@ -708,7 +708,7 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // 🔴 EL PISO POR FORMA NO ES DECORACIÓN. Sin él, romper el regex de P4 sólo
     // bajaría el total y el guardián seguiría verde — y adentro de P4 está la
     // cita falsa del guard anti-doble-débito del camino del dinero
-    // (`src/services/compose.ts:688`), que es invisible a las otras tres formas
+    // (`src/services/compose.ts:706`), que es invisible a las otras tres formas
     // porque se escribe `:208`, sin backticks. Ése es exactamente el modo de
     // falla que dejó pasar el barrido anterior.
     expect(TRACKED.length).toBeGreaterThan(500);
