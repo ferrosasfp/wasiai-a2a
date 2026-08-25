@@ -51,7 +51,7 @@ export class AgentHttpError extends Error {
  *
  * | status | kind | por qué |
  * |---|---|---|
- * | 400 | `INPUT_REJECTED` | medido en producción el 2026-08-04 contra `/api/a2a/quote` de Chaski, transcripto de su docblock: `POST {"amountUsd":2} -> 400 fx_amount_below_minimum` y `POST {"amountUsd":50000} -> 400 fx_amount_above_maximum`. Monto fuera del rango del corredor: lo corrige quien llama. ⚠️ Transcripto A PROPÓSITO en vez de citar `archivo:línea` del otro repo: es una cita cross-repo y NINGÚN guard de ninguno de los dos puede verificarla nunca (vive en `chaski-v3/src/application/agent-rejections.ts`, docblock de cabecera). |
+ * | 400 | `INPUT_REJECTED` | medido en producción el 2026-08-04 contra `/api/a2a/quote` de Chaski. Son DOS hechos de DOS capas y fusionarlos borra el defecto que esta HU cierra: **el agente** contestó `400 fx_amount_below_minimum` y `400 fx_amount_above_maximum`, y **la ruta que lo llamaba** devolvió `502 a2a_upstream_error` para los dos POST (`{"amountUsd":2}` y `{"amountUsd":50000}`). El `400` de la primera columna es el DEL AGENTE. Monto fuera del rango del corredor: lo corrige quien llama. ⚠️ Escrito acá y no como cita `archivo:línea` del otro repo A PROPÓSITO: es cross-repo y NINGÚN guard de ninguno de los dos puede verificarla nunca (la medición vive en el docblock de cabecera de `chaski-v3/src/application/agent-rejections.ts`). |
  * | 422 | `INPUT_REJECTED` | forma Zod; es la que ya usa toda la máquina de reintento adaptativo |
  * | 401, 403 | `AGENT_ERROR` | credencial NUESTRA, no el pedido de quien llama |
  * | 402 | `AGENT_ERROR` | saldo NUESTRO |

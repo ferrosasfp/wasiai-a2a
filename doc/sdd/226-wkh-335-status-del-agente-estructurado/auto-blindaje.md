@@ -401,3 +401,12 @@ trabajo de `nexus-docs` en el cierre, no del fix-pack.
 `HEAD` y **las 8 YA ESTABAN ROTAS ANTES** de esta HU (*"candados que se pudren solos"*). No es deuda
 de la HU y **no se barre acá**: barrerla mezclaría en el mismo commit un arreglo de deuda ajena con
 el fix-pack, y haría irrevisable a los dos.
+
+🔴 **CORRECCIÓN (fix-pack 2 · re-AR `BLQ-BAJO-3`): la conclusión no se sostuvo, y el defecto es de
+método.** Lo medido fue *"las 8 inspeccionadas ya estaban rotas"*; lo escrito fue *"las 17 ya estaban
+rotas"*. Eso es una generalización desde una muestra, y la muestra no la autorizaba. El re-AR midió
+las que faltaban y encontró contraejemplos: `test/cited-lines-guard.test.ts:127` y `:711` citaban
+`src/services/compose.ts:688`, que en `4000a8f` era la línea que las dos describen y en este árbol ya
+no lo es (vive en `:706`). Eran deuda de esta HU, y el fix-pack 2 las re-ancla.
+**La regla que queda**: una muestra sostiene una afirmación sobre la muestra. Para afirmar sobre el
+conjunto hay que medir el conjunto — o escribir en la frase el alcance de lo que se midió.
