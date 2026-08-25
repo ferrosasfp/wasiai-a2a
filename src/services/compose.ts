@@ -8,6 +8,9 @@ import { randomUUID } from 'node:crypto';
 // de candidatos por capacidad. Dos lectores distintos = el selector elige agentes
 // que el ejecutor después rechaza con 403. Ver lib/agent-category.ts.
 import { readAgentCategory } from '../lib/agent-category.js';
+// WKH-335: el status HTTP del agente invocado, clasificado. Módulo LEAF por el
+// mismo motivo que los de acá abajo.
+import { AgentHttpError } from '../lib/agent-http-error.js';
 import { hashCallerRef } from '../lib/caller-hash.js';
 // WKH-305: el resolvedor de `inputFromPrevious` vive en un módulo LEAF (cero
 // imports de runtime) por el mismo motivo que `downstream-skip-code.js`: media
@@ -155,6 +158,21 @@ function withheldResult(
       txHash: withholding.txHash,
     },
   };
+}
+
+/**
+ * WKH-335: traduce el error de un step al campo `agentFailure` de `ComposeResult`.
+ *
+ * Un solo lugar donde se arma, por el mismo motivo que `withheldResult`: los dos
+ * `return` de error del catch (el directo y el del retry) no pueden divergir.
+ *
+ * CD-10 — la AUSENCIA es un valor con significado: cuando el error NO trae un
+ * status HTTP del agente (red, DNS, timeout, SSRF, bucle de contratación, fallo
+ * de mapeo) devuelve `{}`, o sea la clave NO EXISTE. Nunca
+ * `{ agentFailure: undefined }`, que la tiene y serializa distinto.
+ */
+function agentFailureResult(err: unknown): Pick<ComposeResult, 'agentFailure'> {
+  return err instanceof AgentHttpError ? { agentFailure: err.kind } : {};
 }
 
 function createDiscoverCache(): DiscoverCache {
@@ -685,7 +703,7 @@ export const composeService = {
             // `settle_signature` base58 de una transferencia real: la
             // reconciliación cruza ambos. `stepDebitedUsd` es el DÉBITO DEL CALLER
             // y vale 0 para `i === 0` (lo debita el middleware vía
-            // composeEstimatedCostUsd, guard `i > 0` de :571) ⇒ un compose de UN
+            // composeEstimatedCostUsd, guard `i > 0` de :589) ⇒ un compose de UN
             // step con agente Solana emitía `amount_usd = 0` junto a una firma
             // real. Además incluye el gas overhead del gateway, que nunca se le
             // paga al agente.
@@ -1156,6 +1174,14 @@ export const composeService = {
                   // haber aterrizado), y el segundo sólo aplica si el primero no
                   // retuvo nada.
                   ...withheldResult(settleWithholding ?? retryWithholding, i),
+                  // WKH-335 (AC-2): el desenlace del RETRY, no el del primer
+                  // intento — `retryErr`, la variable de ESTE catch. Entre los
+                  // dos intentos el input fue REGENERADO por un LLM, así que el
+                  // veredicto del primero ya no describe lo que se mandó la
+                  // segunda vez. Consecuencia declarada: `422 → regen →
+                  // ECONNRESET` deja el campo AUSENTE, y eso es correcto —
+                  // ausente = "no sé qué contestó el agente".
+                  ...agentFailureResult(retryErr),
                 };
               }
             }
@@ -1187,6 +1213,11 @@ export const composeService = {
           // Justamente ahí es donde importa: el débito del step 0 lo reembolsa
           // `services/orchestrate.ts`, que sin esta señal lo devolvía igual.
           ...withheldResult(settleWithholding, i),
+          // WKH-335 (AC-1): camino DIRECTO — `err`, la variable del catch de
+          // este bloque. Es un `return` DISTINTO del de arriba y no comparten
+          // nada: cablear uno solo dejaría la mitad de los fallos igual de
+          // opacos (CD-6).
+          ...agentFailureResult(err),
         };
       }
     }
@@ -1753,9 +1784,12 @@ export const composeService = {
       } catch {
         /* body ilegible — degradar al status solo */
       }
-      throw new Error(
-        `Agent ${agent.slug} returned ${response.status}${detail ? `: ${detail}` : ''}`,
-      );
+      // WKH-335: subclase con el `status` tipado. El `message` que arma es
+      // BYTE-IDÉNTICO al `new Error(...)` que había acá (CD-9) — misma
+      // interpolación, mismo `: ` condicional — para no mover `parseFieldErrors`
+      // ni ningún assert existente sobre `result.error`. `detail` se sigue
+      // calculando igual, arriba.
+      throw new AgentHttpError(agent.slug, response.status, detail);
     }
     const data = (await response.json()) as Record<string, unknown>;
     // ── WKH-360 (AC-11): el sobre del fee se lee del `data` CRUDO ────────────

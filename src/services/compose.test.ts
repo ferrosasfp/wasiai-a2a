@@ -4,7 +4,12 @@
  */
 import crypto from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { A2AAgentKeyRow, Agent, RegistryConfig } from '../types/index.js';
+import type {
+  A2AAgentKeyRow,
+  Agent,
+  ComposeResult,
+  RegistryConfig,
+} from '../types/index.js';
 
 // compose.ts logs server-side via getLogger('compose'). Mock it so tests can
 // assert structured log emission (and the no-secret-leak invariant) without
@@ -3081,6 +3086,159 @@ describe('composeService.compose — WKH-130 adaptive input-retry', () => {
 
     expect(result.success).toBe(false);
     expect(mockRegen).not.toHaveBeenCalled();
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // WKH-335 (§9.1) — LOS TESTS QUE CERTIFICAN.
+  //
+  // El sujeto bajo prueba es `composeService.compose()` REAL: el clasificador,
+  // el `throw` y los dos `return` corren de verdad. El único doble es el AGENTE
+  // INVOCADO (`mockFetch`), que es el tercero cuyo comportamiento estamos
+  // reaccionando. Ningún test de `chaski-v3` certifica esto: allá el doble
+  // ocupa el lugar del gateway, o sea del sujeto (CD-4).
+  // ══════════════════════════════════════════════════════════════════════════
+
+  function composeTwoSteps(): Promise<ComposeResult> {
+    return composeService.compose({
+      steps: [
+        { agent: 'kyc', input: {} },
+        { agent: 'corridor', input: { q: 'x' } },
+      ],
+      scopingKeyRow: makeKeyRow({ id: 'k1', owner_ref: 'owner-test' }),
+      chainId: 2368,
+      a2aKey: 'wasi_a2a_test',
+    });
+  }
+  function twoAgents(): void {
+    mockAgentsBySlug({
+      kyc: makeAgent({ slug: 'kyc', priceUsdc: 0.001 }),
+      corridor: makeAgent({ slug: 'corridor', priceUsdc: 0.05, id: 'agent-2' }),
+    });
+  }
+
+  // AC-1 — camino DIRECTO (`compose.ts` :1178-1190). `400 'Bad Request'` no
+  // tiene field-errors parseables ⇒ no hay retry ⇒ sale por el return directo.
+  it('T-335-DIRECT-4XX: 400 sin field-errors → agentFailure INPUT_REJECTED, error intacto', async () => {
+    twoAgents();
+    mockFetchOk();
+    mockFetchError(400, 'Bad Request');
+
+    const result = await composeTwoSteps();
+
+    expect(result.success).toBe(false);
+    expect(result.agentFailure).toBe('INPUT_REJECTED');
+    expect(mockRegen).not.toHaveBeenCalled(); // salió por el return DIRECTO
+    // AC-4 / CD-3: el campo `error` sigue byte-compatible — el status crudo
+    // sigue estando adentro para el operador.
+    expect(result.error).toContain('returned 400');
+    expect(result.error).not.toContain('after retry');
+  });
+
+  // AC-1 — LOS DOS DESENLACES EN EL MISMO `it`, COMPARADOS ENTRE SÍ. Un test
+  // que sólo mire el 500 pasaría igual con los dos mapeados al mismo valor.
+  it('T-335-DIRECT-5XX: 500 → AGENT_ERROR, y NO es el mismo valor que el 400', async () => {
+    twoAgents();
+    mockFetchOk();
+    mockFetchError(500);
+    const cincuecientos = await composeTwoSteps();
+
+    mockFetchOk();
+    mockFetchError(400, 'Bad Request');
+    const cuatrocientos = await composeTwoSteps();
+
+    expect(cincuecientos.agentFailure).toBe('AGENT_ERROR');
+    expect(cuatrocientos.agentFailure).toBe('INPUT_REJECTED');
+    expect(cincuecientos.agentFailure).not.toBe(cuatrocientos.agentFailure);
+  });
+
+  // AC-2 — camino CON RETRY (`compose.ts` :1146-1159). El campo refleja el
+  // desenlace del RETRY y no el del primer intento: el input fue REGENERADO por
+  // un LLM en el medio, así que el veredicto del primer intento ya no describe
+  // lo que se mandó la segunda vez.
+  it('T-335-RETRY: 422+fields → regen → 400 → INPUT_REJECTED por el return del RETRY', async () => {
+    twoAgents();
+    mockFetchOk();
+    mockFetchError(422, FIELD_ERR_BODY); // 1er intento
+    mockFetchError(400, 'nope'); // el re-invoke también falla
+    mockRegen.mockResolvedValueOnce({ q: 'x', senderName: 'Ana' });
+
+    const result = await composeTwoSteps();
+
+    expect(result.agentFailure).toBe('INPUT_REJECTED');
+    // `after retry` prueba que salió por el return del RETRY y no por el directo.
+    expect(result.error).toContain('after retry');
+  });
+
+  // AC-2 — el 422 del PRIMER intento NO manda. Los dos desenlaces del camino
+  // con retry, comparados entre sí en el mismo `it`.
+  it('T-335-RETRY-5XX: 422+fields → regen → 500 → AGENT_ERROR (el 422 inicial no manda)', async () => {
+    twoAgents();
+    mockFetchOk();
+    mockFetchError(422, FIELD_ERR_BODY);
+    mockFetchError(500); // el retry falla con 5xx
+    mockRegen.mockResolvedValueOnce({ q: 'x', senderName: 'Ana' });
+    const conCincoXX = await composeTwoSteps();
+
+    mockFetchOk();
+    mockFetchError(422, FIELD_ERR_BODY);
+    mockFetchError(400, 'nope'); // el retry falla con 4xx
+    mockRegen.mockResolvedValueOnce({ q: 'x', senderName: 'Ana' });
+    const conCuatroXX = await composeTwoSteps();
+
+    expect(conCincoXX.error).toContain('after retry');
+    expect(conCincoXX.agentFailure).toBe('AGENT_ERROR');
+    expect(conCuatroXX.agentFailure).toBe('INPUT_REJECTED');
+    expect(conCincoXX.agentFailure).not.toBe(conCuatroXX.agentFailure);
+  });
+
+  // AC-3 / CD-10 — la AUSENCIA de la clave es un valor con significado y no se
+  // rellena. `{ agentFailure: undefined }` TIENE la clave y serializa distinto,
+  // por eso el assert es `in` y no `=== undefined`.
+  it('T-335-ABSENT: error de red (sin status HTTP) → la clave agentFailure NO existe', async () => {
+    twoAgents();
+    mockFetchOk();
+    mockFetch.mockRejectedValueOnce(new Error('network ECONNRESET'));
+
+    const result = await composeTwoSteps();
+
+    expect(result.success).toBe(false);
+    expect('agentFailure' in result).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('agentFailure');
+  });
+
+  // AC-3 — el campo es una clasificación acotada, NO un eco. Ni la URL del
+  // agente, ni su host, ni un fragmento del body pueden salir por ahí.
+  it('T-335-NOLEAK: body con URL y secreto → el campo no ecoa nada de eso', async () => {
+    twoAgents();
+    mockFetchOk();
+    mockFetchError(
+      400,
+      '{"error":"invalid_input","upstream":"https://internal.corridor.example/v1/fx","token":"sk-live-SUPERSECRET"}',
+    );
+
+    const result = await composeTwoSteps();
+
+    const campo = JSON.stringify(result.agentFailure);
+    expect(result.agentFailure).toBe('INPUT_REJECTED');
+    expect(campo).not.toContain('https://example.com/invoke'); // el invokeUrl
+    expect(campo).not.toContain('example.com'); // el host del agente
+    expect(campo).not.toContain('internal.corridor.example');
+    expect(campo).not.toContain('sk-live-SUPERSECRET');
+    expect(campo).not.toContain('invalid_input');
+  });
+
+  // AC-4 — back-compat: el pipeline EXITOSO (el escenario de T-RETRY-HAPPY) no
+  // estrena ninguna clave. Un consumidor que lee sólo `error` no ve diferencia.
+  it('T-335-BACKCOMPAT: pipeline 2xx → sin la clave agentFailure', async () => {
+    twoAgents();
+    mockFetchOk();
+    mockFetchOk();
+
+    const result = await composeTwoSteps();
+
+    expect(result.success).toBe(true);
+    expect('agentFailure' in result).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('agentFailure');
   });
 });
 

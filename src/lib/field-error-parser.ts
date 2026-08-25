@@ -13,6 +13,13 @@
  *  - Only 4xx are considered (5xx / no-status → null).
  *  - Returns a non-empty `string[]` of field names, or `null` if nothing
  *    parseable was found.
+ *
+ * ⛔ WKH-335: este `400 <= status < 500` y la allow-list `{400, 422}` de
+ * `classifyAgentFailure` (`lib/agent-http-error.ts`) divergen A PROPÓSITO y
+ * NINGUNA de las dos es la otra — acá la pregunta es *"¿vale la pena reintentar
+ * con un input REGENERADO por un LLM?"* (un 403 con `fieldErrors` legibles
+ * califica) y allá es *"¿reintentar con el MISMO input puede cambiar algo?"* (un
+ * 403 no califica). No las unifiques "por consistencia": rompés una.
  */
 
 /**
