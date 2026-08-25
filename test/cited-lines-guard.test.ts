@@ -165,21 +165,21 @@
  *     frágil que este guardián existe para no volver a guardar.
  * 14. 🎯 LOS 4 ARCHIVOS DE ESTE GUARDIÁN. No están en `CORTE_A_PATHS`, y son los
  *     citadores más densos que este commit agregó al repo: medido con
- *     `scanSource` sobre ellos mismos, **260 tokens** (`test` 76 · `citations`
- *     100 · `exceptions` 46 · `scanner` 38) contra 57 en TODO el Corte A. O sea
+ *     `scanSource` sobre ellos mismos, **261 tokens** (`test` 76 · `citations`
+ *     101 · `exceptions` 46 · `scanner` 38) contra 57 en TODO el Corte A. O sea
  *     que el guardián más que cuadruplicó la población de citas del repo en
- *     archivos que él mismo no mira. (Foto del 2026-08-19, RE-DERIVADA tres
+ *     archivos que él mismo no mira. (Foto del 2026-08-25, RE-DERIVADA cuatro
  *     veces —243 antes del fix-pack del re-AR, 247 después, 260 después del
- *     fix-pack de prosa del CR— corriendo `scanSource` sobre los cuatro paths.
+ *     fix-pack de prosa del CR, 261 tras el fix-pack 3 de WKH-335— con `scanSource`.
  *     Que este número se mueva cada vez que alguien escribe una línea de prosa
- *     acá es exactamente lo que el ítem denuncia, y las tres fotos lo prueban.)
+ *     acá es exactamente lo que el ítem denuncia, y las cuatro fotos lo prueban.)
  *     **Se decidió declararlo y NO incluirlos, y la razón es medida, no de
- *     esfuerzo** — el desglose de los 260:
+ *     esfuerzo** — el desglose de los 261:
  *       · **89** son literalmente el valor del campo `cite` de una entrada de
  *         `CITED_LINES`. Ésos YA tienen testigo, y mejor que el de acá: `G-C5`
  *         verifica esa misma cita contra el archivo apuntado y `G-C7` se pone
  *         rojo si el token desaparece de su citador.
- *       · **101** son `:N` sueltos (P3/P4) sin archivo: números de línea citados
+ *       · **102** son `:N` sueltos (P3/P4) sin archivo: números de línea citados
  *         dentro de la prosa que explica el algoritmo.
  *       · **29** nombran archivos que el ÍNDICE DE GIT no tiene, y son TRES
  *         grupos, no dos. (Re-derivado el 2026-08-19 — la versión anterior

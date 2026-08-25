@@ -410,3 +410,285 @@ las que faltaban y encontró contraejemplos: `test/cited-lines-guard.test.ts:127
 no lo es (vive en `:706`). Eran deuda de esta HU, y el fix-pack 2 las re-ancla.
 **La regla que queda**: una muestra sostiene una afirmación sobre la muestra. Para afirmar sobre el
 conjunto hay que medir el conjunto — o escribir en la frase el alcance de lo que se midió.
+
+---
+
+## FIX-PACK 3 (2026-08-25) — la POBLACIÓN de citas, clasificada; no otra muestra
+
+### [2026-08-25 · fix-pack 3] Por qué existe: dos rondas generalizaron desde una muestra y las dos se equivocaron
+
+- **AR it1 / MNR-6** inspeccionó **8** citas y escribió que las **17** desplazadas *"ya estaban rotas
+  antes"*. El re-AR encontró contraejemplos.
+- **AR it2 / BLQ-BAJO-3** entregó una tabla de **8**; el fix-pack 2 encontró **3 más** de la misma clase.
+- ⇒ esta ronda **no** entrega otra muestra. Barre la población, la clasifica entera, y declara con
+  número lo que el barrido **no** ve.
+
+### El instrumento, y su calibración
+
+Regex: `([A-Za-z0-9_@./-]*[A-Za-z0-9_-](?:\.test|\.spec)?\.(tsx?|jsx?|mjs|cjs|sql|json|md|example|yml|yaml|sh|py))[: ](\d{1,5})(-(\d{1,5}))?`
+sobre **todo `git ls-files`** (no un subconjunto elegido a mano). El `(\.test)?` es lo que le faltaba a
+la receta de W2.2.7 y es por lo que BLQ-2 sobrevivió a un barrido bien corrido.
+
+**Filtro de candidatura** (mecánico, sin juicio): una cita entra a la población si (a) su destino
+resuelve a un archivo que la HU **modificó** y que **ya existía** en la base, y (b) la línea/rango
+citado **se movió** (`mapa línea_vieja→línea_nueva` derivado de `git diff -U1000000`) **o** su
+contenido cambió en el lugar. Medido: el chequeo de contenido no agregó **ni un solo** candidato que
+el mapa no trajera ya (0 en los dos repos) — o sea que en este diff no hay ediciones in-place que el
+mapa no vea; en otro diff podría haberlas, y por eso el chequeo queda.
+
+**Criterio de clasificación** (el que decide, y se contesta comparando CONTENIDO):
+
+> ¿La cita era CORRECTA en `main` y es FALSA hoy?
+
+- **SÍ ⇒ Clase 3.** La rompimos nosotros; se arregla acá (CD-12). El destino se **deriva** del mapa,
+  nunca a ojo, y se abre la línea destino para confirmar que dice lo mismo que decía `main@vieja`.
+- **NO, ya estaba rota en `main` ⇒ Clase 2.** ⛔ No se toca (es *"candados que se pudren solos"*, y
+  barrerla mezclaría deuda ajena con el fix-pack).
+- **NO, sigue siendo correcta hoy ⇒ falso positivo del filtro.** Se cuenta y se sigue.
+
+⚠️ **El modo de falla de este barrido es que el número equivocado CONTENGA el texto buscado.** Por
+eso la pregunta se contesta contra `main@N` **y** `HEAD@N`, las dos abiertas, y no contra un parecido.
+Hay **dos casos medidos en esta ronda donde el parecido habría mentido en las dos direcciones**:
+`compose.test.ts:106` y `compose.test.ts:17-23` estaban **rotas en `main`** y esta HU las volvió
+**correctas por accidente** (insertó exactamente las líneas que faltaban); y
+`prepare/route.test.ts:809 → route.ts:482-486` idem (+13 líneas la realinearon con el guard del
+`payoutId`, que en `main` vivía en `:469-473`). Las tres son falsos positivos, y las tres se ven como
+Clase 3 si uno mira sólo el mapa.
+
+### `wasiai-a2a` — la población, y su suma
+
+```
+tokens `archivo:línea` en todo `git ls-files`      : 15678
+  └─ resuelven a un archivo que la HU modificó
+     y que ya existía en la base                   :  1774
+     └─ línea citada MOVIDA o con contenido nuevo  :  1221   ← población de candidatas
+        ├─ estrato CONGELADO (excluido POR REGLA)  :  1167
+        └─ estrato VIVO (clasificado una por una)  :    54
+
+candidatas barridas (estrato VIVO): 54
+  ├─ Clase 3 (rotas POR esta HU)      → arregladas acá: 12
+  ├─ Clase 2 (ya rotas en main)       → NO tocadas:     28
+  └─ falsos positivos del filtro      →                 14
+                                          suma:         54  ✅
+```
+
+**Las 12 de Clase 3, con su destino derivado y verificado abriendo la línea:**
+
+| Citador | Cita | → hoy | Ancla confirmada en el destino |
+|---|---|---|---|
+| `doc/sdd/_INDEX.md:176` (fila 190) | `compose.ts:226-241` | `:244-259` | `// envoltura conserva los steps completados…` / `throw err;` |
+| `doc/sdd/_INDEX.md:215` (fila 223) | `services/compose.ts:443` | `:461` | `if (isSelfDestination(agent.invokeUrl, selfIdentity.hosts)) {` |
+| ↑ mismo renglón, token SUELTO | `:627` | `:645` | `const debitResult = await budgetService.debit(` |
+| ↑ mismo renglón, token SUELTO | `:1785` | `:1819` | `const downstream = await signAndSettleDownstream(` |
+| `doc/sdd/_INDEX.md:217` (fila 225) | `types/index.ts:1610-1627` | `:1671-1688` | `export interface AgentLinkRow {` |
+| ↑ token SUELTO | `:1671-1679` | `:1732-1740` | `export interface AgentLinkClaim {` |
+| ↑ | `compose.ts:216` | `:234` | `const composeRunId = randomUUID();` |
+| ↑ tokens SUELTOS | `:227` `:368-369` `:370` `:372` | `:245` `:386-387` `:388` `:390` | `results` / `totalCost` / `totalLatency` / `lastOutput` / `discoverCache` |
+| ↑ | `compose.ts:230` | `:248` | `if (!result.success) this.recordStrandedRunIfAny(…)` |
+| `doc/sdd/_INDEX.md:218` (fila 226) | 6 tokens | **marco declarado**, ver abajo | — |
+| `src/lib/discovery-fetch-limit.ts:293` | `compose.ts:125-126` | `:128-129` | `* top-50 cambió…` / `* payment.chain → … rail equivocado,` |
+
+**La fila 226 (`_INDEX.md:218`) NO se re-ancló, y la razón es que re-anclarla la volvería FALSA.** Sus
+6 citas describen el **defecto que la HU cierra**, no el código de hoy; y una de ellas —el `throw` de
+`compose.ts:1757`— **no tiene destino**: la línea se borró (`mapa → None`), e inventarle un número
+sería peor que dejarla rota (regla ya escrita en este documento). Lo que se hizo es **declarar el
+marco**: la fila ahora dice, en su primera oración, que todos sus `archivo:línea` numeran `main` @
+`4000a8f`, con la traducción medida al árbol de la rama (`:1743`→`:1774`, `:1178-1190`→`:1204-1221`,
+`:1146-1159`→`:1164-1185`, `:920`→`:938`, `field-error-parser.ts:24-31`→`:31-38`) y con el `:1757`
+declarado sin destino. Eso cierra **MNR-5** en su parte de citas; el resto de la fila sigue siendo
+trabajo de `nexus-docs`.
+
+**Cómo se reconocen las 28 de Clase 2** (para que nadie las vuelva a contar como nuestras): son citas
+a `src/services/compose.ts` cuyo `main@N` **no** contiene el referente que la prosa nombra. Ejemplos
+medidos: `compose.ts:539` ("el COSTO REAL del pipeline") es `error: ceilingBinds` en `main`;
+`compose.ts:130` ("debita los steps 1..N") es prosa del over-fetch; `compose.ts:278` (`agent_id =
+agent.slug`) es `if (strandedSteps.length === 0) return;`; `compose.ts:792` ("18-dec scaling") es
+`return true;`; `_INDEX.md:215` `compose.ts:1424-1431` y `:1445-1448` apuntan al docblock de
+`resolveAgent`. Todas se pudrieron solas antes de esta rama.
+
+⚠️ **Dos renglones quedan MIXTOS a propósito, y decirlo es parte del entregable**: `_INDEX.md:215`
+lleva una Clase 3 arreglada (`:443/:627/:1785`) al lado de dos Clase 2 que **no** se tocaron
+(`:1424-1431`, `:1445-1448`). Igual en `chaski-v3` con los dos README. Arreglar la Clase 2 de al lado
+habría metido deuda ajena en este commit; callarla la habría vuelto invisible.
+
+### `chaski-v3` — la población, y su suma
+
+```
+tokens `archivo:línea` en todo `git ls-files`      :  1403
+  └─ resuelven a un archivo que la HU modificó      :   449
+     └─ línea citada MOVIDA o con contenido nuevo  :   115   ← población de candidatas
+        (estrato CONGELADO: 0 — el `doc/` de este repo está gitignoreado)
+
+candidatas barridas: 115
+  ├─ Clase 3 (rotas POR esta HU)      → arregladas acá: 10
+  ├─ Clase 2 (ya rotas en main)       → NO tocadas:      4
+  └─ falsos positivos del filtro      →                101
+                                          suma:        115  ✅
+```
+
+Las **10** de Clase 3 son **una sola causa**: el `import { PREPARE_REJECTED }` que la Wave 2 metió en
+`app/api/payout/prepare/route.ts:37` corrió **+1** todo lo que hay debajo, y los fix-packs anteriores
+actualizaron unas citas de esa familia (`:311`, `:334`, `:348`, `:216`, `:332`, `:75`) y **no** otras.
+Las que faltaban:
+
+| Citador | Cita | → hoy | Forma |
+|---|---|---|---|
+| `app/api/solana/escrow/remittance-ids/route.ts:48` | `prepare/route.ts:213-217` | `:214-218` | **ANCLADA** `` (`POP_SECRET`, …) `` |
+| `app/api/solana/escrow/remittance-ids/route.ts:80` | `prepare/route.ts:220-256` | `:221-257` | suelta (ver abajo) |
+| `src/application/ports.ts:310` | `prepare/route.ts:214` | `:214` | **ANCLADA** `` (`POP_SECRET`, …) `` |
+| `src/presentation/flow-vm.test.ts:2561` | `prepare/route.ts:214` | `:214` | **ANCLADA** |
+| `src/presentation/flow-vm.ts:750` | `prepare/route.ts:214` | `:214` | **ANCLADA** |
+| `src/presentation/flow-vm.ts:1533` | `prepare/route.ts:215` | `:216` | **ANCLADA** `` (`POP_SECRET`, …) `` |
+| `src/infrastructure/solana/deeplink/pop-por-enlace.ts:92` | `prepare/route.ts:219` | `:220` | **ANCLADA** `` (`popSignature`, …) `` |
+| `src/infrastructure/solana/deeplink/pop-por-enlace.ts:116` | `prepare/route.ts:231` | `:231` | **ANCLADA** `` (`verifySolanaPopChallenge`, …) `` |
+| `README.md:112` | `prepare/route.ts:391-395` | `:392-396` | suelta (`.md` fuera del candado) |
+| `README.es.md:117` | `prepare/route.ts:391-395` | `:392-396` | suelta (ídem) |
+
+**Por qué tres de esas conservan el número y cambian de forma.** `:214`, `:214`, `:231` son las citas
+**blandas** del grupo: su prosa nombra un *bloque* ("el PoP ya se verificó, `:214` **en adelante**";
+"quien autoriza es P2"), y el ocupante nuevo de esa línea también lo satisface, así que un revisor
+puede razonablemente llamarlas falso positivo. **Anclarlas resuelve la discusión en vez de
+adjudicarla**: `` (`POP_SECRET`, `…:214`) `` y `` (`verifySolanaPopChallenge`, `…:231`) `` son
+verdaderas hoy **y** las pone bajo `src/composition/citas-ancladas.test.ts`, que se pondrá rojo solo la
+próxima vez que se muevan. Si alguien las cuenta como falsos positivos, el reparto pasa a 7/4/104 y
+**la suma no cambia**.
+
+**Las 2 que NO se pudieron anclar, con el motivo**: `prepare/route.ts:221` es un comentario
+(`// P1 — presencia + tipo → 403 opaco.`) y no tiene ningún símbolo que sirva de ancla; y los dos
+README son `.md`, y el candado sólo escanea `.ts/.tsx` bajo `src|app|scripts|contracts`. Ahí se
+corrigió el número y queda declarado que nada las vigila.
+
+**Las 4 de Clase 2 de `chaski-v3`, medidas**: `docs/architecture.md:31` cita `prepare/route.ts:297`
+para `vm: "solana"`, que en `main` estaba en `:512` (hoy `:525`); `prepare/route.test.ts:497` afirma
+que `route.ts:63` *"es el cuerpo de `isRecord`"* y en `main` esa línea ya era un `import`; y los dos
+README citan `quote/route.ts:91-96` como el sitio que *"manda una `capability`"*, que en `main` era el
+`return` del 429 (el `capability` vive hoy en `:141`).
+
+### Verificación de que lo ANCLADO entra de verdad al candado (medido, no declarado)
+
+Las 7 citas nuevas en formato anclado se apuntaron a `:1`/`:2`, se corrió
+`npx vitest run src/composition/citas-ancladas.test.ts` y el candado las listó **a las 7, por nombre**:
+
+```
+Tests  1 failed | 8 passed (9)
+  src/application/ports.ts:310 → `POP_SECRET`, `…/route.ts:1`: la línea dice «// Server-side: PREPARE del payout…»
+  src/infrastructure/solana/deeplink/pop-por-enlace.ts:92  → `popSignature`, …
+  src/infrastructure/solana/deeplink/pop-por-enlace.ts:116 → `verifySolanaPopChallenge`, …
+  src/presentation/flow-vm.test.ts:2561 → `POP_SECRET`, …
+  src/presentation/flow-vm.ts:750       → `POP_SECRET`, …
+  src/presentation/flow-vm.ts:1533      → `POP_SECRET`, …
+  app/api/solana/escrow/remittance-ids/route.ts:48 → `POP_SECRET`, …
+```
+
+Restauración por `cp` desde un scratchpad propio del repo y `md5sum` verificado idéntico antes y
+después (⛔ nunca `git checkout --`). Después: `9 passed (9)`.
+
+### La cita HISTÓRICA de `cited-lines-guard.test.ts:81`: se DEJA como está, con la medición al lado
+
+`test/cited-lines-guard.test.ts:81` dice *"una de las correcciones de esta misma HU (`compose.ts:130`
+→ `src/services/compose.ts:571`)"*. `HEAD@571` ya no es el guard anti-doble-débito (vive en `:589`),
+así que el filtro la trae como candidata. **No es una cita viva: es la TRANSCRIPCIÓN de un token que
+la HU 224 produjo.** Cambiarla a `:589` volvería falsa una afirmación sobre el pasado, que es
+exactamente la categoría que el **ítem 14 de ese mismo docblock ya declara** para el token histórico
+`.gitignore:172` (*"9 … que por construcción ya no describe esa línea"*). Se deja, y se clasifica como
+falso positivo del filtro, no como deuda.
+
+**Y se midió el efecto sobre el conteo del ítem 14 ANTES de decidir, que es lo que el encargo pedía**:
+- Tocarla o no **no mueve el conteo**: `cited-lines-guard.test.ts` no está en `CORTE_A_PATHS`, y
+  `571`→`589` seguiría siendo un token P1 en el mismo archivo. Efecto medido: **cero**.
+- Pero la medición encontró otra cosa: **el ítem 14 YA estaba viejo por esta HU, y nadie lo había
+  visto.** Corriendo `scanSource` sobre los 4 archivos del guardián da **261**, no 260 —
+  `citations` **101**, no 100— porque la Wave 1 agregó un token (el `` `:571` `` de la prosa
+  *"era `:571` hasta WKH-335"*), que es un `:N` suelto ⇒ el bucket de los sueltos pasa de 101 a 102 y
+  `89+102+29+41 = 261`. Corregido en el mismo commit, **línea-neutral** (1685 líneas antes y después)
+  y **re-medido después de escribirlo**: sigue dando `261`, o sea que la corrección no se movió a sí
+  misma — que es el paso que el propio ítem 14 dice que hizo falta dos veces.
+- ⛔ **Lo que NO se tocó, y por qué**: el desglose `89 · 101 · 29 · 41`. Mi instrumento reproduce el
+  TOTAL y los cuatro por-archivo exactamente, pero **no** reproduce esos cuatro buckets (me da
+  `57 · 133 · 29 · 42`), así que no puedo corregirlos sin adivinar la definición de quien los escribió.
+  Se movió sólo el que se puede derivar sin ambigüedad (`101 → 102`, el token nuevo es un `:N` suelto)
+  y se declara acá que el resto no se re-derivó.
+
+### El barrido de MI PROPIO daño (el fix-pack 1 rompió una cita arreglando una cita rota)
+
+Las **27 correcciones de token** de esta ronda (en **24 líneas**) son **sustituciones de texto dentro de líneas que ya existían**: cero
+líneas agregadas o borradas en los dos repos (`git diff --numstat` da `N N` en cada archivo; conteo de
+líneas verificado archivo por archivo antes y después). ⇒ **cero desplazamiento**, o sea que la clase
+de daño del fix-pack 1 no puede ocurrir acá.
+
+Queda el daño por **contenido**: alguien que cite una de las 24 líneas que edité. Barrido: se buscó
+en todo `git ls-files` de los dos repos cualquier cita a esos `(archivo, línea)`. Resultado — 7
+citas, **todas siguen ciertas**:
+- `doc/sdd/_INDEX.md:215` y `:218` los citan 5 documentos, y lo que citan es **qué fila de la tabla
+  vive en esa línea** (`223` y `226`). Mis ediciones son intra-línea ⇒ las filas siguen en 215 y 218.
+- `ports.ts:310` y `flow-vm.ts:750` reciben citas **ANCLADAS** (`idempotencyKey`, `prepare`,
+  `payout_authority_unavailable`): edité el comentario de esas líneas, no el código, así que las
+  anclas siguen ahí — y lo confirma el candado, no mi lectura: `9 passed (9)` después de las ediciones.
+
+### ⛔ QUÉ NO CUBRE ESTE BARRIDO — para que el próximo no lea el número como lista cerrada
+
+1. **Los tokens SUELTOS `:NNN` sin nombre de archivo.** La regex exige un nombre de archivo, así que
+   son invisibles. **No es teórico: 4 Clase 3 REALES salieron de ahí** (`prepare/route.ts` `:344`/`:347`
+   citados desde `flow-vm.ts:750` y `flow-vm.test.ts:2514`, los dos → `:345`/`:348`), y aparecieron
+   sólo porque estaban **al lado** de una cita que el filtro sí vio. Igual los `:627`/`:1785`/`:227`/
+   `:368-369`/`:370`/`:372` de `_INDEX.md`. **Un renglón con una cita rota suele tener otra al lado que
+   el instrumento no ve: al arreglar una, leer el renglón entero.**
+2. **Las citas en prosa sin sintaxis** ("la línea de más abajo", "el guard de arriba"). Sin forma, sin
+   barrido, sin cota superior conocida.
+3. **El estrato CONGELADO de `wasiai-a2a`: 1167 candidatas** en `doc/sdd/NNN-*/` y `doc/research/`.
+   **Excluido POR REGLA y no clasificado** — son registros fechados de HUs pasadas (SDDs, AR/CR/QA
+   reports, done-reports): re-anclarlos los volvería falsos *sobre el pasado*, ningún candado los mira,
+   y su tamaño (~22× el estrato vivo) probaría que la enorme mayoría es Clase 2 de otras HUs.
+   `doc/sdd/_INDEX.md` **no** entra ahí: es el catálogo VIVO y se clasificó.
+4. **Las citas cuyo destino esta HU NO modificó** (13 846 + 954 tokens). No pueden ser Clase 3 por
+   construcción, pero **sí** pueden ser Clase 2 y este barrido no dice absolutamente nada de ellas.
+5. **Los basenames ambiguos** (`route.ts:156` desde un archivo de otro directorio): 10 en `chaski-v3`.
+   El resolver los marca y se leyeron a mano — los 10 apuntan a archivos que la HU no tocó
+   (`app/api/settle/solana-sponsor/route.ts`, `app/api/a2a/plan/route.ts`) ⇒ falsos positivos. Un
+   resolver que "elija el primero" habría fabricado 10 hallazgos.
+6. **Las citas cross-repo** (`wasiai-a2a` ↔ `chaski-v3`): la regex las ve, pero **ningún candado de
+   ninguno de los dos repos puede verificarlas** y se pudren con el primer commit del otro lado.
+7. **Los archivos fuera de `git ls-files`**: untracked, `.nexus/`, y todo el `doc/` de `chaski-v3`
+   (gitignoreado, ~262 documentos que `grep` tampoco ve desde la raíz).
+8. **El VALOR semántico de la afirmación alrededor de la cita.** Acá se verificó *qué línea es*, no
+   *si la frase es verdad*.
+
+**La frase que corresponde escribir, y que reemplaza a la que las dos rondas anteriores escribieron
+de más**: *no* "todas las citas del repo están verificadas", sino **"estas 54 + 115 candidatas están
+clasificadas una por una; el filtro es el regex de arriba sobre `git ls-files` cruzado con el mapa del
+diff, y no ve los 8 conjuntos de la lista de acá abajo"**.
+
+### Aplicar en
+
+1. **Una muestra sostiene una afirmación sobre la muestra.** Para afirmar sobre el conjunto hay que
+   medir el conjunto — o escribir en la frase el alcance de lo que se midió. Es la tercera vez que
+   este defecto aparece en esta HU y la primera que se cierra con la población entera.
+2. **Todo barrido de citas necesita DOS instrumentos, no uno**: el regex (qué citas hay) y el mapa
+   `línea_vieja→línea_nueva` de `git diff -U1000000` (qué se movió). Con uno solo se generaliza.
+3. **Antes de creerle a un barrido, calibralo en las DOS direcciones**: correrlo contra una cita que
+   sabés rota (que la encuentre) y contra una que sabés sana (que no la traiga). Acá el calibrado en
+   la segunda dirección es lo que evitó "arreglar" 3 citas que el diff había vuelto correctas solas.
+4. **Un renglón con una cita rota casi siempre tiene otra al lado que el instrumento no ve.** 11 de
+   las 27 correcciones de esta ronda salieron de leer el renglón entero, no del barrido.
+
+### Gates del fix-pack 3, completos y en orden, con todo en el índice
+
+`wasiai-a2a` (⛔ `npm run qa` NO existe acá — el gate es la secuencia de `.github/workflows/ci.yml`):
+
+| Paso | Comando | Resultado |
+|---|---|---|
+| 1 | `npx tsc -p tsconfig.json --noEmit` | `TypeScript compilation completed`, exit 0 |
+| 2 | `npm run lint` (`biome check src/`) | `Checked 503 files in 177ms. No fixes applied.` |
+| 3 | `npm test` (`vitest run`) | `Test Files 298 passed \| 6 skipped (304)` · `Tests 5961 passed \| 19 skipped (5980)` |
+
+`chaski-v3`:
+
+| Paso | Comando | Resultado |
+|---|---|---|
+| 1 | `npm run qa` (`lint && typecheck && typecheck:scripts && test`) | exit 0 · `Checked 278 files` · `Test Files 154 passed (154)` · `Tests 3060 passed (3060)` |
+| 2 | `npm run build` (`next build --webpack`) | exit 0 (los `Critical dependency` de `ox`/`viem` son previos a esta rama) |
+
+⚠️ El `3060` de `chaski-v3` es **+1** contra el `3059` que midió el AR it2: lo aporta `T-335-Q-4/CD-5`,
+el testigo que agregó el fix-pack anterior. Ninguno de los dos gates cambió de conteo por esta ronda
+—son 27 sustituciones de texto dentro de comentarios y prosa, cero código ejecutable—, y eso es
+exactamente lo que se espera de un fix-pack de citas.
