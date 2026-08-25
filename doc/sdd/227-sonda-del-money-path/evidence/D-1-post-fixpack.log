@@ -1,0 +1,18 @@
+# D-1 (RE-EJECUTADO tras el fix-pack de AR+CR) — la sonda en ROJO con credencial invalida (0 USDC)
+# fecha: 2026-08-25T20:25:02Z  host: DESKTOP-T2ULTF0  node: v22.22.0
+# rama: feat/227-sonda-money-path  HEAD: 8865721  (fix-pack todavia sin commitear al correrlo)
+# comando: A2A_PROBE_KEY=<credencial invalida> npm run probe:money-path
+# por que se re-ejecuta: el fix-pack reescribio la escalera (fila 2-bis nueva, fila 4 con
+# las DOS grafias de 403, fila 11 condicionada a un 2xx verificado y fila 12 de default).
+# esperado: la MISMA clase que antes del fix-pack — fila 4 -> CONFIG -> exit 3, nunca DOWN.
+---
+
+> wasiai-a2a@0.1.0 probe:money-path
+> node scripts/probe-money-path.mjs
+
+CONFIG: la credencial de la sonda (KEY_NOT_FOUND) — producción no está implicada | agent=remit-corridor-fx-solana schemaSha256=ee87a63f8e71 omitted=[destCountry] httpStatus=403 agentFailure=- durationMs=596
+---
+exit code observado: 3
+# contraste con la corrida previa (D-1-credencial-invalida.log): misma clase, mismo
+# error_code (KEY_NOT_FOUND), mismo schemaSha256 (ee87a63f8e71) y mismo omitted
+# ([destCountry]) => la escalera nueva no movio la atribucion de este caso.

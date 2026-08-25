@@ -1,0 +1,162 @@
+name: probe-money-path
+
+# Sonda del camino del dinero — Corte A: la cotización (WKH-364).
+# Ejercita /discover -> /compose contra PRODUCCIÓN con el cuerpo DERIVADO del
+# inputSchema publicado en esa misma corrida, y clasifica en cuatro clases con
+# cuatro códigos de salida distintos (0 PASS, 2 caída, 3 config, 4 contrato).
+#
+# ⚠️ Cada corrida CUESTA: ~0,0303 USDC (0,03 del agente + ~1% de fee), y hay DOS
+# palancas de gasto, no una:
+#   1. el `cron`: 48 corridas/día ≈ 1,4544 USDC/día ≈ 43,63 USDC / 30 días;
+#   2. el trigger `pull_request`, que en un PR de una rama de ESTE repo recibe el
+#      secret entero y hace el POST real. Está acotado con `paths:` a los archivos
+#      de la sonda, así que sólo gasta cuando el PR toca la sonda misma.
+# ⚠️ Por (2) la `DAILY_LIMIT` de la key NO puede quedar pegada a 1,46: con ese piso
+# el margen del día es 0,0056 USD ≈ CERO corridas de PR, y un solo push agota el
+# límite y apaga la sonda el resto del día. Piso recomendado: 2,00 USD/día, que
+# deja ~18 corridas de PR por día sobre las 48 del reloj.
+
+on:
+  schedule:
+    # A :07 y :37 y no en el minuto redondo: el planificador de GitHub encola
+    # masivamente ahí, y los minutos impares reducen el retraso de arranque.
+    - cron: '7,37 * * * *'
+  # Acotado a la sonda misma: un PR de este repo SÍ recibe el secret y gasta.
+  pull_request:
+    paths:
+      - 'scripts/probe-money-path.mjs'
+      - 'test/probe-money-path.test.mjs'
+      - '.github/workflows/probe-money-path.yml'
+  workflow_dispatch:
+    inputs:
+      self_test:
+        description: 'Correr la sonda DELIBERADAMENTE rota (demuestra el rojo)'
+        type: boolean
+        default: false
+
+# `issues: write` para el aviso de abajo. Declarar el bloque RESTRINGE al listado, así
+# que `contents: read` tiene que estar o el checkout se queda sin permiso.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # En `pull_request` la sonda es INFORMATIVA (`continue-on-error`): ni un blip de
+      # red ni un rojo real pueden trabar un PR. ⚠️ Lo que NO es cierto es que un PR no
+      # reciba el secret: GitHub se lo niega a los PRs **desde un fork** y se lo entrega
+      # ENTERO a un PR de una rama de este mismo repo. Ahí la sonda hace el POST real y
+      # gasta — de ahí el `paths:` del trigger y el piso de `DAILY_LIMIT` de arriba.
+      # En `schedule` y `workflow_dispatch` es dura: ahí el rojo es la señal entera.
+      #
+      # La corrida se captura para que el aviso pueda pegar la LÍNEA DE CLASE (la única
+      # que atribuye la causa). Nunca el log entero: traería el eco de `npm` y lo que
+      # cualquier paso previo haya escrito, y eso es volcar salida cruda al issue.
+      - name: Run money-path probe
+        id: sonda
+        run: |
+          set +e
+          npm run probe:money-path 2>&1 | tee "$RUNNER_TEMP/probe.log"
+          codigo=${PIPESTATUS[0]}
+          linea=$(grep -aE '^(PASS|DOWN|DRIFT|CONFIG|SKIP|SELF-TEST): ' "$RUNNER_TEMP/probe.log" | tail -n 1)
+          {
+            echo 'clase<<PROBE_EOF'
+            echo "${linea:-(la sonda no llegó a emitir su línea de clase)}"
+            echo 'PROBE_EOF'
+          } >> "$GITHUB_OUTPUT"
+          exit "$codigo"
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        env:
+          A2A_PROBE_KEY: ${{ secrets.A2A_PROBE_KEY }}
+          PROBE_SELF_TEST_OMIT_REQUIRED: ${{ inputs.self_test && 'amountUsd' || '' }}
+
+      # AVISO. Sólo en la corrida por RELOJ: `workflow_dispatch` lo mira quien lo
+      # disparó y `pull_request` es informativo por diseño. La del reloj es la única
+      # que puede ponerse roja sin que nadie se entere — el agujero que esto cierra.
+      #
+      # ⚠️ `failure()` es verdadero si falló CUALQUIER paso anterior, `npm ci` incluido.
+      # Por eso el texto NO afirma la causa: pega la línea de clase que emitió la sonda
+      # —que sí la atribuye, y sin cuerpos crudos— y manda a leer el log. Si la sonda no
+      # llegó a correr, la línea viene vacía y el cuerpo lo dice con esas palabras.
+      # La línea viaja por `env:`, nunca interpolada dentro del `run:`.
+      - name: Abrir issue si la corrida por reloj falla
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITULO: 'probe-money-path: la corrida por reloj esta fallando'
+          LINEA: ${{ steps.sonda.outputs.clase }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          clase=${LINEA:-(la sonda no llegó a emitir su línea de clase: puede haber fallado un paso anterior)}
+          cuerpo=$(printf '%s\n' \
+            "La corrida **por reloj** de \`probe-money-path\` falló." \
+            "" \
+            "- Corrida: $RUN_URL" \
+            "- Commit: \`$GITHUB_SHA\`" \
+            "- Línea de clase de la sonda:" \
+            "" \
+            "  \`\`\`" \
+            "  $clase" \
+            "  \`\`\`" \
+            "" \
+            "Qué NO dice este aviso: cuál fue la causa del JOB. Falló algún paso, que puede" \
+            "ser la sonda o \`npm ci\`. Quien atribuye es la línea de clase de arriba, si la" \
+            "hay: exit 2 caída candidata, 3 config de la sonda, 4 el contrato publicado" \
+            "cambió. **Un exit 3 NO implica a producción.** El resto está en el log." \
+            "" \
+            "Este issue se cierra solo en la próxima corrida por reloj que pase en verde." \
+            "Si sigue abierto, el reloj sigue rojo.")
+          # Dedup por título exacto: si ya hay uno abierto, comenta en vez de acumular issues.
+          # Sin `--label` a propósito: `gh issue create --label` falla si la etiqueta no existe
+          # en el repo, y eso convertiría el aviso en un segundo fallo silencioso.
+          # ⚠️ `set -e` + `x=$(cmd)`: si `gh` falla, el step muere y el aviso se pierde en
+          # SILENCIO — el job ya está rojo, así que nadie se entera. Es el mismo "segundo
+          # fallo silencioso" que la nota de arriba razona para `--label`. Ante un fallo
+          # de la consulta se avisa y se intenta crear igual: un issue duplicado se ve, un
+          # aviso que no se mandó no.
+          if ! existente=$(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[0].number // empty'); then
+            echo "::error::no se pudo consultar los issues abiertos; se intenta crear el aviso igual"
+            existente=''
+          fi
+          if [ -n "$existente" ]; then
+            gh issue comment "$existente" --body "$cuerpo"
+          else
+            gh issue create --title "$TITULO" --body "$cuerpo"
+          fi
+
+      # La contracara, y no es un adorno: un issue que queda abierto para siempre es el
+      # control que la gente aprende a ignorar. Si el reloj vuelve al verde, se cierra.
+      # ⚠️ El título es IDÉNTICO al de arriba, o el cierre nunca encuentra el issue.
+      - name: Cerrar el issue si el reloj volvio al verde
+        if: success() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITULO: 'probe-money-path: la corrida por reloj esta fallando'
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Acá el fallo de la consulta NO se escala a rojo: poner rojo el job del cierre
+          # dispararía el aviso de un problema que no es de producción. Queda anotado y el
+          # issue se cierra en la próxima corrida por reloj que pase en verde.
+          if ! existente=$(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[0].number // empty'); then
+            echo "::warning::no se pudo consultar los issues abiertos; el cierre queda para la próxima corrida verde"
+            exit 0
+          fi
+          if [ -n "$existente" ]; then
+            gh issue close "$existente" --comment "La corrida por reloj volvió a pasar: $RUN_URL"
+          fi

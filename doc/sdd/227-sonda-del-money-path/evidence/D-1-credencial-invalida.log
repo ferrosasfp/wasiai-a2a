@@ -1,0 +1,10 @@
+# D-1 — la sonda demostrada en ROJO con una credencial invalida (0 USDC)
+# fecha: 2026-08-25T19:52:43Z  host: DESKTOP-T2ULTF0  node: v22.22.0
+# rama: feat/227-sonda-money-path  commit: 8865721
+# comando: A2A_PROBE_KEY=<credencial invalida> npm run probe:money-path
+# esperado: fila 4 -> CONFIG -> exit 3, y NUNCA una caida
+---
+> node scripts/probe-money-path.mjs
+CONFIG: la credencial de la sonda (KEY_NOT_FOUND) — producción no está implicada | agent=remit-corridor-fx-solana schemaSha256=ee87a63f8e71 omitted=[destCountry] httpStatus=403 agentFailure=- durationMs=2085
+---
+exit code observado: 3
