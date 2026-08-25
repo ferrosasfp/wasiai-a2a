@@ -23,7 +23,7 @@ Cerrada con éxito la opacidad del money-path: `/compose` pasa a emitir un campo
   - BLQ-BAJO-1: resuelto en fix-pack 1 (commit `1f86e3d`)
   - MNR-2, MNR-3, MNR-4: resueltos en fix-packs subsiguientes
   - Apéndice agregado al CR: verificación F4 de que los hallazgos quedan cerrados en `HEAD`
-- **F4**: APROBADO (12/12 ACs con evidencia archivo:línea; AC-10 pendiente-humano por precondición)
+- **F4**: APROBADO (9 de 10 (el decimo es PENDIENTE-HUMANO) ACs con evidencia archivo:línea; AC-10 pendiente-humano por precondición)
 
 ---
 
@@ -66,7 +66,7 @@ La sonda fue defectuosa (uso deliberado de input inválido), pero la opacidad qu
 
 - **CR** (2026-08-25 @ 06:02, sobre la rama previa a fix-packs): RECHAZADO 1 BLQ + 4 MENORes, todos de prosa/citas. Los mismo 4 fix-packs resuelven: commit `1f86e3d` cierra BLQ-1, `0095af9` y `94603b0` cierran MNR-2/3/4. **Apéndice agregado al CR**: verificación por F4 de cada hallazgo contra HEAD. **Conclusión**: veredicto RECHAZADO sobre un árbol intermedio; artefacto final sobre `94603b0` APROBADO sin segundo CR formal (F4 le hizo el trabajo).
 
-- **F4** (2026-08-25 @ 12:15): Gates completos. Validación.md verifica cada AC uno a uno contra código/tests ejecutándolos. **APROBADO 12/12**, excepto AC-10 que es precondición operativa (orden de despliegue, no ejecutable).
+- **F4** (2026-08-25 @ 12:15): Gates completos. Validación.md verifica cada AC uno a uno contra código/tests ejecutándolos. **APROBADO 9 de 10 (el decimo es PENDIENTE-HUMANO)**, excepto AC-10 que es precondición operativa (orden de despliegue, no ejecutable).
 
 ---
 
@@ -209,7 +209,7 @@ Ratio Wave 1: 0.42x código ejecutable, 1.74x prosa, 2.28x tests → **legítimo
 
 ## Resumen para el próximo paso del founder
 
-**Status**: APROBADO PARA DONE. Gates: `tsc 0`, `lint 0`, `test 5962 passed` en `wasiai-a2a`; `npm run qa 0 failed` en `chaski-v3`.
+**Status**: APROBADO PARA DONE. Gates: `tsc 0`, `lint 0`, `test 5961 passed` en `wasiai-a2a`; `npm run qa 0 failed` en `chaski-v3`.
 
 **Precondición operativa**: AC-10 requiere que Railway (`wasiai-a2a`) se despliegue ANTES que Vercel (`chaski-v3`). Hasta entonces, producción deja `POST /quote` con `payoutMethod:"bank"` → 502 opaco (comportamiento actual, no regresión). Si el orden se invierte, Chaski mapea campo inexistente y el 502 sigue igual (cubierto por tests de back-compat).
 
