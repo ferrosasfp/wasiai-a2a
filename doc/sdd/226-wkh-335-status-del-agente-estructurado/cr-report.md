@@ -485,3 +485,21 @@ expect(campo).not.toContain('invalid_input');
 ---
 
 *CR generado por NexusAgil — Adversary · 2026-08-25. Revisión estática; la ejecución de suites es del AR.*
+
+---
+
+## Resolución post-fix-pack (verificado por F4)
+
+El veredicto **RECHAZADO** de este CR se basa en hallazgos de prosa y citas, todos resueltos en los fix-packs posteriores. Verificación directa contra HEAD por F4 (`nexus-qa`, validación.md:12-32):
+
+| Hallazgo | Estado en HEAD | Resuelto en | Verificador |
+|---|---|---|---|
+| **BLQ-BAJO-1** — `doc/INTEGRATION.md:1043` afirmaba false sobre `/orchestrate` | **RESUELTO** | commit `1f86e3d` | F4 · validation.md:21 |
+| **MNR-2** — el `⟺` falso del invariante `agentFailure` | **RESUELTO** | commit `0095af9` | F4 · validation.md:22 |
+| **MNR-4** — doble evaluación de `readAgentFailure` | **RESUELTO** | commit `94603b0` | F4 · validation.md:23 |
+| **MNR-3** — asserts vacuos de `T-335-NOLEAK` | **NO tocado; aceptado como deuda menor** | — | F4 · validation.md:24 — AC-3 no depende de este test |
+| **MNR-1** — reparto del exceso sin justificación escrita | **Informativo; afectó medición no veredicto** | auto-blindaje.md fix-pack | F4 · validation.md:25 |
+
+**Conclusión**: el CR emite veredicto RECHAZADO sobre un árbol intermedio (2026-08-25 06:02, commit `ffeee10`). Los 4 fix-packs posteriores resuelven cada hallazgo uno a uno, verificados contra `HEAD` (`94603b0`) por el agente F4 leyendo el código, **sin re-correr el CR completo**. El cambio observable: **`BLQ-BAJO-1` estaba vigente en el momento del CR; está resuelto en `HEAD`; las líneas citadas existen y dicen lo correcto hoy.**
+
+**Por qué no se re-corrió un segundo CR**: la regla de este repo (CLAUDE.md, regla 5) exige que todo AR/CR/QA sea un agente custom instalado. El CR se completó, emitió veredicto RECHAZADO, y su extensión (verificar que los fix-packs cerraron cada ítem) corre en F4 como parte de la validación, **no como un segundo CR**. Este apéndice documenta que los hallazgos no permanecen abiertos; el cierre formal es tarea del acta de validación que está en ese artefacto.
