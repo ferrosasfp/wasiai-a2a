@@ -24,8 +24,15 @@ import {
   ReconciliationError,
   reconciliationService,
 } from '../services/reconciliation.js';
+import { tableroService } from '../services/tablero.js';
 import { traceService } from '../services/trace.js';
 import { ArbiterError } from '../types/arbiter.js';
+import type {
+  TableroCajaCard,
+  TableroEscrowsCard,
+  TableroReputacionCard,
+  TableroSnapshot,
+} from '../types/index.js';
 
 /**
  * WKH-191c: mapea ReconciliationError.code → HTTP (disclosure-safe, patrón
@@ -352,6 +359,49 @@ const traceHtml = readFileSync(
   'utf-8',
 );
 
+/**
+ * WKH-365: tablero de las tres preguntas. Cascarón sin datos de tenant, leído
+ * al arranque como el resto de las pantallas.
+ */
+const tresPreguntasHtml = readFileSync(
+  resolve(__dirname, '../static/dashboard-tres-preguntas.html'),
+  'utf-8',
+);
+
+/** WKH-365: una entrada de cache por tarjeta. */
+interface TableroCacheEntry<T> {
+  value: T;
+  expiresAt: number;
+}
+
+/**
+ * 60 s de vida para una tarjeta leída con ÉXITO.
+ *
+ * ⛔ Acá NO hay ninguna afirmación sobre cada cuánto cambian las fuentes. Acá
+ * decía que las cambia el hook de `event-tracking`, y es FALSO: esas filas van
+ * con `agent_id` en NULL y la tarjeta 2 las excluye. No la reemplazo por otra
+ * causa: no está medida. El número es cuánta desactualización se decide tolerar
+ * para no repetir tres lecturas —una de ellas, un RPC con cuota— en cada
+ * reload; que el dato puede ser anterior al pedido se lo dice la pantalla al
+ * operador, no este número.
+ *
+ * ⚠️ Acá decía "alineado con `STATS_CACHE_TTL_MS`", y no lo está: es el doble,
+ * cosa que la propia frase admitía dos palabras después. Ese símbolo además
+ * vive dentro del plugin, ni siquiera es alcanzable desde este scope. La frase
+ * invitaba a que alguien "alineara" los dos valores creyendo que eran iguales.
+ */
+const TABLERO_TTL_OK_MS = 60_000;
+/**
+ * El fallo TAMBIÉN se cachea, y MENOS que el éxito. No cachearlo deja que un
+ * reload en bucle martille justo al RPC que ya está en 429; cachearlo 60 s
+ * escondería una recuperación por un minuto entero.
+ */
+const TABLERO_TTL_SIN_DATO_MS = 15_000;
+
+function tableroTtl(card: { status: 'ok' | 'sin_dato' }): number {
+  return card.status === 'ok' ? TABLERO_TTL_OK_MS : TABLERO_TTL_SIN_DATO_MS;
+}
+
 const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * GET /dashboard
@@ -408,6 +458,123 @@ const dashboardRoutes: FastifyPluginAsync = async (fastify) => {
           'dashboard trace failed',
         );
         return reply.status(500).send({ error: 'Failed to get trace' });
+      }
+    },
+  );
+
+  /**
+   * GET /dashboard/tres-preguntas
+   * WKH-365: el tablero de las tres preguntas. Público como `GET /dashboard`
+   * porque es un cascarón: el HTML no trae ni un dato de tenant, los pide el
+   * browser al API gateada con el token que escribe el operador.
+   */
+  fastify.get(
+    '/tres-preguntas',
+    { config: { rateLimit: false } },
+    async (_request: FastifyRequest, reply: FastifyReply) => {
+      return reply.type('text/html').send(tresPreguntasHtml);
+    },
+  );
+
+  /**
+   * GET /dashboard/api/tres-preguntas
+   * WKH-365: caja de la sonda + standing de los agentes activos + escrows vivos.
+   * READ-ONLY: no cotiza, no compra, no mueve dinero. Gate FAIL-CLOSED
+   * (`requireAdminTokenForTrace`): el payload es cross-tenant.
+   *
+   * El cache es POR TARJETA y no global: una fuente caída no puede invalidar el
+   * resultado bueno de las otras dos, y una tarjeta que sigue fresca no se
+   * vuelve a leer (que es lo que impide martillar un RPC en 429). Contra las
+   * requests SIMULTÁNEAS —que el cache solo no frena, porque se escribe después
+   * del `await`— hay además una sola lectura en vuelo compartida.
+   */
+  let cajaCache: TableroCacheEntry<TableroCajaCard> | null = null;
+  let reputacionCache: TableroCacheEntry<TableroReputacionCard> | null = null;
+  let escrowsCache: TableroCacheEntry<TableroEscrowsCard> | null = null;
+
+  async function leerTablero(): Promise<TableroSnapshot> {
+    const now = Date.now();
+    const cajaHit =
+      cajaCache && now < cajaCache.expiresAt ? cajaCache.value : null;
+    const reputacionHit =
+      reputacionCache && now < reputacionCache.expiresAt
+        ? reputacionCache.value
+        : null;
+    const escrowsHit =
+      escrowsCache && now < escrowsCache.expiresAt ? escrowsCache.value : null;
+
+    const snapshot = await tableroService.snapshot({
+      ...(cajaHit === null ? {} : { caja: cajaHit }),
+      ...(reputacionHit === null ? {} : { reputacion: reputacionHit }),
+      ...(escrowsHit === null ? {} : { escrows: escrowsHit }),
+    });
+
+    // Sólo se re-datea la entrada que EFECTIVAMENTE se volvió a leer: pisar
+    // el `expiresAt` de una tarjeta servida del cache la volvería eterna
+    // mientras alguien recargue la pantalla.
+    if (cajaHit === null) {
+      cajaCache = {
+        value: snapshot.caja,
+        expiresAt: now + tableroTtl(snapshot.caja),
+      };
+    }
+    if (reputacionHit === null) {
+      reputacionCache = {
+        value: snapshot.reputacion,
+        expiresAt: now + tableroTtl(snapshot.reputacion),
+      };
+    }
+    if (escrowsHit === null) {
+      escrowsCache = {
+        value: snapshot.escrows,
+        expiresAt: now + tableroTtl(snapshot.escrows),
+      };
+    }
+
+    return snapshot;
+  }
+
+  /**
+   * La lectura EN VUELO, compartida por todo el que llegue mientras dura.
+   *
+   * ⚠️ El cache por tarjeta se escribe DESPUÉS del `await`, así que sola no
+   * dedupe nada: N requests simultáneas encuentran las tres entradas frías y
+   * salen las N a leer. Medido sobre esta misma app: 8 requests simultáneas =
+   * 8 lecturas del RPC; 8 secuenciales = 0. El caso secuencial es el que el
+   * cache ya cubría; éste es el de varias pestañas abriendo a la vez, y le
+   * pega justo al RPC con cuota que la tarjeta 3 existe para vigilar.
+   *
+   * Se comparte la PROMESA, no el valor. Si la lectura rechaza, rechazan todas
+   * las que se colgaron de ella (cada una responde su propio 500) y el `finally`
+   * limpia igual: no queda una promesa muerta cacheada.
+   */
+  let tableroEnVuelo: Promise<TableroSnapshot> | null = null;
+
+  async function leerTableroDeduplicado(): Promise<TableroSnapshot> {
+    const enVuelo = tableroEnVuelo;
+    if (enVuelo !== null) return enVuelo;
+    const propia = leerTablero();
+    tableroEnVuelo = propia;
+    try {
+      return await propia;
+    } finally {
+      tableroEnVuelo = null;
+    }
+  }
+
+  fastify.get(
+    '/api/tres-preguntas',
+    { config: { rateLimit: false }, preHandler: requireAdminTokenForTrace },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        return reply.send(await leerTableroDeduplicado());
+      } catch (err) {
+        // Mensaje estático al cliente; el detalle queda en el log del servidor.
+        request.log.error(
+          { detail: err instanceof Error ? err.message : 'unknown' },
+          'dashboard tres-preguntas failed',
+        );
+        return reply.status(500).send({ error: 'Failed to get tablero' });
       }
     },
   );
