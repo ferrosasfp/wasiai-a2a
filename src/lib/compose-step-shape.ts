@@ -14,8 +14,11 @@
  * esa propiedad; cualquier check que se agregue al route handler NO.
  */
 
-// WKH-305: el único import de este módulo, y es a otro LEAF (cero imports de
-// runtime), así que la propiedad de "no lo moquea nadie" se conserva.
+// Los DOS imports de este módulo (WKH-305 el de mapeo, WKH-366 el de riesgo de
+// capacidad) son a otros LEAF — cero imports de runtime —, así que la propiedad
+// de "no lo moquea nadie" se conserva. Agregar acá un import a un `services/*`
+// la rompería para toda suite que moquee ese service completo.
+import { requiresPinnedAgent } from './capability-risk.js';
 import { validateInputMappingShape } from './compose-input-mapping.js';
 
 /** Body del error de validación de shape (sin `requestId`, que agrega el caller). */
@@ -31,7 +34,17 @@ export type ComposeStepShapeError = {
    * Acá se emite el código real — es lo único que hace la condición accionable
    * desde el cliente.
    */
-  code: 'VALIDATION_ERROR' | 'ambiguous_step';
+  code:
+    | 'VALIDATION_ERROR'
+    | 'ambiguous_step'
+    /**
+     * WKH-366 / AC-6: el step declaró una capacidad cuyo OUTPUT AUTORIZA DINERO
+     * y no nombró al agente. Código propio, y no `VALIDATION_ERROR`, por el
+     * mismo motivo que `ambiguous_step`: es una condición accionable desde el
+     * cliente (el arreglo es pinear el `agent`), y colapsarla con el 400
+     * genérico la vuelve indistinguible de un body malformado.
+     */
+    | 'capability_requires_pinned_agent';
   /** Índice del step que falló. Ausente en errores a nivel pipeline. */
   step?: number;
 };
@@ -223,5 +236,38 @@ export function validateComposeStepShape(
     };
   }
 
+  return null;
+}
+
+/**
+ * WKH-366 / AC-6 / CD-1 — un step cuyo OUTPUT ES UN VEREDICTO DE AUTORIZACIÓN DE
+ * DINERO no puede resolverse por ranking: quién contesta cambia qué se autoriza,
+ * y `verified` —la primera clave del sort— la AUTO-REPORTA el candidato federado
+ * (`services/discovery.ts:577-586`).
+ *
+ * ⚠️ ESTE GUARD NO MIRA `step.agent`. Un step pinado a un slug AJENO pasa y
+ * corre: es el caso legítimo de "quiero contratar a ese agente". Lo que se
+ * prohíbe es DELEGAR LA ELECCIÓN, no elegir mal a propósito.
+ *
+ * Corre donde corre este archivo (ver el docblock de cabecera): sin débito, sin
+ * discovery, sin 402. Un impostor NO LLEGA A SER CONSULTADO.
+ */
+export function validateAuthorityPinning(
+  steps: unknown[],
+): ComposeStepShapeError | null {
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    // El shape ya lo validó `validateComposeStepShape`: acá no se re-emite su
+    // error, se deja pasar y manda el suyo.
+    if (!s || typeof s !== 'object') continue;
+    const capability = (s as RawStep).capability;
+    if (typeof capability !== 'string' || capability.length === 0) continue;
+    if (!requiresPinnedAgent(capability)) continue;
+    return {
+      error: `Step ${i}: capability '${capability}' authorizes value delivery and must name the agent explicitly ('agent'), not be resolved by ranking`,
+      code: 'capability_requires_pinned_agent',
+      step: i,
+    };
+  }
   return null;
 }

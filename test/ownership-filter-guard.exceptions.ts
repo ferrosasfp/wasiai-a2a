@@ -221,35 +221,46 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
       'lectura por keyId del caller ni expone nada por ruta HTTP; NO es IDOR".',
   },
   {
+    // ⚠️ 174 → 227 el 2026-08-26 (WKH-366 fix-pack). La cadena no se tocó: la
+    // corrió el bloque `RESERVED_REGISTRY_IDS`, 53 líneas más arriba. Las tres
+    // entradas de este archivo se re-derivaron ABRIENDO el archivo, no aplicando
+    // el +53 a las tres (los desplazamientos NO son iguales: la de `getEnabled`
+    // se corrió 62, porque además tiene el guard nuevo de `register` encima).
     file: 'src/services/registry.ts',
-    line: 174,
+    line: 227,
     table: 'registries',
     verb: 'select',
     category: 'catalogo-publico',
     reason:
       'list() es el catálogo compartido de registries, público por diseño y ya redactado: ' +
-      'devuelve `RegistryPublic[]`, sin `auth.value` (docblock :165-170).',
+      'devuelve `RegistryPublic[]`, sin `auth.value` (docblock :218-224).',
   },
   {
+    // ⚠️ 211 → 264 el 2026-08-26 (WKH-366 fix-pack), mismo desplazamiento que la
+    // de arriba y por la misma causa. La cadena no cambió.
     file: 'src/services/registry.ts',
-    line: 211,
+    line: 264,
     table: 'registries',
     verb: 'select',
     category: 'catalogo-publico',
     reason:
       'getWithSecrets(id) es lectura INTERNA del mismo catálogo compartido, para armar los headers ' +
       'de un fetch outbound. El nombre hace explícito que el resultado no puede cruzar HTTP ' +
-      '(docblock :201-207).',
+      '(docblock :254-261).',
   },
   {
+    // ⚠️ 464 → 526 el 2026-08-26 (WKH-366 fix-pack): +62, y NO +53 como las dos de
+    // arriba. La diferencia son las 9 líneas del guard de namespace reservado que
+    // entró dentro de `register`, que vive entre medio. Por eso se midió sitio por
+    // sitio y no se propagó un solo delta.
     file: 'src/services/registry.ts',
-    line: 464,
+    line: 526,
     table: 'registries',
     verb: 'select',
     category: 'catalogo-publico',
     reason:
       'getEnabled() alimenta el fanout outbound de discovery/compose. Mismo catálogo compartido; ' +
-      'ninguna ruta devuelve este resultado verbatim (docblock :454-460).',
+      'ninguna ruta devuelve este resultado verbatim (docblock :515-523).',
   },
 
   // ── admin-cross-tenant (13) ─────────────────────────────────────────────

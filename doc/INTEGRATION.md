@@ -767,6 +767,44 @@ distinguishing them.
 Being skipped does **not** fail the step: the agent still ran and you are still
 billed for the pipeline. `downstreamSettle` tells you about the *payout* leg.
 
+### `/compose` — which agent actually ran a step (`steps[].agent`)
+
+Every entry of `steps[]` carries the **full agent card of the agent that was
+actually invoked** under the key `agent`. It is the only place in the response
+that reports the *executed* identity: the request body says which agent (or which
+capability) you asked for, and `steps[].agent` says who answered.
+
+The following fields of that object are **published contract**. They are part of
+the response on purpose, they will not be removed without a version bump, and
+integrations are expected to branch on them:
+
+| Field | Type | What it is for |
+|-------|------|----------------|
+| `steps[i].agent.slug` | `string` | The agent that ran step `i`. With `capability` steps this is the only way to know who the gateway picked; see also `steps[i].resolvedFrom`. |
+| `steps[i].agent.registry` / `registry_id` | `string` | Which catalogue that agent came from. `self-published` means this gateway publishes it itself. |
+| `steps[i].agent.invokeUrl` | `string` | **The URL this gateway actually called.** Always present on an executed step. |
+| `steps[i].agent.verified` | `boolean` | ⚠️ **Self-reported by the agent card of a federated registry** — see the warning below. |
+
+**Why `invokeUrl` is in the contract and not an internal detail.** Ranking picks
+`verified` candidates first, and `verified` is whatever the federated agent card
+claims: a third party that publishes `verified: true` can outrank an agent you
+trust. If a step's output *authorises something* (a KYC verdict that unlocks a
+payout is the canonical case), checking the slug is not enough, because a slug is
+just as self-declared. `invokeUrl` is the one field that says which host answered,
+so it is what lets a caller assert *"this verdict came from the agent I operate"*
+before acting on it. That check is the reason the field is guaranteed.
+
+Two consequences worth planning for:
+
+1. **Do not echo `steps[].agent` to a browser as-is.** It contains the agent's real
+   endpoint. Read `invokeUrl` server-side, compare it, and keep it out of anything
+   you return to a client.
+2. **For steps that authorise value, pin the agent** (`agent: "<slug>"`), do not
+   declare a `capability`. `/compose` enforces this for the capabilities that
+   authorise money and answers `400 capability_requires_pinned_agent`; see the
+   error table in [5](#5-error-codes). Verifying `invokeUrl` afterwards is the
+   second half of the same check, not a replacement for it.
+
 ### `/compose` — passing one field from the previous step (`inputFromPrevious`)
 
 Sometimes a step needs a value that does not exist yet when you write the request.
@@ -1040,6 +1078,8 @@ All errors share a normalized JSON shape:
 | `402 Payment Required` | The endpoint needs payment and none was provided. Body includes `accepts[]` with full x402 payment instructions. Note: a request whose *shape* is invalid is rejected with `400` **before** the `402` is emitted, so you never pay to find out the body was malformed (see [5.1](#51-rejected-requests-what-you-are-charged-and-what-is-refunded)). | Sign the EIP-712 authorization, base64-encode the payload, retry with `PAYMENT-SIGNATURE`. Alternatively attach a valid `x-a2a-key`. |
 | `403 Forbidden` | Either no a2a credential was provided on a tenant-scoped endpoint (`error_code: A2A_KEY_REQUIRED` on `/registries` mutations and all of `/tasks` — returned **before any charge**), or an `x-a2a-key` / Bearer was provided but rejected. In the second case the `error_code` field tells you why: `KEY_NOT_FOUND`, `KEY_INACTIVE`, `DAILY_LIMIT`, `INSUFFICIENT_BUDGET`, `SCOPE_DENIED`, `PER_CALL_LIMIT`. The two `/tasks` reads are free, so they never answer the spend-related codes (`DAILY_LIMIT`, `INSUFFICIENT_BUDGET`, `PER_CALL_LIMIT`): nothing is charged, so nothing can be short. Credential problems (`A2A_KEY_REQUIRED`, `KEY_NOT_FOUND`, `KEY_INACTIVE`, and the delegation / key-session codes for those credential types) are still returned. | `KEY_NOT_FOUND`/`KEY_INACTIVE` → verify the key you are sending and that it has not been disabled. `DAILY_LIMIT`/`INSUFFICIENT_BUDGET` → top up or wait for the daily reset. `SCOPE_DENIED` → request a wider scope from the key owner. `PER_CALL_LIMIT` → lower `budget` in the request body. |
 | `400` with `errorCode: INPUT_MAPPING_FAILED` | A step's `inputFromPrevious` could not be resolved against the previous step's output. The `inputMappingFailure` object tells you which step, which field and why: `SOURCE_FIELD_MISSING` (the source key is not in the previous output — remember a `.` is a character, not a path), `PREVIOUS_OUTPUT_NOT_OBJECT` (the previous output is `null`, an array or a primitive, so there are no top-level keys to read), `INVALID_MAPPING_SHAPE` (the mapping itself is malformed). | `SOURCE_FIELD_MISSING` → check what the previous agent actually returns (`GET /discover/:slug` shows its output shape); the source key must exist at the **top level**. `PREVIOUS_OUTPUT_NOT_OBJECT` → that agent does not return an object; you cannot map fields out of it. `INVALID_MAPPING_SHAPE` → fix the body. **Billing: the step that failed is never charged** (see [5.1](#51-rejected-requests-what-you-are-charged-and-what-is-refunded)). |
+| `400` with `code: capability_requires_pinned_agent` (`/compose`) | A step declared a **capability whose output authorises the delivery of money** (today: `kyc-session-create`, `kyc-decision-read`) instead of naming the agent. Those steps cannot be resolved by ranking: the gateway sorts candidates by `verified` first, and `verified` is **self-reported** by a federated agent card, so whoever answers would decide what gets authorised. The rejection happens with the rest of the body validation, so **no debit, no discovery call, and no agent is contacted** — see [5.1](#51-rejected-requests-what-you-are-charged-and-what-is-refunded). The `step` field says which step. | Replace `capability` with `agent: "<slug>"` on that step. The guard does **not** check *which* slug you name — pinning an agent you chose yourself is the point; what it forbids is delegating the choice. Every other capability, including the pre-existing KYC ones, still resolves by ranking exactly as before. |
+| `400` with `error: "Registry name is reserved: ..."` (`POST /registries`) | The `name` you sent derives to **`self-published`**, which is the synthetic `registry_id` the gateway itself stamps on agents published through `POST /agents`. It is not a first-come slug: a federated registry with that id would own the namespace the gateway uses for its own agents. The check normalises the same way the primary key is derived (`trim`, lowercase, whitespace to `-`), so `SELF-PUBLISHED`, `Self Published` and `" self-published "` are all rejected. It runs with the rest of the body validation, so **the rejection is pre-charge: no debit and no credit-back** — see [5.1](#51-rejected-requests-what-you-are-charged-and-what-is-refunded). ⚠️ This row is one of the `400`s that answer with **`error` only and no `code`**, exactly like the pre-existing `name` collision (`Failed to register registry`): branch on the status and the message, not on a `code` field that is not there. | Pick a different `name`. A name that merely **contains** the reserved one is fine (`self-published-mirror` registers normally) — the check is on the derived id, not on a substring. If what you want is to publish an agent under the gateway's own namespace, that is `POST /agents`, which stamps the id for you. |
 | `400` with `agentFailure` (`/compose`) · `200` with `pipeline.agentFailure` (`/orchestrate`) | A `/compose` (or `/orchestrate`) pipeline failed because **the agent one of its steps invoked answered with a non-2xx HTTP status**, and `agentFailure` says which kind: `INPUT_REJECTED` (the agent read the request and rejected its **content** — it answered `400` or `422`) or `AGENT_ERROR` (it answered anything else non-2xx: `401`, `402`, `403`, `404`, `408`, `429`, any `5xx`). **The field is absent when there was no HTTP status from the agent at all** (network, DNS, timeout, SSRF block, contracting loop, input-mapping failure) — absent means *"we do not know what the agent answered"*, which is different from `AGENT_ERROR` (*"it answered, and it was not about your request"*). It is also absent when an **adaptive retry replaced the verdict**: a `422` whose input was regenerated and then failed on the network reports the retry, which had no HTTP status. The field is **additive**: it did not change the status either route answers. Each route's status still comes from its own pre-existing error mapping, which this feature left untouched, so **branch on the field, not on the status**. What does differ between the two surfaces is **where the field lives**: **`/compose`** puts `agentFailure` at the **top level** of the envelope; **`/orchestrate`** embeds the whole `ComposeResult` under `pipeline`, so it arrives as **`pipeline.agentFailure`**, never top-level. | `INPUT_REJECTED` → **do not retry with the same input.** Fix the request (a common real case is an amount outside the agent's supported range) and send it again. `AGENT_ERROR` → the problem is not your request body; retrying later can help (especially `408` / `429`). Absent → treat it as today: generic failure, retry with backoff. On `/orchestrate` read `pipeline.agentFailure` and check `pipeline.success`, because the HTTP status is a `200` in both outcomes. The agent's raw status and body stay in the `error` string for humans and logs; `agentFailure` is a closed vocabulary meant to be branched on. |
 | `429 Too Many Requests` | Per-IP or per-key rate limit exceeded. Response body includes `retryAfterMs`. | Back off for the duration in `retryAfterMs`. Do not hammer — repeated 429 will extend the window. |
 | `503 Service Unavailable` | An upstream dependency is down or overloaded. The `code` field clarifies: `CIRCUIT_OPEN` (Anthropic or a registry is failing), `BACKPRESSURE` (too many in-flight `/orchestrate`), `gasless_not_operational`, `SERVICE_ERROR` (budget service). | Retry with exponential backoff (start at 1s, cap at 30s, jitter). If the failure persists for more than a minute, check the status page or contact support. |

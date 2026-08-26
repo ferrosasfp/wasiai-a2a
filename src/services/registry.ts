@@ -34,6 +34,7 @@ import type {
   RegistryPublic,
   RegistrySchema,
 } from '../types/index.js';
+import { SELF_PUBLISHED_REGISTRY_ID } from '../types/index.js';
 import {
   logOwnershipMismatch,
   OwnershipMismatchError,
@@ -62,6 +63,58 @@ export class SystemRegistryImmutableError extends Error {
     super('System registry is immutable');
     this.name = 'SystemRegistryImmutableError';
   }
+}
+
+// ── Namespaces RESERVADOS (WKH-366 / fix-pack AR/BLQ-ALTO-1) ─────────────────
+//
+// 🔴 QUÉ CIERRA, MEDIDO Y NO SUPUESTO. `self-published` es el `registry_id`
+// SINTÉTICO que este gateway le pone a los agentes publicados con `POST /agents`
+// (`SELF_PUBLISHED_REGISTRY_ID`, `types/index.ts`). Su docblock dice, textual, que
+// "NO existe como fila en `registries`" — y ahí estaba el problema: no existir no
+// es lo mismo que estar reservado. `POST /registries` deriva el id del `name`
+// (`name.toLowerCase().replace(/\s+/g,'-')`) y no tenía blocklist, así que
+// **cualquier caller autenticado podía crear una fila REAL llamada
+// `self-published` y apropiarse del namespace sintético del propio gateway**.
+//
+// ⚠️ ESTO ARREGLA MÁS QUE LA HU QUE LO TRAJO. El disparador fue WKH-366 (un
+// consumidor de KYC comparaba `agent.registry === "self-published"` para decidir
+// un desembolso), pero el agujero no es de esa HU: todo camino que trate a
+// `self-published` como "esto lo publicamos nosotros" hereda la misma confusión.
+// Hay al menos dos más en este repo, y ninguno de los dos es de WKH-366:
+// `agent-split-context.ts` (reparto de fee) y `discovery.ts` (armado del registry
+// sintético para el agent card). ⛔ Por eso la reserva vive acá, en la puerta, y
+// no en el consumidor que la descubrió.
+//
+// ⚠️ Y ES DEFENSA EN PROFUNDIDAD, NO EL ARREGLO DEL BLOQUEANTE. El vector
+// principal del AR era otro —apropiarse del SLUG de un agente vía `POST /agents`,
+// cuya fila nace con este `registry_id` hardcodeado— y eso NO se cierra desde
+// acá. Se cierra del lado del consumidor, cruzando el `invokeUrl` contra una env
+// del deploy. Escribir "reservamos el nombre ⇒ el registry ya es confiable" sería
+// exactamente la afirmación de más que el AR vino a marcar.
+//
+// MEDICIÓN PREVIA A RESERVAR (2026-08-26, contra el catálogo VIVO de Railway):
+//   · `GET /registries`               → `total: 1`, y la única fila es `wasiai`.
+//   · `GET /registries/self-published` → **404**.
+//   ⇒ No hay ninguna fila existente que este rechazo rompa. Si la hubiera, el
+//     cambio habría que discutirlo, no forzarlo.
+export const RESERVED_REGISTRY_IDS: ReadonlySet<string> = new Set([
+  SELF_PUBLISHED_REGISTRY_ID,
+]);
+
+/**
+ * ¿El `name` derivaría a un id reservado?
+ *
+ * 🔴 NORMALIZA IGUAL QUE LA DERIVACIÓN DEL PK, y eso es lo único que hace que el
+ * check no se esquive: comparar contra el `name` crudo dejaría pasar
+ * `"Self Published"` y `"SELF-PUBLISHED"`, que producen EXACTAMENTE el mismo id.
+ * El `.trim()` extra sólo adelanta el rechazo de `" self-published "` (que hoy
+ * muere igual, pero DESPUÉS del cobro, en el guard de whitespace de `register`).
+ */
+export function isReservedRegistryName(name: unknown): boolean {
+  if (typeof name !== 'string') return false;
+  return RESERVED_REGISTRY_IDS.has(
+    name.trim().toLowerCase().replace(/\s+/g, '-'),
+  );
 }
 
 // ── Tipo interno para filas de Supabase ─────────────────────
@@ -257,6 +310,15 @@ export const registryService = {
     }
     if (/\s\s/.test(config.name)) {
       throw new Error('Invalid registry name: collapsible internal whitespace');
+    }
+
+    // WKH-366 fix-pack: namespace reservado. El guard REAL es `registerBodyCheck`
+    // (pre-cobro, en la route); esto es defense-in-depth con la MISMA función
+    // pura, por si alguien reordena la cadena de preHandlers o llama al service
+    // directo. Mismo patrón —y mismo `throw new Error` ⇒ 400 en la route— que la
+    // colisión de PK de tres líneas más abajo: no se estrena un status nuevo.
+    if (isReservedRegistryName(config.name)) {
+      throw new Error(`Registry name '${config.name}' is reserved`);
     }
 
     const id = config.name.toLowerCase().replace(/\s+/g, '-');

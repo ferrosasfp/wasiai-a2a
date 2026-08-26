@@ -293,10 +293,15 @@ export const CITED_LINES: readonly CitedLine[] = [
     // `requireA2AKeyPresence,` — un SPECIFIER DE IMPORT, no un helper. El
     // resolver devuelve `null` ahí y `mapOwnershipError` en el ancla real `:94`:
     // el camino de símbolos no sólo discrimina, además dice por qué.
+    // ⚠️ RE-APUNTADA el 2026-08-26 (WKH-366 fix-pack): `94` → `114`. NO la movió
+    // una edición sobre `mapOwnershipError` —su cuerpo no cambió un byte— sino la
+    // reserva de namespace que entró 20 líneas ARRIBA, en `validateRegisterBody`.
+    // Verificado ABRIENDO `src/routes/registries.ts:114`, no copiando el número
+    // que sugirió el guard.
     from: 'src/routes/agents.ts',
-    cite: 'registries.ts:94',
+    cite: 'registries.ts:114',
     target: 'src/routes/registries.ts',
-    line: 94,
+    line: 114,
     mustContain: ['async function ', 'mapOwnershipError('],
     symbolPath: ['mapOwnershipError'],
   },
@@ -739,23 +744,28 @@ export const CITED_LINES: readonly CitedLine[] = [
     symbolPath: ['registries', 'Row', 'owner_ref'],
   },
   {
+    // ⚠️ RE-APUNTADAS el 2026-08-26 (WKH-366 fix-pack): `172`→`225` y `174`→`227`.
+    // `registryService.list` no cambió una línea; lo que la corrió es el bloque
+    // `RESERVED_REGISTRY_IDS`, 53 líneas más arriba en el mismo archivo. Es la
+    // trampa que este guard existe para cazar: la cita la rompe la edición que
+    // DESPLAZA, no la que toca el sitio citado. Verificado abriendo `:225`/`:227`.
     from: 'CLAUDE.md',
-    cite: 'src/services/registry.ts:172',
+    cite: 'src/services/registry.ts:225',
     target: 'src/services/registry.ts',
-    line: 172,
+    line: 225,
     mustContain: ['async list(): Promise<RegistryPublic[]>'],
     symbolPath: ['registryService', 'list'],
   },
   {
     from: 'CLAUDE.md',
-    cite: '`:174`',
+    cite: '`:227`',
     target: 'src/services/registry.ts',
-    line: 174,
+    line: 227,
     // `.from('registries')` aparece 6 veces; dentro de `list` una sola.
     mustContain: [".from('registries')"],
     symbolPath: ['registryService', 'list'],
     targetReason:
       'El archivo lo nombra la misma oración, una cláusula antes: «(`registryService.list`, ' +
-      '`src/services/registry.ts:172`, cadena en `:174`)».',
+      '`src/services/registry.ts:225`, cadena en `:227`)».',
   },
 ];

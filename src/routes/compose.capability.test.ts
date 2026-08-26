@@ -27,7 +27,7 @@ import {
   it,
   vi,
 } from 'vitest';
-import type { A2AAgentKeyRow, Agent } from '../types/index.js';
+import type { A2AAgentKeyRow, Agent, StepResult } from '../types/index.js';
 
 vi.mock('../lib/logger.js', () => ({
   getLogger: () => ({ error: vi.fn(), warn: vi.fn(), info: vi.fn() }),
@@ -543,5 +543,300 @@ describe('HU-208 · guard de "nada se ejecuta sin resolver"', () => {
     // Débito aplicado y devuelto → neto cero. Sin el `refundComposeStep0` del
     // guard, el balance quedaría en `balanceBefore - STEP0_PRICE`.
     expect(budgetState.balance).toBe(balanceBefore);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// WKH-366 · AC-6 — el pin por slug, nivel N2 (el Coordinador rechaza)
+//
+// Estos tres corren sobre el middleware de pago REAL (ver el docblock de
+// cabecera), que es lo único que permite afirmar "no se cobró" en vez de
+// "devolvió 400". Su control positivo —que el impostor GANA cuando el guard no
+// corre— vive en `services/capability-resolver.test.ts` (T-B4): sin ése, el
+// verde de T-B3 podría venir de que su doble no arma ningún ataque.
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-366 · N2 — una capacidad que autoriza dinero exige agente pinado', () => {
+  /**
+   * El pool que un tercero puede montar HOY sin permiso de nadie: `verified` es la
+   * PRIMERA clave del sort y la AUTO-REPORTA el candidato federado
+   * (`services/discovery.ts:577-586`), y `registryService.getEnabled()` no filtra
+   * por dueño, así que cualquier owner autenticado aporta candidatos al pool
+   * global. Con `verified:true` + `reputation:100` + el precio más bajo posible,
+   * este agente gana las tres claves del orden.
+   */
+  function poolConImpostor() {
+    return discovered([
+      makeAgent('evil-kyc', {
+        capabilities: ['kyc-decision-read'],
+        verified: true,
+        reputation: 100,
+        priceUsdc: 0.000001,
+        registry: 'registro-de-un-tercero',
+        registry_id: 'registro-de-un-tercero',
+      }),
+      makeAgent('remit-kyc-decision', {
+        capabilities: ['kyc-decision-read'],
+        priceUsdc: 0.02,
+      }),
+    ]);
+  }
+
+  it('T-B3: el impostor gana el ranking y aun así NO es consultado — 400 y ni un centavo', async () => {
+    // El doble está ARMADO: si el guard no estuviera, `discover` devolvería a
+    // `evil-kyc` de cabeza y el pipeline lo invocaría. T-B4 lo demuestra.
+    discoverMock.mockResolvedValue(poolConImpostor());
+    const balanceBefore = budgetState.balance;
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: { steps: [{ capability: 'kyc-decision-read', input: {} }] },
+    });
+
+    // Primero lo que NO pasó, que es la afirmación cara (molde T-CAPROUTE-10):
+    // el impostor no llegó a existir para este request.
+    expect(discoverMock).not.toHaveBeenCalled();
+    expect(mockCompose).not.toHaveBeenCalled();
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBe(balanceBefore);
+
+    // Y recién después el desenlace.
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('capability_requires_pinned_agent');
+    expect(res.json().step).toBe(0);
+  });
+
+  it('T-B3b: lo mismo para `kyc-session-create`, y el rechazo nombra el step culpable', async () => {
+    // La segunda capacidad del set no es una copia decorativa: sin este caso, un
+    // arreglo que dejara `AUTHORIZATION_CAPABILITIES` con una sola entrada
+    // seguiría verde.
+    discoverMock.mockResolvedValue(discovered([makeAgent('evil-session')]));
+    const balanceBefore = budgetState.balance;
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: {
+        steps: [
+          { agent: 'remit-corridor-fx', input: {} },
+          { capability: 'kyc-session-create', input: {} },
+        ],
+      },
+    });
+
+    expect(discoverMock).not.toHaveBeenCalled();
+    expect(mockCompose).not.toHaveBeenCalled();
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBe(balanceBefore);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('capability_requires_pinned_agent');
+    // El índice del step malo, no el 0 por defecto: un pipeline mixto se rechaza
+    // ENTERO y el caller tiene que poder ver cuál arreglar.
+    expect(res.json().step).toBe(1);
+  });
+
+  it('T-B7: el mismo trabajo PINADO por slug pasa el guard y se invoca normal', async () => {
+    // La otra dirección del guard. Sin este caso, un predicado invertido
+    // (`!requiresPinnedAgent`) rompería el camino bueno sin poner rojo nada.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: { steps: [{ agent: 'remit-kyc-decision', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockCompose).toHaveBeenCalled();
+    // Nombrado por el llamador ⇒ el camino de resolución por capacidad no corre.
+    expect(discoverMock).not.toHaveBeenCalled();
+    const executed = mockCompose.mock.calls[0]?.[0];
+    expect(executed?.steps[0]?.agent).toBe('remit-kyc-decision');
+  });
+
+  it('T-B7b: el guard NO mira `step.agent` — pinar un slug AJENO es legítimo y corre', async () => {
+    // Escrito en el docblock del guard y medido acá: lo que se prohíbe es
+    // DELEGAR LA ELECCIÓN, no elegir mal a propósito. Un guard que además
+    // exigiera un slug de una allowlist sería otro contrato, y no es éste.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: { steps: [{ agent: 'evil-kyc', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockCompose).toHaveBeenCalled();
+  });
+
+  it('T-B8: el guard corre PRE-PAGO — ni débito ni lookup de la credencial', async () => {
+    // Lo que mata la mutación "mover el guard al route handler": allá el
+    // middleware de pago YA CORRIÓ, así que `lookupByHash` tendría 1 llamada y
+    // el débito del step-0 habría salido. El contador es la afirmación; el
+    // status no distingue las dos posiciones.
+    discoverMock.mockResolvedValue(poolConImpostor());
+    const balanceBefore = budgetState.balance;
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: { steps: [{ capability: 'kyc-decision-read', input: {} }] },
+    });
+
+    expect(lookupByHashMock).not.toHaveBeenCalled();
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBe(balanceBefore);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('T-B9: la mayúscula no es un bypass — `KYC-Decision-Read` se rechaza igual', async () => {
+    // `requiresPinnedAgent` normaliza con el MISMO `normalize` que
+    // `classifyCapability`. Sin eso el guard se esquiva cambiando una letra.
+    discoverMock.mockResolvedValue(poolConImpostor());
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: { steps: [{ capability: '  KYC-Decision-Read ', input: {} }] },
+    });
+
+    expect(discoverMock).not.toHaveBeenCalled();
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('capability_requires_pinned_agent');
+  });
+
+  it('T-B10: una capacidad PREEXISTENTE de KYC sigue resolviéndose por ranking (CD-18)', async () => {
+    // El alcance del set, medido en la dirección que importa: cerrar de más
+    // rompería con 400 a consumidores externos que este repo no puede enumerar.
+    // `kyc-verification` es preexistente ⇒ NO entra al set ⇒ sigue funcionando.
+    discoverMock.mockResolvedValue(
+      discovered([makeAgent('remit-kyc-validator')]),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: { steps: [{ capability: 'kyc-verification', input: {} }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(discoverMock).toHaveBeenCalled();
+    expect(mockCompose).toHaveBeenCalled();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// WKH-366 · el campo del RESPONSE del que cuelga un guard de OTRO repo
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * `steps[i].agent.invokeUrl` es CONTRATO PUBLICADO de `POST /compose`, no un
+ * detalle interno del envelope. Este bloque existe porque hasta el fix-pack del
+ * CR (MNR-5) **nada en este repo lo fijaba**: medido, `grep "agent.invokeUrl"
+ * src/routes/compose*.test.ts` daba **0 hits** y `doc/INTEGRATION.md` no lo
+ * nombraba. El campo viajaba sólo porque el handler responde `...result` sin
+ * proyectar.
+ *
+ * ⚠️ NO RE-CORRAS ESE GREP ESPERANDO UN 0: hoy devuelve hits, y parte de ellos
+ * **son este docblock**, que escribe el literal para poder contar la medición.
+ * La lectura que NO se cuenta a sí misma: en los demás `compose*.test.ts` sigue
+ * habiendo cero (medido: cero en cada uno), y en éste lo que no es prosa son el
+ * título del `describe` y las aserciones de T-B11. Escribir acá el cardinal lo
+ * habría vuelto falso la frase siguiente — pasó, y por eso se cuenta el
+ * criterio y no el total.
+ *
+ * ── QUIÉN LO CONSUME Y PARA QUÉ ───────────────────────────────────────────
+ *
+ * `chaski-v3` lo lee en `src/infrastructure/a2a/gateway-client.ts:308-313`
+ * (`readInvokeUrl`), lo publica en un arreglo PARALELO `invokeUrls[]` — aparte
+ * de `agents[]` a propósito, porque `agents[]` se ecoa al browser y esta URL no
+ * puede salir por HTTP — y lo usa en
+ * `src/infrastructure/kyc/gateway-kyc-client.ts:235`:
+ *
+ *     if (!sameOrigin(r.invokeUrls[0], expectedAgentBaseUrl())) → rechaza
+ *
+ * Es el TERCER nivel del pin anti-suplantación de esta HU: el que comprueba que
+ * el veredicto de KYC que va a autorizar un desembolso lo firmó **nuestro**
+ * agente y no un tercero que ganó el ranking declarándose `verified: true`. Los
+ * otros dos niveles (el `agent` pinado en el body y el guard N2 de más arriba)
+ * viven en el pedido; éste es el único que mira la EJECUCIÓN.
+ *
+ * ── EL MODO DE FALLA QUE ESTE TEST EXISTE PARA CAZAR ──────────────────────
+ *
+ * Que alguien acá proyecte `agent` en la respuesta para no filtrar la URL
+ * interna del agente. **Es un endurecimiento razonable, y Chaski tuvo ese
+ * incidente exacto en esta misma HU** (por eso su lector vive aparte). Hecho de
+ * este lado, el efecto es: `readInvokeUrl` devuelve `null` ⇒ `sameOrigin(null,…)`
+ * es falso ⇒ **todos** los desembolsos por gateway contestan 502
+ * `agent_origin_mismatch`… y los gates de los DOS repos quedan en verde, porque
+ * ninguno mide el cable. Es la clase «una capacidad que cruza servicios no
+ * existe hasta que los DOS la reconocen», que en este ecosistema ya costó 8 días
+ * de caída.
+ *
+ * ⚠️ LO QUE ESTE TEST **NO** MIDE, para que nadie se apoye de más en su verde:
+ *
+ *  (a) **Que el service POBLE el campo.** Como todas las suites de esta ruta
+ *      —las 9, medido—, ésta moquea `services/compose.js`, así que lo que se
+ *      ejercita es el paso del resultado por el handler HTTP: la proyección de
+ *      `routes/compose.ts`, que es justo donde el mutante de arriba entraría. La
+ *      otra mitad tiene candado de COMPILACIÓN, no de test: `StepResult.agent`
+ *      es `Agent` y `Agent.invokeUrl` es `string` NO opcional
+ *      (`src/types/index.ts`), y el fixture de acá se tipa `StepResult` a
+ *      propósito para heredarlo — volverlo `Partial` o un literal suelto
+ *      desactivaría esa mitad en silencio.
+ *  (b) **Que Chaski lo consuma bien.** Ningún test de este repo puede verlo. Del
+ *      otro lado el testigo es `gateway-client.test.ts` + `agent-origin.test.ts`.
+ *  (c) **Las tres citas cross-repo de arriba.** Este archivo no está en
+ *      `CORTE_A_PATHS` (`test/cited-lines-guard.citations.ts:87-101`), y aunque
+ *      lo estuviera, ese guardián sólo mira rutas de ESTE repo. Los números son
+ *      del 2026-08-26 y envejecen sin que nada se ponga rojo; lo que no envejece
+ *      son los símbolos (`readInvokeUrl`, `sameOrigin`, `invokeUrls`).
+ */
+describe('WKH-366 · `steps[].agent.invokeUrl` es contrato publicado', () => {
+  /** Un step YA EJECUTADO, tipado para heredar el candado de compilación. */
+  function ejecutado(slug: string): StepResult {
+    return { agent: makeAgent(slug), output: {}, costUsdc: 1, latencyMs: 1 };
+  }
+
+  it('T-B11: el 200 de `/compose` trae la `invokeUrl` de CADA step ejecutado', async () => {
+    // DOS steps y no uno: una proyección que preservara sólo el primero —o que
+    // se aplicara a partir del segundo— pasaría un test de un solo step.
+    mockCompose.mockResolvedValue({
+      success: true,
+      output: {},
+      steps: [ejecutado('remit-kyc-session'), ejecutado('remit-kyc-decision')],
+      totalCostUsdc: 2,
+      totalLatencyMs: 2,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/compose',
+      headers: KEY_HEADER,
+      payload: {
+        steps: [
+          { agent: 'remit-kyc-session', input: {} },
+          { agent: 'remit-kyc-decision', input: {} },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // El VALOR, no sólo la presencia: un `""` o un placeholder pasarían un
+    // `toBeDefined()` y del otro lado `readInvokeUrl` los trata como ausencia.
+    expect(body.steps[0].agent.invokeUrl).toBe(
+      'https://x.test/remit-kyc-session',
+    );
+    expect(body.steps[1].agent.invokeUrl).toBe(
+      'https://x.test/remit-kyc-decision',
+    );
   });
 });

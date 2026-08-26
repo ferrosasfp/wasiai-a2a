@@ -35,6 +35,7 @@ import {
   requireA2AKeyPresence,
 } from '../middleware/charged-route.js';
 import {
+  isReservedRegistryName,
   registryService,
   SystemRegistryImmutableError,
 } from '../services/registry.js';
@@ -70,6 +71,25 @@ function validateRegisterBody(body: unknown): PreChargeRejectionBody | null {
     return {
       error:
         'Missing required fields: name, discoveryEndpoint, invokeEndpoint, schema',
+    };
+  }
+  // WKH-366 fix-pack (AR/BLQ-ALTO-1, defensa en profundidad): el namespace
+  // sintético del propio gateway no se puede publicar como registry federado.
+  // Ver `RESERVED_REGISTRY_IDS` en `services/registry.ts` para el porqué, la
+  // medición previa contra el catálogo vivo, y por qué esto arregla MÁS que la
+  // HU que lo trajo (y por qué NO alcanza para cerrarla solo).
+  //
+  // 🔴 STATUS 400, Y NO UN 409 NUEVO. No es una elección de gusto: es cómo
+  // responde HOY el otro rechazo por el `name` —la colisión de PK— que sale por
+  // el `catch` del handler como 400 `Failed to register registry`. Estrenar un
+  // código para un rechazo de la misma familia le cambiaría la forma del error a
+  // un caller por un motivo que no le importa. Va PRE-COBRO por el mismo criterio
+  // que el resto de `validateRegisterBody`: es un check puro sobre el body y su
+  // rechazo está GARANTIZADO, así que cobrarlo sería cobrar por nada (HU-193).
+  if (isReservedRegistryName(b.name)) {
+    return {
+      error:
+        "Registry name is reserved: 'self-published' is the gateway's own synthetic namespace",
     };
   }
   return null;

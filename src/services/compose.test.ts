@@ -4280,3 +4280,114 @@ describe('WKH-305 (W1) · caracterización: el reordenamiento no mueve un centav
     }
   });
 });
+
+// ─── WKH-366 · AC-7' — el veredicto que lee el caller es el CRUDO del agente ───
+//
+// AC-7 del work-item habla de "rechazar `bridgeType: 'LLM'` declarado por el
+// caller", y eso NO EXISTE: `bridgeType` no es campo de entrada de `ComposeStep`,
+// sólo de salida de `StepResult` (`types/index.ts:1466`). Un caller no puede
+// pedirlo. Lo que sí se puede enclavar —y es la garantía real— es que el bridge
+// no reescriba el output que se le entrega al caller, y que un pipeline de un
+// solo step ni siquiera entre al bloque.
+//
+// Sin estos dos candados la garantía es INCIDENTAL: hoy sale de que
+// `result.output` se asigna antes del bloque del bridge (`compose.ts:1536-1538`)
+// y de que el bloque está gateado en `i < steps.length - 1` (`:1580`). Las dos
+// son una línea de código que el próximo refactor puede mover sin enterarse.
+describe('composeService.compose — WKH-366 el bridge no toca `steps[i].output`', () => {
+  it('T-B5: con el bridge CORRIENDO, `steps[0].output` es el crudo del agente 0, no lo que consumió el agente 1', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const transformMock = vi.mocked(maybeTransform);
+    transformMock.mockClear();
+
+    // Los dos objetos son deliberadamente CONTRADICTORIOS en el campo que decide
+    // un desembolso: si el test se leyera del lado equivocado, la diferencia no
+    // sería un matiz de forma sino el veredicto invertido.
+    const CRUDO = { payoutAllowed: false, status: 'Declined' };
+    const REESCRITO_POR_EL_BRIDGE = { payoutAllowed: true, status: 'Approved' };
+
+    transformMock.mockResolvedValueOnce({
+      transformedOutput: REESCRITO_POR_EL_BRIDGE,
+      cacheHit: false,
+      bridgeType: 'LLM',
+      latencyMs: 1,
+    });
+
+    const a1 = makeAgent({
+      slug: 'kyc-decision',
+      id: 'agent-kyc',
+      priceUsdc: 0,
+    });
+    const a2 = makeAgent({
+      slug: 'consumidor',
+      id: 'agent-consumidor',
+      priceUsdc: 0,
+      metadata: {
+        inputSchema: { type: 'object', required: ['payoutAllowed'] },
+      },
+    });
+    vi.mocked(discoveryService.getAgent).mockImplementation(
+      async (slug: string) =>
+        ({ 'kyc-decision': a1, consumidor: a2 })[slug] ?? null,
+    );
+
+    mockFetchOk({ result: CRUDO });
+    mockFetchOk({ result: 'final' });
+
+    const result = await composeService.compose({
+      steps: [
+        { agent: 'kyc-decision', input: {} },
+        { agent: 'consumidor', input: {}, passOutput: true },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+    // (a) El bridge CORRIÓ. Sin esta línea el test pasaría también en el caso
+    //     trivial "no hubo bridge", que no prueba nada.
+    expect(transformMock).toHaveBeenCalledTimes(1);
+    expect(result.steps[0]?.bridgeType).toBe('LLM');
+    // (b) Y lo que sale al caller sigue siendo el crudo del agente.
+    expect(result.steps[0]?.output).toEqual(CRUDO);
+    expect(result.steps[0]?.output).not.toEqual(REESCRITO_POR_EL_BRIDGE);
+    // (c) Mientras que lo que consumió el step siguiente SÍ es lo reescrito: las
+    //     dos mitades del mismo hecho. Sin (c), mover `result.output` después
+    //     del bridge podría pasar si el doble devolviera algo parecido.
+    const bodyDelSegundo = JSON.parse(
+      mockFetch.mock.calls[1]![1]!.body as string,
+    ) as { previousOutput?: unknown };
+    expect(bodyDelSegundo.previousOutput).toEqual(REESCRITO_POR_EL_BRIDGE);
+  });
+
+  it('T-B6: un pipeline de UN step no entra al bloque del bridge — contador en cero', async () => {
+    vi.mocked(registryService.getEnabled).mockResolvedValue([]);
+    const transformMock = vi.mocked(maybeTransform);
+    transformMock.mockClear();
+
+    const solo = makeAgent({
+      slug: 'kyc-decision',
+      id: 'agent-kyc',
+      priceUsdc: 0,
+      // Con `inputSchema` presente: si el gate `i < steps.length - 1` se
+      // aflojara, la rama del transform sería la que corre. El agente de un
+      // pipeline de un step no tiene "siguiente", así que el schema no debería
+      // importar — y esta línea es lo que lo vuelve una afirmación y no una
+      // coincidencia del fixture.
+      metadata: { inputSchema: { type: 'object', required: ['x'] } },
+    });
+    vi.mocked(discoveryService.getAgent).mockResolvedValue(solo);
+
+    mockFetchOk({ result: { payoutAllowed: false } });
+
+    const result = await composeService.compose({
+      steps: [{ agent: 'kyc-decision', input: {} }],
+    });
+
+    expect(result.success).toBe(true);
+    // El contador, no el status: es lo único que distingue "no entró al bloque"
+    // de "entró y no hizo nada".
+    expect(transformMock).not.toHaveBeenCalled();
+    expect(result.steps[0]?.bridgeType).toBeUndefined();
+    expect(result.steps[0]?.transformLatencyMs).toBeUndefined();
+    expect(result.steps[0]?.output).toEqual({ payoutAllowed: false });
+  });
+});

@@ -44,7 +44,7 @@ import type { PublishAgentInput } from '../types/index.js';
 
 /**
  * Mapea `OwnershipMismatchError` a 404 disclosure-safe. Réplica LOCAL del
- * helper privado de `registries.ts:94` (NO se importa — es privado de ese
+ * helper privado de `registries.ts:114` (NO se importa — es privado de ese
  * módulo). Retorna null si no es un error reconocido (el caller re-lanza).
  */
 function mapOwnershipError(

@@ -548,3 +548,62 @@ describe('T-15 (DT-10) · `excluded_by_reputation` como tercer motivo', () => {
     expect('allowTrial' in query).toBe(false);
   });
 });
+
+// ══════════════════════════════════════════════════════════════
+// WKH-366 · AC-6 — el CONTROL POSITIVO del instrumento de T-B3
+// ══════════════════════════════════════════════════════════════
+
+describe('WKH-366 · el agujero que el guard N2 cierra existe de verdad', () => {
+  it('T-B4: sin pasar por el guard, un impostor con `verified:true` se lleva `kyc-decision-read`', async () => {
+    // ⚠️ QUÉ ES ESTE TEST Y QUÉ NO ES.
+    //
+    // NO afirma que el guard funcione — eso lo mide T-B3 en
+    // `routes/compose.capability.test.ts`. Afirma que el ATAQUE QUE T-B3 MONTA
+    // ES UN ATAQUE: con exactamente el mismo doble de discovery, la resolución
+    // por capacidad —el camino que corre cuando el guard no está— entrega el
+    // agente del impostor. Sin esta afirmación, el verde de T-B3 podría venir de
+    // que su doble no arma ningún ataque, y no de que el guard lo frene.
+    //
+    // Lo que el doble modela: `verified` es la PRIMERA clave del sort y la
+    // AUTO-REPORTA el candidato federado (`services/discovery.ts:577-586`), así
+    // que un tercero que la declare `true` sale de cabeza. Acá el ranking está
+    // doblado, así que lo que se mide es lo que queda AGUAS ABAJO del pool: que
+    // nada entre el pool y el ejecutor rechaza a un desconocido por servir una
+    // capacidad que autoriza dinero.
+    discoverMock.mockResolvedValue({
+      agents: [
+        makeAgent('evil-kyc', {
+          capabilities: ['kyc-decision-read'],
+          verified: true,
+          reputation: 100,
+          priceUsdc: 0.000001,
+          registry: 'registro-de-un-tercero',
+          registry_id: 'registro-de-un-tercero',
+        }),
+        makeAgent('remit-kyc-decision', {
+          capabilities: ['kyc-decision-read'],
+          verified: false,
+          priceUsdc: 0.02,
+        }),
+      ],
+      total: 2,
+      registries: ['registro-de-un-tercero', 'wasiai'],
+    });
+
+    const res = await resolveCapability(
+      'kyc-decision-read',
+      undefined,
+      undefined,
+    );
+
+    // El agujero, afirmado en positivo: resuelve, y resuelve al impostor.
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.agent.slug).toBe('evil-kyc');
+      // Y no es el agente propio: si esto empatara, T-B3 no estaría midiendo
+      // suplantación sino un pipeline que ya elige bien.
+      expect(res.agent.slug).not.toBe('remit-kyc-decision');
+      expect(res.agent.registry).toBe('registro-de-un-tercero');
+    }
+  });
+});

@@ -751,6 +751,89 @@ describe('/registries — no cobrar antes de validar (HU-193)', () => {
     expect(budgetState.balance).toBe(before - 1);
   });
 
+  // ══════════════════════════════════════════════════════════
+  // (E) WKH-366 fix-pack (AR/BLQ-ALTO-1) — el NAMESPACE RESERVADO
+  // ══════════════════════════════════════════════════════════
+  //
+  // 🔴 QUÉ AFIRMA, Y POR QUÉ VIVE EN ESTE ARCHIVO Y NO EN OTRO. `self-published`
+  // es el `registry_id` SINTÉTICO que el gateway le pone a los agentes de
+  // `POST /agents`. Hasta este fix, cualquier caller autenticado podía crear la
+  // fila REAL con ese id y apropiarse del namespace del propio gateway. Este
+  // archivo es el único que corre el middleware de pago DE VERDAD, así que es el
+  // único donde "el rechazo es PRE-COBRO" es un assert sobre el balance y no una
+  // afirmación de diseño.
+  //
+  // 🧬 LOS DOS MUTANTES, Y MUEREN POR ASERCIONES DISTINTAS. Acá decía que sacar
+  // el check de `validateRegisterBody` y dejarlo sólo en el service mataba estas
+  // filas «por los contadores, no por el status». **Es falso, y se midió
+  // aplicándolo** (fix-pack CR/MNR-2): en ESTE archivo `registryService` está
+  // doblado (`mockRegister`), así que el guard del service —el que vive en
+  // `services/registry.ts` y tira `is reserved`— NO CORRE NUNCA. Sin el check de
+  // la ruta el POST **sale bien**: status `201`, `debit` 1, `credit` 0, balance
+  // 10 → 9, `mockRegister` 1. Las cuatro filas mueren en el PRIMER assert,
+  // `expect(res.statusCode).toBe(400)`, con `expected 201 to be 400`.
+  //
+  //   · MUTANTE A — borrar el check de la ruta (quede o no en el service):
+  //     muere en `expect(res.statusCode).toBe(400)`. ⚠️ Este archivo NO puede
+  //     distinguir «lo moví al service» de «lo borré»: con el service doblado,
+  //     las dos cosas se ven igual. Al guard del service lo vigila su propio
+  //     testigo, el `it.each` **`rejects the reserved namespace`** de
+  //     `src/services/registry.ownership.test.ts`, donde el service es el real.
+  //   · MUTANTE B — el check corre, pero DESPUÉS del cobro (sacarlo de
+  //     `registerBodyCheck` y dejar sólo la llamada defense-in-depth del
+  //     handler): status `400` y el mensaje `reserved` INTACTOS —o sea que los
+  //     dos primeros asserts pasan— y muere en
+  //     `expect(debitMock).not.toHaveBeenCalled()`. **Ése** es el mutante para
+  //     el que «el contador, no el status» es la afirmación correcta, y es el
+  //     único que justifica que estas filas vivan en este archivo.
+  //
+  // Los asserts se nombran por su TEXTO y no por su línea: el número se mueve
+  // solo cuando alguien edita este mismo comentario, que es lo que pasó acá.
+  it.each([
+    ['exacto', 'self-published'],
+    ['en mayúsculas', 'SELF-PUBLISHED'],
+    ['con espacios en vez del guion', 'Self Published'],
+    ['con whitespace de borde', ' self-published '],
+  ])('T-NCR-19 (%s): POST del namespace reservado → 400, PRE-COBRO, y el balance NO se mueve', async (_caso, name) => {
+    const before = budgetState.balance;
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/registries',
+      headers: KEY_HEADER,
+      payload: { ...VALID_BODY, name },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toContain('reserved');
+    // Pre-cobro de verdad: ni débito, ni credit-back.
+    expect(debitMock).not.toHaveBeenCalled();
+    expect(creditMock).not.toHaveBeenCalled();
+    expect(budgetState.balance).toBe(before);
+    expect(mockRegister).not.toHaveBeenCalled();
+  });
+
+  // ✅ CALIBRACIÓN DEL INSTRUMENTO. Sin esto, las cuatro filas de arriba serían
+  // verdes con un `validateRegisterBody` que rechaza cualquier nombre, y el 400
+  // vendría de que nada pasa nunca en vez de del check nuevo. Se cambia UNA sola
+  // cosa —el nombre— y el desenlace se da vuelta: 201 y `register` invocado.
+  it('T-NCR-20 (control positivo): un nombre que sólo CONTIENE el reservado → 201', async () => {
+    mockRegister.mockResolvedValueOnce({
+      id: 'self-published-mirror',
+      name: 'self-published-mirror',
+    } as never);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/registries',
+      headers: KEY_HEADER,
+      payload: { ...VALID_BODY, name: 'self-published-mirror' },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(mockRegister).toHaveBeenCalledTimes(1);
+  });
+
   it('T-NCR-18 (invariante): PATCH válido → 200, cobra $1 y NO reembolsa', async () => {
     const before = budgetState.balance;
     mockUpdate.mockResolvedValueOnce({ id: 'mine', enabled: false } as never);

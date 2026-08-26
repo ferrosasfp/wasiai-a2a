@@ -261,8 +261,8 @@ que quedan enteros afuera) está en el docblock de
 Dos casos que la lista vieja mezclaba y conviene tener claros:
 
 - `registries` **tiene** `owner_ref`, y aun así se consulta sin filtrar: es un
-  catálogo compartido por diseño (`registryService.list`, `src/services/registry.ts:172`,
-  cadena en `:174`). Que la columna exista no obliga a filtrar; obliga a
+  catálogo compartido por diseño (`registryService.list`, `src/services/registry.ts:225`,
+  cadena en `:227`). Que la columna exista no obliga a filtrar; obliga a
   **escribir por qué no**.
 - `a2a_events` **no** tiene `owner_ref` (telemetría global), así que no entra al
   conjunto por sí sola. Eso es correcto y sigue siéndolo.
