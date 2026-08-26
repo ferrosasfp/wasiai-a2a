@@ -207,3 +207,17 @@ de `vitest.config.ts:5`, y es lo que publican `README.md:378` y `README.es.md:41
 
 **Nota**: `BLQ-MED-1` y `MNR-2` pueden aparecer también en el AR; si vienen duplicados, contalos una
 vez.
+
+---
+
+📌 **NOTA AL PIE — 2026-08-25, posterior a este informe.** Todo número de **cadencia** de
+este documento (48 corridas/día, 1,4544 USDC/día, 43,63 USDC/30 días, "cada 30 minutos",
+~18 corridas de PR/día, latencia ≤ ~35 min) se midió con el `cron` de entonces,
+`'7,37 * * * *'`. Después de este informe el founder bajó la cadencia a **una corrida por
+hora** (`'7 * * * *'`). Este documento **no se reescribe**: es el acta de lo que se midió
+cuando se midió. **Los números vigentes** —24 corridas/día, 0,7272 USDC/día, 21,82 USDC/30
+días, ~42 corridas de PR/día, ≤ ~65 min— están en la corrección al tope de **DT-8**
+(`sdd.md`), en el encabezado de `.github/workflows/probe-money-path.yml`, y derivados por
+**T-15** en `test/probe-money-path.test.mjs`. ⚠️ Los `48` que **no** son cadencia (los
+conteos `48 passed (48)` del barrido de mutación, y la cita `...test.ts:48`) siguen siendo
+correctos y no se tocaron. `DAILY_LIMIT` = **2,00 USD/día** no cambió.

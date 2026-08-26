@@ -540,4 +540,42 @@ describe('WKH-364 · afirmaciones sobre los archivos reales (AC-2, AC-4..AC-7)',
     expect(SCRIPT_CODE).toMatch(/COMPOSE_TIMEOUT_MS,\s*false,/);
     expect(SCRIPT_CODE).toMatch(/DISCOVER_TIMEOUT_MS,\s*true\)/);
   });
+
+  it('T-15: la aritmética de gasto del encabezado se DERIVA del `cron` vigente', () => {
+    // El defecto que este candado cierra ya ocurrió: al bajar la cadencia de 30 min a
+    // 1 hora, el `cron` cambia en UNA línea y los cuatro números de la prosa —corridas
+    // por día, USDC/día, USDC/30 días y el margen de PR sobre el techo diario— quedan
+    // mintiendo en el mismo archivo, sin que nada se ponga rojo. Acá NO hay literales
+    // copiados del encabezado: se leen del `cron`, se calculan, y se exige que el texto
+    // contenga el resultado. Cambiar la cadencia y no la prosa ⇒ este test falla.
+    const cron = WORKFLOW.match(/^\s+- cron: '([^']+)'$/m);
+    expect(cron).not.toBeNull();
+    const [minutos, horas, ...resto] = cron[1].split(/\s+/);
+    // La derivación de abajo sólo vale para "todos los días, todas las horas": si
+    // alguien pasa a un cron con hora/día concretos, esto se rompe a propósito en vez
+    // de publicar un número calculado con la fórmula equivocada.
+    expect([horas, ...resto]).toEqual(['*', '*', '*', '*']);
+    const corridasPorDia = minutos.split(',').length * 24;
+
+    // El precio por corrida sale del docblock del script (el 402 real de producción),
+    // no de un literal de este test: si el gateway sube el precio y alguien actualiza
+    // el script, la aritmética publicada tiene que moverse con él.
+    const precio = SCRIPT_SRC.match(/`maxAmountRequired: (\d+)` = \*\*0,0303 USDC\*\*/);
+    expect(precio).not.toBeNull();
+    const porCorrida = Number(precio[1]) / 1e6; // USDC, 6 decimales
+
+    const porDia = corridasPorDia * porCorrida;
+    const coma = (n, d) => n.toFixed(d).replace('.', ',');
+    expect(WORKFLOW).toContain(`${corridasPorDia} corridas/día`);
+    expect(WORKFLOW).toContain(`${coma(porDia, 4)} USDC/día`);
+    expect(WORKFLOW).toContain(`${coma(porDia * 30, 2)} USDC / 30 días`);
+
+    // El margen de PR: lo que sobra del techo diario después del reloj. El techo (2,00)
+    // se lee del propio encabezado, así que moverlo también obliga a recalcular.
+    const techo = WORKFLOW.match(/piso vigente de (\d+),(\d\d) USD\/día/);
+    expect(techo).not.toBeNull();
+    const corridasPR = Math.floor((Number(`${techo[1]}.${techo[2]}`) - porDia) / porCorrida);
+    expect(WORKFLOW).toContain(`~${corridasPR} corridas de PR por día`);
+    expect(WORKFLOW).toContain(`sobre las ${corridasPorDia} del reloj`);
+  });
 });

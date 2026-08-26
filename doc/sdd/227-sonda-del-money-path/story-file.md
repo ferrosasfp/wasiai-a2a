@@ -418,7 +418,7 @@ name: probe-money-path
 
 on:
   schedule:
-    - cron: '7,37 * * * *'      # cada 30 min, a :07 y :37
+    - cron: '7 * * * *'         # cada hora, a :07  (era '7,37 * * * *' hasta 2026-08-25)
   pull_request:
   workflow_dispatch:
     inputs:
@@ -462,18 +462,29 @@ Aviso y cierre — **copia estructural de `smoke-downstream.yml:52-94`**, con el
   es verdadero si falló **cualquier** paso anterior, `npm ci` incluido. Pega la línea de
   clase que emitió la sonda y manda al log. **Ninguna respuesta cruda.** (CD-9)
 
-**Por qué `:07` y `:37`**: el planificador de GitHub encola masivamente en el minuto
-redondo; los minutos impares reducen el retraso de arranque. Latencia de detección ≤ ~35 min.
+**Por qué `:07`**: el planificador de GitHub encola masivamente en el minuto redondo;
+los minutos impares reducen el retraso de arranque.
 
-**Por qué cada 30 min**: los minutos de Actions **no** son la restricción (el repo es
+**Por qué cada hora**: los minutos de Actions **no** son la restricción (el repo es
 público, los runners estándar son gratis). La restricción real es **USDC**: 0,0303 por
-corrida × 48/día = **1,4544 USDC/día ≈ 43,63 USDC/30 días**. A cada hora sería 21,82. El
-lado caro es el **silencio**: el escenario que motivó el issue fueron *días* de creencia
-equivocada. La palanca para recalcular es **una sola línea del `cron`**.
+corrida × 24/día = **0,7272 USDC/día ≈ 21,82 USDC/30 días**. El lado caro es el
+**silencio**: el escenario que motivó el issue fueron *días* de creencia equivocada, y
+contra *días* una hora protege prácticamente igual que media. La palanca para recalcular
+es **una sola línea del `cron`**, y desde el 2026-08-25 tirar de ella sin actualizar la
+prosa del YAML pone rojo **T-15**. Latencia de detección ≤ ~65 min.
 
-⚠️ La `DAILY_LIMIT` de la agent key tiene que quedar **por encima de 1,46 USD/día** o la
-sonda se apaga sola cada tarde. Si queda corta, la sonda lo reporta como **CONFIG**, no como
-caída — que es el punto entero de esta HU.
+⚠️ **CORRECCIÓN — 2026-08-25 (post-F4).** Acá decía *«cada 30 min ⇒ 48/día ⇒ 1,4544
+USDC/día ≈ 43,63/30 días, latencia ≤ ~35 min»*. El founder bajó la cadencia a una corrida
+por hora: sin tráfico todavía, una hora da casi la misma protección a la mitad del gasto.
+Los números de arriba ya son los vigentes; la derivación completa y el caso del
+`DAILY_LIMIT` están en la corrección al tope de **DT-8** del SDD.
+
+⚠️ La `DAILY_LIMIT` de la agent key tiene que quedar **por encima de 0,73 USD/día** (era
+1,46 con la cadencia vieja) o la sonda se apaga sola cada tarde. Si queda corta, la sonda
+lo reporta como **CONFIG**, no como caída — que es el punto entero de esta HU. El valor
+configurado en producción es **2,00 USD/día** y **no se toca**: un techo diario no es un
+gasto, así que bajarlo no ahorra nada y sólo achicaría el margen de las corridas de PR
+(~42/día con 2,00).
 
 #### 1.3 `test/probe-money-path.test.mjs` — **cero red**
 
@@ -576,6 +587,24 @@ que D-1 tiene que demostrar. ⚠️ Lo que D-1 **NO** debe producir nunca es DOW
 ⚠️ **D-1 corre sin credencial válida y no cuesta nada — hacelo aunque el founder todavía no
 haya creado la key.** D-2 y D-3 la necesitan.
 
+📌 **ESTADO DE LAS DEMOSTRACIONES — 2026-08-25.**
+
+| | Estado | Evidencia |
+|---|---|---|
+| **D-1** | ✅ **HECHA** | `evidence/D-1-credencial-invalida.log`, `D-1-post-fixpack.log`, `D-1-post-fixpack-3-cabecera-de-red.log` |
+| **D-2** | ✅ **HECHA contra PRODUCCIÓN con la credencial real** | La sonda dio **`PASS`, exit 0**, y el budget de la key bajó de **15 a 14,97 USDC** en la red **900001**. Ver la entrada del 2026-08-25 en `auto-blindaje.md` |
+| **D-3** | ⏳ **PENDIENTE** | Necesita el merge: `workflow_dispatch` sobre la rama, job rojo en Actions |
+
+⚠️ **Qué es y qué no es la D-2 ejecutada.** La corrida fue el **camino feliz** (`PASS`), no
+la variante `PROBE_SELF_TEST_OMIT_REQUIRED=amountUsd` que esta fila describe, así que **no**
+cierra la parte de "DRIFT/exit 4 vía `INPUT_REJECTED`". Lo que sí cierra —y es lo que
+faltaba— es el **control positivo del cobro**: el débito de 0,03 USDC prueba que la sonda
+paga en **Solana devnet** y no en la red default del gateway, que es exactamente lo que el
+fix-pack 3 declaró que D-1 **no podía** demostrar (D-1 no cobra: no hay débito sin key
+válida). El descuento observado fue **0,03** y el 402 pide **0,0303**; la diferencia queda
+anotada sin resolver en la corrección de DT-8.
+
+
 ---
 
 ## 13. El gate — completo y en orden
@@ -669,7 +698,10 @@ caso de T-5.**
 - **F3 puede escribir y testear TODO sin ella**: la suite no toca la red, y D-1 corre igual.
 - **Sin ella no se cierran** AC-2, ni D-2/D-3 de AC-4, ni el DONE.
 - Lo que el founder necesita saber para crearla, y que este documento aporta:
-  **presupuesto ≥ 44 USDC / 30 días**, **`DAILY_LIMIT` > 1,46 USD/día**, y el nombre
+  **presupuesto ≥ 44 USDC / 30 días**, **`DAILY_LIMIT` > 1,46 USD/día** *(cifras de la
+  cadencia vieja; con 24 corridas/día son **21,82 USDC / 30 días** y **> 0,73 USD/día** —
+  ver la corrección de §16. **RESUELTO 2026-08-25**: la key existe, el secret está cargado
+  y hay 15 USDC fondeados en la red 900001, que alcanzan ~20 días)*, y el nombre
   **`A2A_PROBE_KEY`** como **repo secret** (no environment secret: ningún workflow de este
   repo declara `environment:`, y los 4 entornos que existen los creó Railway con nombres que
   traen espacios y barras).

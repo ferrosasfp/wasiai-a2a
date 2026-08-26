@@ -175,6 +175,13 @@ por `cp` con `assert md5` — nunca con `git checkout --`, que borra lo que se e
   - Fondear con 44 y usar las corridas de PR ⇒ la key se queda sin saldo antes de fin de
     mes ⇒ `INSUFFICIENT_BUDGET` ⇒ 403 ⇒ fila 4 ⇒ **CONFIG/exit 3 cada 30 minutos**. La
     sonda lo reporta bien (no dice "producción caída"), pero es ruido rojo permanente.
+- 📌 **SUPERSEDED el 2026-08-25 por la baja de cadencia a 1 hora.** Los números de esta
+  entrada (48 corridas/día, 1,4544/día, 43,63/30 días, 18 corridas de PR de margen, "cada
+  30 minutos") son los que se midieron **ese día y con esa cadencia**, y se dejan como
+  están porque son el acta de este fix-pack. **La aritmética vigente es 24 corridas/día,
+  0,7272/día, 21,82/30 días y ~42 corridas de PR de margen** — la derivación está en la
+  entrada del 2026-08-25 de más abajo y en la corrección al tope de DT-8 del SDD. Lo que
+  **no** cambió es la conclusión de esta entrada: `DAILY_LIMIT` = **2,00 USD/día**.
 
 ### [2026-08-25 20:22] Fix-pack — Un mutante que IMPRIME la credencial pasaba la suite
 
@@ -334,6 +341,96 @@ por `cp` con `assert md5` — nunca con `git checkout --`, que borra lo que se e
 
 ---
 
+### [2026-08-25 23:30] Post-F4 — D-2 EJECUTADA: el control positivo del cobro que faltaba
+
+- **Qué pasó**: la precondición de merge dejó de ser hipotética. La key existe
+  (`e06addce-1b10-46ce-a326-34b22d0109c1`), el repo secret `A2A_PROBE_KEY` está cargado, y
+  la key quedó fondeada con **15 USDC en la red 900001** (Solana devnet). Con eso se corrió
+  **D-2 contra PRODUCCIÓN**.
+- **Resultado medido**: la sonda dio **`PASS`, exit 0**, y el budget de la key bajó de
+  **15 a 14,97 USDC**.
+- **Por qué importa más de lo que parece**: el fix-pack 3 declaró por escrito que D-1
+  **no podía** demostrar en qué red cobra la sonda —D-1 usa una credencial inválida y no
+  hay débito sin key válida—, así que la cabecera `x-payment-chain: solana-devnet` estaba
+  verificada sólo por un test de cableado contra el fuente. **El débito en la 900001 es el
+  control positivo que cerraba ese hueco**: la sonda paga en el riel del producto, no en la
+  red default del gateway.
+- **⚠️ Lo que esta corrida NO demuestra**, y hay que decirlo porque la fila D-2 del SDD
+  describe otra cosa: fue el **camino feliz**, no la variante
+  `PROBE_SELF_TEST_OMIT_REQUIRED=amountUsd`. O sea que **no** cierra "DRIFT/exit 4 vía
+  `INPUT_REJECTED`" ni revalida que WKH-335 siga emitiendo `agentFailure`. Eso sigue
+  abierto.
+- **⚠️ Y un número que no cierra, escrito sin resolver**: el 402 de producción pide
+  `maxAmountRequired: 30300` = **0,0303 USDC**, y el descuento observado del budget fue
+  **0,03**. Las dos explicaciones que caben —que el budget debite el precio del agente sin
+  el ~1% de fee, o que muestre 14,9697 redondeado a dos decimales— **no se distinguen con
+  UNA sola observación**, y no se midió cuál es. Queda anotado como no explicado en vez de
+  elegir el que convenga. **La aritmética publicada usa 0,0303**, por ser el mayor:
+  dimensionar el presupuesto con el menor lo subestima.
+- **⚠️ Quién midió esto**: la corrida contra producción la ejecutó el orquestador de la
+  sesión, no el Dev. Acá se registra lo reportado (PASS / exit 0 / 15 → 14,97); **el stdout
+  crudo no se archivó en `evidence/`**, así que esta entrada es el registro, no la captura.
+- **Aplicar en**: toda HU que verifique "en qué red se cobra". Un test que lee el fuente
+  prueba el **cableado**; sólo un débito observado prueba el **destino**. Y una sola
+  observación no separa dos explicaciones que predicen el mismo valor.
+- **Queda pendiente D-3** (`workflow_dispatch` con `self_test: true`, job rojo en la UI de
+  Actions): necesita el merge.
+
+---
+
+### [2026-08-25 23:45] Post-F4 — La cadencia bajó a 1 hora, y el 48 estaba cableado en la PROSA de 6 archivos
+
+- **Decisión del founder**: el `cron` baja de `'7,37 * * * *'` (48/día) a **`'7 * * * *'`
+  (24/día)**. Razón, que conviene que quede escrita: **el producto todavía no tiene
+  tráfico**, y una hora da prácticamente la misma protección a la mitad del gasto. Contra
+  el escenario que motivó la HU —*días* de creencia equivocada sobre producción— 65 minutos
+  de latencia y 35 son la misma cosa. **La cadencia es una palanca que se aprieta cuando
+  haya usuarios reales.** Se conservó el criterio ya escrito de no usar el minuto redondo
+  (GitHub encola masivamente ahí).
+- **Error que este cambio casi comete**: tratarlo como un cambio de una línea. **El número
+  48 estaba cableado en la prosa**, con su aritmética derivada, en el encabezado del YAML,
+  en DT-8 del SDD, en §16 del Story File, en este archivo, en `validation.md` y en
+  `done-report.md`. Cambiar el `cron` y no la aritmética deja **documentación que miente** —
+  que es exactamente el defecto que esta HU vino corrigiendo toda la sesión.
+- **Aritmética nueva, derivada** (precio: 0,0303 USDC/corrida, del 402 de producción):
+
+  | | antes | vigente |
+  |---|---|---|
+  | corridas/día | 48 | **24** |
+  | USDC/día | 1,4544 | **0,7272** |
+  | USDC / 30 días (reloj solo) | 43,63 | **21,82** |
+  | piso que exige el reloj para `DAILY_LIMIT` | 1,46 | **0,73** |
+  | margen de PR con `DAILY_LIMIT` 2,00 | ~18/día | **~42/día** |
+  | latencia de detección | ≤ ~35 min | **≤ ~65 min** |
+
+- **`DAILY_LIMIT` = 2,00 sigue siendo el correcto y NO se toca.** Pasó de ajustado a
+  holgado, pero **un techo diario no es un gasto**: sólo se gasta lo que se corre, así que
+  bajarlo no ahorra un centavo y lo único que hace es achicar el radio de un desborde. La
+  key es del founder.
+- 🔴 **Lo que sí quedó corto, y es hallazgo nuevo**: el **fondeo**. La key tiene **15 USDC**
+  y el reloj solo consume 0,7272/día ⇒ **~20 días de autonomía**, no 30 (con la cadencia
+  vieja habrían sido ~10). Al agotarse sale 403 `INSUFFICIENT_BUDGET` ⇒ fila 4 ⇒
+  **CONFIG/exit 3**: rojo visible y bien atribuido, no un silencio. Decisión del founder.
+- **Fix, y la parte que importa**: además de corregir los seis sitios, se agregó
+  **T-15** en `test/probe-money-path.test.mjs`, que **DERIVA** corridas/día del `cron` real
+  y el precio del docblock del script, y exige que el encabezado del YAML contenga los
+  resultados. **Sin literales copiados de la prosa**: la única forma de que pase es que los
+  dos lados coincidan. **Medido con dos mutantes**: (a) `cron` de vuelta a `'7,37 * * * *'`
+  ⇒ `1 failed | 49 passed (50)`, `expected ... to contain '48 corridas/día'`; (b) el techo
+  diario de la prosa 2,00 → 3,00 ⇒ `1 failed | 49 passed (50)`,
+  `expected ... to contain '~75 corridas de PR por día'`. Los dos revertidos.
+- **Aplicar en**: cualquier parámetro operativo cuyo valor aparezca **derivado** en prosa
+  (cadencias, timeouts, reintentos, límites). La prosa que deriva un número de una constante
+  **es código sin compilar**: envejece en silencio en el mismo commit que cambia la
+  constante. O se deriva en un test, o no se escribe.
+- **Lo que se dejó a propósito**: `ar-report.md`, `ar-report-it2.md` y `cr-report.md` **no**
+  se reescribieron. Son actas de lo que se midió con la cadencia de entonces; reescribirlas
+  falsifica la historia. Llevan una nota al pie que dice que la cadencia cambió y dónde está
+  el número vigente. Mismo criterio para los `48` que **no son cadencia** (los conteos de
+  `48 passed (48)` del barrido de mutación y la cita `...test.ts:48`): esos no se tocaron.
+
+---
+
 ## ⛔ Precondición de MERGE — no se resuelve con código (AR/BLQ-MED-3)
 
 `gh secret list --repo ferrosasfp/wasiai-a2a` → **vacío** — medición del **AR**, 2026-08-25.
@@ -344,30 +441,46 @@ misma sesión, así que no es "sin red"). O sea que este renglón dice **"la úl
 conocida dice que no está"**, no "verifiqué que no está" — son cosas distintas y la segunda
 no ocurrió. Quien mergee: **re-corré el comando**, no te apoyes en esta línea.
 
-Si esta rama se mergea **sin** el secret, el `cron` produce **48 corridas rojas por día**
+Si esta rama se mergea **sin** el secret, el `cron` produce corridas rojas por día
 (fila 0 ⇒ CONFIG ⇒ exit 3 ⇒ job rojo ⇒ el step de aviso corre). El dedup evita el issue
-duplicado pero **no el comentario**: **1 issue + 47 comentarios por día ≈ 1.410
-notificaciones por mes**, todas sobre lo mismo. Un control que notifica 47 veces al día lo
-primero que gana es que lo silencien — el riesgo #2 del propio SDD, materializado el día 1.
+duplicado pero **no el comentario**: con la cadencia vieja de 48/día eran **1 issue + 47
+comentarios por día ≈ 1.410 notificaciones por mes**; con la cadencia vigente de **24/día**
+son **1 issue + 23 comentarios por día ≈ 690 por mes**. La mitad de un ruido inaceptable
+sigue siendo inaceptable: un control que notifica 23 veces al día lo primero que gana es
+que lo silencien — el riesgo #2 del propio SDD, materializado el día 1.
 
 **Decidido por el founder: la key se crea ANTES del merge.** Por eso el `cron` **no** se
-tocó, no se apagó y no se acotó. Queda escrito acá para que el merge no ocurra sin eso:
+apagó ni se acotó. Queda escrito acá para que el merge no ocurra sin eso:
 
-- [ ] `A2A_PROBE_KEY` existe como **repo secret** (no environment secret)
-- [ ] 🔴 **la key está fondeada en `solana-devnet`, NO en la red default del gateway.**
+✅ **AL 2026-08-25 LAS CUATRO PRIMERAS ESTÁN CUMPLIDAS** (ver la entrada de D-2 más
+abajo): la key es `e06addce-1b10-46ce-a326-34b22d0109c1`, el secret está cargado, y hay
+**15 USDC fondeados en la red 900001** con `DAILY_LIMIT` = 2,00 USD/día. Los tildes de
+abajo quedan con su razón al lado porque **el número del presupuesto NO se cumple como
+está escrito**, y eso hay que leerlo, no tildarlo.
+
+- [x] `A2A_PROBE_KEY` existe como **repo secret** (no environment secret)
+- [x] 🔴 **la key está fondeada en `solana-devnet`, NO en la red default del gateway.**
       Desde el fix-pack 3 la sonda manda `x-payment-chain: solana-devnet`, y el saldo de
       una agent key es **por red**: el débito va contra el chainId sintético **900001**
       (`src/adapters/solana/chain.ts:25`). Fondeada en otra red ⇒ 403
-      `INSUFFICIENT_BUDGET` ⇒ CONFIG/exit 3 cada 30 minutos, con la key llena
-- [ ] presupuesto **≥ 60 USDC / 30 días** — y desde el fix-pack 3 ese "USDC" es literal:
-      **USDC de devnet**, mint `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`, 6 decimales.
-      ⚠️ Antes del fix-pack la sonda cobraba en **PYUSD sobre kite-ozone-testnet** y la
-      palabra "USDC" de esta lista era falsa. La aritmética **no cambia**: 0,0303 por
-      corrida medido en las dos redes (402 del 2026-08-25). 44 cubre sólo el reloj
-      (48 × 0,0303 × 30 = 43,63); el techo diario de 2,00 habilita 18 corridas de PR/día,
-      y 30 × 2,00 = 60
-- [ ] `DAILY_LIMIT` ≥ **2,00 USD/día** (⚠️ el 1,46 de §16 quedó corto: ver la entrada del
-      `pull_request` de arriba)
+      `INSUFFICIENT_BUDGET` ⇒ CONFIG/exit 3 cada hora, con la key llena.
+      ✅ **Verificado por D-2**: el débito cayó en la 900001 (15 → 14,97)
+- [ ] 🔴 **NO cumplido, y es el único renglón que queda abierto de presupuesto.** El
+      requisito era **≥ 60 USDC / 30 días** y la key tiene **15**. Ese "USDC" es literal
+      desde el fix-pack 3: **USDC de devnet**, mint
+      `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`, 6 decimales. ⚠️ Antes del fix-pack la
+      sonda cobraba en **PYUSD sobre kite-ozone-testnet** y la palabra "USDC" de esta lista
+      era falsa. Los números, con la cadencia vigente de **24 corridas/día**:
+      el reloj solo consume 24 × 0,0303 × 30 = **21,82 / 30 días**; el techo de 2,00
+      habilita ~42 corridas de PR/día, y 30 × 2,00 = **60** sigue siendo el techo teórico
+      si se consumiera entero todos los días. **Con 15 USDC el reloj tiene ~20 días de
+      autonomía** (15 / 0,7272). Cuando se agote sale 403 `INSUFFICIENT_BUDGET` ⇒ fila 4 ⇒
+      **CONFIG/exit 3**, o sea rojo VISIBLE y bien atribuido, no un silencio. **Decisión
+      del founder**: recargar antes de ~20 días, o dejar que avise
+- [x] `DAILY_LIMIT` ≥ **2,00 USD/día** — configurado en 2,00. Con 24 corridas/día el piso
+      que exige el reloj bajó a **0,73**, así que 2,00 pasó de ajustado a holgado. **No se
+      baja**: un techo diario no es un gasto (sólo se gasta lo que se corre), bajarlo no
+      ahorra un centavo y sólo achicaría el margen de PR
 - [ ] ⚠️ si la key se crea con `allowed_agent_slugs` o con tope por llamada, el 403
       `SCOPE_DENIED` que produzca ahora sale **CONFIG/exit 3** y no "producción caída"
 

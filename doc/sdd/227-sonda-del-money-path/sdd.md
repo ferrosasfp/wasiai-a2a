@@ -7,7 +7,8 @@
 
 ## 1. Resumen
 
-Un script `.mjs` autocontenido y un workflow programado que, cada 30 minutos, leen el
+Un script `.mjs` autocontenido y un workflow programado que, **cada hora** (era cada 30
+minutos hasta el 2026-08-25: ver la corrección al tope de DT-8), leen el
 `inputSchema` que **publica producción**, derivan de él el cuerpo de una llamada de
 cotización, la ejecutan contra `/compose` con una credencial dedicada, y clasifican el
 desenlace en cuatro clases con **cuatro códigos de salida distintos**: PASS(0),
@@ -132,6 +133,52 @@ Dos de esos nombres **no son cosméticos**:
 
 ### DT-8 — Cadencia: `cron: '7,37 * * * *'` (cada 30 min, a :07 y :37)
 
+⚠️ **CORRECCIÓN — CADENCIA A 1 HORA, 2026-08-25 (post-F4).** Lo que sigue de este DT-8
+quedó escrito para 48 corridas/día y **ya no es la cadencia vigente**. Por decisión del
+founder el `cron` bajó a **`'7 * * * *'` = 24 corridas/día**: el producto todavía no
+tiene tráfico, y una hora da prácticamente la misma protección a la mitad del gasto. La
+cadencia es una palanca que se vuelve a apretar cuando haya usuarios reales.
+
+El razonamiento de abajo (costo asimétrico, minutos gratis, el minuto impar) **sigue
+valiendo entero**; lo que cambió son los cuatro números derivados y el techo de latencia:
+
+| | antes (48/día) | **vigente (24/día)** |
+|---|---|---|
+| `cron` | `'7,37 * * * *'` | **`'7 * * * *'`** |
+| corridas/día | 48 | **24** |
+| USDC/día | 1,4544 | **0,7272** |
+| USDC / 30 días (sólo reloj) | 43,63 | **21,82** |
+| latencia de detección | ≤ ~35 min | **≤ ~65 min** |
+| margen de PR con `DAILY_LIMIT` 2,00 | ~18 corridas/día | **~42 corridas/día** |
+
+Y el `DAILY_LIMIT`: **2,00 USD/día sigue siendo el valor correcto y no se toca.** El
+piso que la cadencia exige bajó (0,7272 en vez de 1,4544), o sea que 2,00 pasó de
+ajustado a holgado — pero **un techo diario no es un gasto**: sólo se gasta lo que se
+corre, así que bajarlo no ahorra un centavo y lo único que hace es achicar el radio de
+un desborde. Se deja en 2,00. La key es del founder y este documento no la cambia.
+
+🔴 **Lo que sí queda corto es el FONDEO, y es un dato nuevo**: la key está fondeada con
+**15 USDC** en la red 900001, y el reloj solo consume 0,7272/día ⇒ **~20 días de
+autonomía**, no 30. Con la cadencia anterior habrían sido ~10. Cuando se agote, el 403
+`INSUFFICIENT_BUDGET` sale como **CONFIG/exit 3** (DT-10 fila 4) y el aviso lo dice: es
+ruido rojo visible, no un silencio. Decisión del founder si recarga o lo deja avisar.
+
+La aritmética publicada usa **0,0303 USDC/corrida** (el `maxAmountRequired: 30300` del
+402, 6 decimales). ⚠️ El descuento del budget observado en D-2 fue **0,03** (15 → 14,97),
+que no es el mismo número: puede ser que el budget debite sólo el precio del agente sin
+el ~1% de fee, o que muestre 14,9697 redondeado a dos decimales. **No se midió cuál de
+las dos es**, y queda escrito sin resolver en vez de elegir la que convenga. Se publica
+el 0,0303 por ser el mayor: dimensionar con el menor subestima el gasto.
+
+⚙️ **Esta aritmética ya no depende de que alguien la recuerde**:
+`test/probe-money-path.test.mjs` T-15 la DERIVA del `cron` y del precio del docblock del
+script, y se pone rojo si la cadencia cambia sin que cambie la prosa del YAML. Medido
+con dos mutantes (`cron` de vuelta a `'7,37'` ⇒ 1 rojo; techo diario 2,00 → 3,00 en la
+prosa ⇒ 1 rojo). Es el candado del defecto que este mismo bloque de corrección arregla a
+mano una vez.
+
+---
+
 El argumento del costo asimétrico, con los dos números medidos:
 
 - **Los minutos de GitHub Actions NO son la restricción.** El repo es público
@@ -153,10 +200,13 @@ recalcularla.
 
 `:07` y `:37` y no `:00`/`:30` porque el planificador de GitHub encola masivamente en
 el minuto redondo; los minutos impares reducen el retraso de arranque. La latencia de
-detección resultante es ≤ ~35 min.
+detección resultante es ≤ ~35 min. *(Vigente: sólo `:07`, latencia ≤ ~65 min — ver la
+corrección del tope de este DT-8. El criterio del minuto impar se conservó.)*
 
 ⚠️ La `DAILY_LIMIT` de la agent key (`src/middleware/a2a-key.ts:108`) tiene que quedar
-por encima de 48 × 0,0303 = **1,46 USD/día** o la sonda se apagará sola cada tarde. Se
+por encima de 48 × 0,0303 = **1,46 USD/día** o la sonda se apagará sola cada tarde.
+*(Vigente: el piso que exige el reloj es 24 × 0,0303 = **0,73 USD/día**; el valor
+configurado en producción es **2,00** y no se cambia — ver la corrección del tope.)* Se
 declara acá para que el founder lo fije al crear la credencial; si no, la sonda lo
 reporta como **CONFIG**, no como caída (DT-10), que es el punto entero de esta HU.
 
@@ -281,6 +331,24 @@ Tres procedimientos ejecutables; los tres archivan su log en
 | **D-3** | `workflow_dispatch` con input `self_test: true` sobre la rama de la HU | **Job rojo en la UI de Actions**, sin issue: el paso sólo lleva `continue-on-error` en `pull_request`, y el aviso sólo corre en `schedule` | ≤ 0,0303 USDC |
 
 Total de la demostración: **≤ 0,061 USDC**.
+
+📌 **ESTADO DE LAS DEMOSTRACIONES — 2026-08-25.**
+
+| | Estado | Evidencia |
+|---|---|---|
+| **D-1** | ✅ **HECHA** | `evidence/D-1-credencial-invalida.log`, `D-1-post-fixpack.log`, `D-1-post-fixpack-3-cabecera-de-red.log` |
+| **D-2** | ✅ **HECHA contra PRODUCCIÓN con la credencial real** | La sonda dio **`PASS`, exit 0**, y el budget de la key bajó de **15 a 14,97 USDC** en la red **900001**. Ver la entrada del 2026-08-25 en `auto-blindaje.md` |
+| **D-3** | ⏳ **PENDIENTE** | Necesita el merge: `workflow_dispatch` sobre la rama, job rojo en Actions |
+
+⚠️ **Qué es y qué no es la D-2 ejecutada.** La corrida fue el **camino feliz** (`PASS`), no
+la variante `PROBE_SELF_TEST_OMIT_REQUIRED=amountUsd` que esta fila describe, así que **no**
+cierra la parte de "DRIFT/exit 4 vía `INPUT_REJECTED`". Lo que sí cierra —y es lo que
+faltaba— es el **control positivo del cobro**: el débito de 0,03 USDC prueba que la sonda
+paga en **Solana devnet** y no en la red default del gateway, que es exactamente lo que el
+fix-pack 3 declaró que D-1 **no podía** demostrar (D-1 no cobra: no hay débito sin key
+válida). El descuento observado fue **0,03** y el 402 pide **0,0303**; la diferencia queda
+anotada sin resolver en la corrección de DT-8.
+
 
 **El interruptor de auto-test es un footgun, y se cierra con mecanismo, no con una
 advertencia.** `PROBE_SELF_TEST_OMIT_REQUIRED` (a) imprime un banner
@@ -436,16 +504,21 @@ del `.mjs`, nunca un caso de T-5.**
 | Riesgo | Mitigación |
 |---|---|
 | El founder no crea la credencial (Missing Input bloqueante del work-item) | F3 puede escribir y testear todo sin ella (la suite no toca la red). Sin ella no se cierran AC-2, AC-4 (D-2/D-3) ni el DONE. D-1 **sí** corre sin credencial válida |
-| La `DAILY_LIMIT` de la key queda por debajo de 1,46 USD/día | La sonda lo reporta CONFIG, no caída (DT-10 fila 4). El número está en DT-8 para que el founder lo fije |
+| La `DAILY_LIMIT` de la key queda por debajo de 1,46 USD/día *(vigente: 0,73 — cadencia a 1 h)* | La sonda lo reporta CONFIG, no caída (DT-10 fila 4). El número está en DT-8 para que el founder lo fije |
 | El agente cambia su `inputSchema` | La derivación lo absorbe; lo no derivable es DRIFT con `schemaSha256` en el log |
 | `wasiai-remittance-agents#2` se arregla y `destCountry` pasa a `required` | Fila 3 → DRIFT ruidoso y bien atribuido. La sonda no fabrica un país |
 | Un `pull_request` de fork sin secret genera ruido | Fila 0 + `SKIP:` en exit 0 sólo para `pull_request` (DT-9/DT-10) |
 
 ## 9. Missing Inputs
 
-- **[bloqueante, sin cambio]** Creación de la agent key dedicada. Este SDD aporta lo que
-  faltaba para crearla: **presupuesto ≥ 44 USDC/30 días** y **`DAILY_LIMIT` > 1,46
-  USD/día** (DT-8), y el nombre del secret **`A2A_PROBE_KEY`** como repo secret (DT-9).
+- **[RESUELTO 2026-08-25]** Creación de la agent key dedicada. La key existe
+  (`e06addce-1b10-46ce-a326-34b22d0109c1`), el repo secret **`A2A_PROBE_KEY`** está
+  cargado y la key está fondeada con **15 USDC en la red 900001** (Solana devnet), que es
+  la red contra la que la sonda cobra desde el fix-pack 3. `DAILY_LIMIT` = **2,00
+  USD/día**. Lo que este SDD pedía —*presupuesto ≥ 44 USDC/30 días* y *`DAILY_LIMIT` >
+  1,46*— quedó dimensionado para 48 corridas/día; con la cadencia vigente de 24 el reloj
+  consume **21,82 USDC/30 días** y exige un piso de **0,73 USD/día**. ⚠️ El fondeo de 15
+  USDC alcanza para **~20 días**, no 30: ver la corrección del tope de DT-8.
 - **[resuelto]** Cadencia → DT-8. Nombres → DT-7. Secret → DT-9. Derivación → DT-11.
   Drift vs caída → DT-10. Demostración del rojo → DT-14.
 - **[sigue fuera de alcance, no asumido]** Canal de alerta adicional a GitHub Issues

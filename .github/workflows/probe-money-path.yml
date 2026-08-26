@@ -7,20 +7,36 @@ name: probe-money-path
 #
 # ⚠️ Cada corrida CUESTA: ~0,0303 USDC (0,03 del agente + ~1% de fee), y hay DOS
 # palancas de gasto, no una:
-#   1. el `cron`: 48 corridas/día ≈ 1,4544 USDC/día ≈ 43,63 USDC / 30 días;
+#   1. el `cron`: 24 corridas/día ≈ 0,7272 USDC/día ≈ 21,82 USDC / 30 días;
 #   2. el trigger `pull_request`, que en un PR de una rama de ESTE repo recibe el
 #      secret entero y hace el POST real. Está acotado con `paths:` a los archivos
 #      de la sonda, así que sólo gasta cuando el PR toca la sonda misma.
-# ⚠️ Por (2) la `DAILY_LIMIT` de la key NO puede quedar pegada a 1,46: con ese piso
-# el margen del día es 0,0056 USD ≈ CERO corridas de PR, y un solo push agota el
-# límite y apaga la sonda el resto del día. Piso recomendado: 2,00 USD/día, que
-# deja ~18 corridas de PR por día sobre las 48 del reloj.
+# ⚠️ El `DAILY_LIMIT` de la key es un TECHO, no un gasto: bajarlo NO ahorra un centavo
+# —sólo se gasta lo que se corre—, apenas achica el radio de un desborde. Con el reloj
+# en 0,7272 USD/día, el piso vigente de 2,00 USD/día deja ~42 corridas de PR por día
+# sobre las 24 del reloj. `test/probe-money-path.test.mjs` (T-15) DERIVA estos tres
+# números del `cron` de abajo y se pone rojo si alguien cambia la cadencia sin tocar
+# esta prosa — que es exactamente lo que pasó al bajar de 48 a 24.
+#
+# ⚠️ De dónde sale el 0,0303, y por qué NO es el 0,03 que se ve en el budget: el 402 de
+# producción pide `maxAmountRequired: 30300` (USDC, 6 decimales) = 0,0303, y ése es el
+# número que se usa acá porque es lo que el gateway EXIGE por corrida. El descuento
+# observado del budget en D-2 fue 0,03 (15 → 14,97). No se midió cuál de las dos
+# explicaciones es la buena —que el budget debite sólo el precio del agente sin el fee,
+# o que muestre 14,9697 redondeado a dos decimales—, así que queda escrito sin resolver.
+# Se publica el 0,0303 por ser el mayor: dimensionar con el menor subestima el gasto.
 
 on:
   schedule:
-    # A :07 y :37 y no en el minuto redondo: el planificador de GitHub encola
-    # masivamente ahí, y los minutos impares reducen el retraso de arranque.
-    - cron: '7,37 * * * *'
+    # UNA corrida por hora, a :07, y no en el minuto redondo: el planificador de
+    # GitHub encola masivamente ahí, y los minutos impares reducen el retraso de
+    # arranque.
+    # ⚠️ Bajó de cada 30 min (`'7,37 * * * *'`, 48/día) a cada hora el 2026-08-25, por
+    # decisión del founder: el producto todavía NO tiene tráfico, y una hora da
+    # prácticamente la misma protección a la mitad del gasto. La cadencia es una
+    # palanca que se vuelve a apretar cuando haya usuarios reales — subirla es editar
+    # esta línea y la aritmética del encabezado (T-15 la fuerza).
+    - cron: '7 * * * *'
   # Acotado a la sonda misma: un PR de este repo SÍ recibe el secret y gasta.
   pull_request:
     paths:

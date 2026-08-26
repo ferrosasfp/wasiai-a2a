@@ -136,3 +136,23 @@ de `A2A_PROBE_KEY` (repo secret, presupuesto ≥ 60 USDC/30 días con las corrid
 —MNR-4—, `DAILY_LIMIT` > 1,46 USD/día) antes de mergear a `main`, o mergear sabiendo que el cron
 va a producir 48 corridas `CONFIG`/rojas por día hasta que la credencial exista (documentado en
 `evidence/D-2-D-3-NO-EJECUTADOS.log`).
+
+---
+
+📌 **NOTA AL PIE — 2026-08-25, posterior a esta validación.** Dos cosas que este informe da
+por abiertas ya no lo están, y una cambió de número. **No se reescribe el cuerpo**: es el
+acta de F4.
+
+1. **La precondición de founder está RESUELTA**: la key existe
+   (`e06addce-1b10-46ce-a326-34b22d0109c1`), el repo secret `A2A_PROBE_KEY` está cargado y
+   hay **15 USDC fondeados en la red 900001**. **D-2 se ejecutó contra producción**: `PASS`,
+   exit 0, budget 15 → 14,97. Sigue pendiente sólo **D-3**, que necesita el merge. O sea que
+   el renglón *"D-2/D-3 correctamente documentados como NO EJECUTADOS"* era cierto al
+   validar y hoy vale sólo para D-3.
+2. **La cadencia bajó a una corrida por hora**: donde dice *48 corridas `CONFIG`/rojas por
+   día* leer **24**, y donde dice *`DAILY_LIMIT` > 1,46 USD/día* leer **> 0,73** (el valor
+   configurado es 2,00 y no se toca). El presupuesto del reloj pasa de 43,63 a **21,82 USDC
+   / 30 días**.
+3. ⚠️ El **"48 tests en el archivo"** del cuerpo de este informe **no es cadencia** y sigue
+   siendo un conteo válido de su momento; hoy el archivo tiene **50** (se agregó T-15, el
+   candado que deriva la aritmética de gasto del `cron`).

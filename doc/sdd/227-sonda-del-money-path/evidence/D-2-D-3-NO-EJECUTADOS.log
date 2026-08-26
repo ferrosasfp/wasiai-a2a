@@ -29,3 +29,30 @@ Lo que el founder necesita para crearla (§16):
   · presupuesto ≥ 44 USDC / 30 días
   · DAILY_LIMIT > 1,46 USD/día — si queda corta, la sonda se apaga sola cada tarde
     y lo reporta como CONFIG, no como caída
+
+
+================================================================================
+CORRECCION — 2026-08-25, posterior a este registro
+================================================================================
+
+El NOMBRE de este archivo ya no es cierto para D-2. No se renombra: es el acta de
+cuando D-2 y D-3 no se podian ejecutar. Estado real al 2026-08-25:
+
+  · D-2  HECHA contra PRODUCCION con la credencial real.
+         Resultado: PASS, exit 0. Budget de la key: 15 -> 14,97 USDC (red 900001).
+         Es el control positivo de que el cobro cae en Solana devnet, que es lo
+         que el fix-pack 3 declaro que D-1 NO podia demostrar.
+         ATENCION: fue el camino FELIZ, no la variante
+         PROBE_SELF_TEST_OMIT_REQUIRED=amountUsd, asi que NO cierra la parte de
+         "DRIFT / exit 4 via INPUT_REJECTED" que describe la fila D-2 del SDD.
+         El stdout crudo no se archivo aca: el registro completo esta en
+         auto-blindaje.md, entrada [2026-08-25 23:30].
+
+  · D-3  SIGUE PENDIENTE. Necesita el merge (workflow_dispatch sobre la rama).
+
+Y los numeros de presupuesto de arriba son de la cadencia vieja (48 corridas/dia):
+
+  · presupuesto del reloj    43,63 USDC / 30 dias  ->  21,82  (24 corridas/dia)
+  · piso de DAILY_LIMIT      > 1,46 USD/dia        ->  > 0,73
+  · configurado en prod      DAILY_LIMIT = 2,00 USD/dia  (no se toca)
+  · fondeo real              15 USDC = ~20 dias de reloj, NO 30

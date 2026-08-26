@@ -8,6 +8,30 @@
 - Gate completo: `tsc` 0 · `lint` 0 (503 files) · `npm test` **299 passed | 6 skipped (305)** / **6009 passed | 19 skipped (6028)**
 - Tamaño: **1,26x presupuesto (730 L vs 578 L)**, bajo techo (1156 L), todo el exceso en tests
 
+> ### 📌 ADDENDUM 2026-08-25 (post-F4) — lo de arriba envejeció en dos puntos
+>
+> Este reporte se escribió el día del cierre y **su titular ya no es cierto**. Se deja el
+> cuerpo como está (es el acta de ese día) y se corrige acá:
+>
+> 1. **La precondición de founder está RESUELTA.** La key existe
+>    (`e06addce-1b10-46ce-a326-34b22d0109c1`), el repo secret `A2A_PROBE_KEY` está cargado y
+>    la key está fondeada con **15 USDC en la red 900001** (Solana devnet), con
+>    `DAILY_LIMIT` = 2,00 USD/día. **D-2 se ejecutó contra producción**: `PASS`, exit 0, y el
+>    budget bajó de 15 a 14,97 — el control positivo de que el cobro cae en Solana devnet,
+>    que es justo lo que el fix-pack 3 declaró que D-1 no podía demostrar. Queda pendiente
+>    sólo **D-3** (job rojo por `workflow_dispatch`), que necesita el merge.
+> 2. **La cadencia bajó de 30 min a 1 hora** por decisión del founder (sin tráfico todavía,
+>    una hora protege casi igual a la mitad del gasto). Todo "48" de este documento que sea
+>    cadencia hay que leerlo **24**: 24 corridas/día, **0,7272 USDC/día**, **21,82 USDC / 30
+>    días**, ~42 corridas de PR/día de margen con el techo de 2,00, latencia ≤ ~65 min.
+>    `DAILY_LIMIT` sigue en 2,00 y no se toca.
+> 3. 🔴 **Lo único que NO cumple el checklist de abajo es el presupuesto**: pedía ≥ 60 USDC /
+>    30 días y hay 15, que a 0,7272/día alcanzan **~20 días**. Al agotarse sale 403
+>    `INSUFFICIENT_BUDGET` ⇒ CONFIG/exit 3: rojo visible, no silencio.
+>
+> Derivación completa y su candado (T-15) en `auto-blindaje.md`, entradas del 2026-08-25
+> 23:30 y 23:45, y en la corrección al tope de **DT-8** del SDD.
+
 ---
 
 ## Pipeline ejecutado
@@ -129,6 +153,11 @@ doc/sdd/227-sonda-del-money-path/                     [directorio de artefactos]
 ---
 
 ## Precondición de merge — el bloqueante que NO resuelve código
+
+⚠️ **RESUELTA el 2026-08-25 — ver el ADDENDUM del resumen ejecutivo.** El bloque de abajo es
+el estado de ese día: los `☐` de su checklist están cumplidos salvo el del presupuesto, y sus
+números de cadencia son los de 48 corridas/día. No se reescribe porque es el acta.
+
 
 ```
 A2A_PROBE_KEY repo secret [NO EXISTE — 2026-08-25]

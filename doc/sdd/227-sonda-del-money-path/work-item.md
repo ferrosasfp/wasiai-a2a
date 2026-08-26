@@ -247,3 +247,14 @@ confirmar que el servidor servía el código nuevo fue una sonda a mano — `/he
 - **Bloqueada para llegar a DONE**, no para avanzar F1-F2.5, por el Missing Input
   bloqueante de la credencial de sonda (ver arriba) — es un prerequisito de founder,
   no de otro agente ni de otra HU.
+
+---
+
+📌 **NOTA AL PIE — 2026-08-25, posterior a este work-item.** **DT-3 quedó superado**: la
+cadencia bajó de **cada 30 minutos a cada hora** (`cron: '7 * * * *'`, 24 corridas/día) por
+decisión del founder, con el producto todavía sin tráfico. El argumento del **costo
+asimétrico** que DT-3 escribe **no cambió** —el lado caro sigue siendo el silencio—; lo que
+cambió es dónde cae el corte: contra una caída de *días*, 65 minutos de latencia y 35 son
+la misma cosa, a la mitad del gasto. Esta decisión no se reescribe (es el acta de F1); la
+vigente, con su aritmética derivada y su candado ejecutable (**T-15**), está en la
+corrección al tope de **DT-8** en `sdd.md`.
