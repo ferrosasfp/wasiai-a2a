@@ -495,7 +495,7 @@ costo que tiene.
 
 ### [2026-08-25] Fix-pack 2 — B-3: 11 citas que rompí sin tocar el archivo donde viven
 
-- **Error**: `dashboard.ts` pasó de 791 a 957 líneas, y las 11 citas
+- **Error**: `dashboard.ts` pasó de 791 a 958 líneas, y las 11 citas
   `dashboard.ts:N` de `test/ownership-filter-guard.exceptions.ts` —que eran
   exactas en `f391325`— quedaron apuntando a código ajeno. `:515-517` era el
   handler de arbitrations y pasó a ser el cache del tablero.
@@ -503,11 +503,15 @@ costo que tiene.
   AR de la iteración 1 verificó que el archivo de excepciones **no estuviera
   modificado**, que es otra pregunta: un archivo intacto con citas rotas pasa ese
   control con 10/10.
-- **Fix**: los 11 números re-anclados **derivando** el mapa `vieja→nueva` de
-  `/usr/bin/git diff -U1000000 f391325`, y cada destino verificado contra su
-  **símbolo contenedor** (la ruta que la excepción nombra), no contra un parecido
-  de texto — hay 6 líneas cuyo contenido es literalmente el mismo
-  (`preHandler: requireAdminToken`), así que el texto no distingue.
+- **Fix (con lo que quedó mal, corregido en el fix-pack 3 — ver la entrada de
+  abajo)**: los 11 números se re-anclaron aplicando un **desplazamiento único**
+  calculado como `957 − 791 = +166`. El `957` es el error de arriba: son 958, así
+  que el desplazamiento correcto era **+167** y 10 de las 11 citas quedaron una
+  línea corridas. La verificación que se hizo de cada destino fue **leer el texto
+  de la línea de llegada** y aceptarla si parecía la ruta correcta; **no** se
+  resolvió el símbolo contenedor de cada destino, aunque este renglón lo afirmaba.
+  Por eso 8 pasaron (cayeron en la línea del path, que se lee bien) y 2 aterrizaron
+  en líneas que no contienen lo que la frase nombra.
 - **La edición es LÍNEA-NEUTRA a propósito** (`--numstat` = `12 12`): los números
   viejos y los nuevos tienen la misma cantidad de dígitos, así que nada se
   reenvuelve y las citas que apuntan *hacia adentro* de `exceptions.ts` (`:24`,
@@ -567,3 +571,120 @@ costo que tiene.
   siempre en la misma dirección, y acá falló dos veces seguidas.
 - **Fuera del presupuesto** (`test/`, que §10 no mide): las 12 líneas
   línea-neutras de `ownership-filter-guard.exceptions.ts`.
+
+### [2026-08-25 14:30] Fix-pack 3 — B-3 otra vez: un error de UNO en el conteo movió DIEZ citas
+
+- **Error**: el desplazamiento de las 11 citas de `dashboard.ts` en
+  `ownership-filter-guard.exceptions.ts` se calculó como `957 − 791 = +166`. El
+  archivo tiene **958** líneas, así que el desplazamiento era **+167** y **10 de
+  las 11** quedaron una línea corridas. Ocho se leían bien igual (caían en la
+  línea del path y la frase dice «Ruta»); dos aterrizaron en líneas que **no
+  contienen lo que la frase nombra**: `:275` decía «gate `requireAdminTokenStrict`
+  en :683» y 683 es `'/api/arbitrations/:intentId/resolve',`; `:318` decía «Rutas
+  :846 y :908» y 908 es `config: { rateLimit: false },`.
+- **Causa raíz — dos, y la segunda es la que importa**:
+  1. **Un desplazamiento único derivado de una RESTA de totales, no del diff.**
+     `nuevoTotal − viejoTotal` da el delta *neto al final del archivo*; sirve como
+     desplazamiento sólo si no hay borrados, y aun así hereda cualquier error del
+     total. Un `wc -l` mal leído se propaga a **todas** las citas de golpe. El mapa
+     de verdad se camina: `/usr/bin/git diff -U100000`, `' '`→ambos, `'-'`→sólo
+     vieja, `'+'`→sólo nueva. Ese mapa, además, **se autoverifica**: al terminar
+     tiene que haber caminado exactamente 791 líneas viejas y 958 nuevas.
+  2. **La verificación declarada no era la verificación hecha.** El renglón decía
+     «cada destino verificado contra su **símbolo contenedor**»; lo que se hizo fue
+     mirar el TEXTO de la línea de llegada y aceptarla si parecía plausible. Con
+     ocho destinos que caen en un `'/api/...'` legible, «parece bien» dio verde
+     ocho veces y tapó las dos que no. **La afirmación falsa era sobre el
+     instrumento**, que es la clase peor: apaga la revisión siguiente, que ya no
+     re-mide algo que un documento declara medido.
+- **Fix**:
+  - Mapa re-derivado caminando el diff (**0 borrados, 167 inserciones**, totales
+    791→958 verificados por el propio caminado) ⇒ **+167** para las 10 anclas de
+    rutas y **+7** para el docblock del gate del trace, que está por encima de todo
+    lo insertado.
+  - **Se re-escribieron las 10, no las 2 que el AR nombró.** Ocho estaban
+    «correctas por casualidad»: apuntaban a la línea del path porque el −1 las
+    corrió justo ahí, no porque alguien hubiera elegido esa convención. Una cita
+    correcta por casualidad es una cita sin dueño.
+  - **Convención, explícita y única: el ancla es la línea del `preHandler`**, o sea
+    el **control compensatorio** — que es lo que la excepción existe para
+    justificar. No es un invento de este fix-pack: es la convención que el archivo
+    ya tenía en `f391325` (`:477`, `:424`, `:598`, `:630`, `:390`, `:680`, `:742`,
+    `:517` son todas líneas de `preHandler`). El −1 la había cambiado en silencio.
+    Un auditor que abre la cita tiene que caer en el gate, no en el path.
+  - **Cada destino resuelto contra su símbolo contenedor de verdad, esta vez**: un
+    caminado hacia arriba desde la línea hasta el `fastify.<verbo>(` que abre el
+    registro, imprimiendo el path de esa ruta. Es lo único que distingue seis
+    líneas cuyo texto es idéntico (`{ config: { rateLimit: false }, preHandler:
+    requireAdminToken },` en `:591`, `:618`, `:644`; con `…Strict` en `:684`,
+    `:797`, `:847`).
+- **Línea-neutralidad, otra vez a propósito** (`--numstat` = `11 11`, 537 líneas
+  antes y después): todos los reemplazos son de 3 dígitos por 3 dígitos, así que
+  nada se re-envuelve y `exceptions.ts:274` / `:284` —citadas desde
+  `doc/sdd/220-…/adversarial-review.md`— siguen cayendo dentro de las entradas de
+  `arbiter.ts:1237` y `:1270`.
+- **Y la trampa gemela, que casi me como**: el arreglo de `MNR-1` vive en
+  `dashboard.ts:380-386`, o sea **por encima** de 9 de las 10 citas que acababa de
+  corregir. Reescribir ese docblock con una línea de más las rompía a todas de
+  nuevo, en el mismo commit. Se hizo **línea-neutro** (7 líneas por 7,
+  `--numstat` = `7 7`) por esa razón y no por estética.
+- **Aplicar en**: cualquier re-anclaje de citas. (a) El desplazamiento se **camina**
+  desde el diff y el caminado se autoverifica contra los dos totales; una resta de
+  totales no es un mapa. (b) «Verifiqué contra el símbolo» sólo se escribe si hubo
+  un paso que **resuelve el símbolo**; si lo que hiciste fue leer la línea y que te
+  pareciera bien, escribí eso. (c) Cuando arregles citas hacia un archivo,
+  fijate si el mismo commit lo edita **más arriba**.
+
+### [2026-08-25 14:30] Fix-pack 3 — MNR-1: la razón falsa era la que el fix acababa de volver falsa
+
+- **Error**: el docblock del TTL decía que la fuente de la tarjeta 2 «puede
+  cambiar dos veces en el mismo segundo» **porque** el hook de `event-tracking`
+  inserta una fila por request. Esas filas van con `agent_id` en NULL, y el
+  `.not('agent_id','is',null)` **de este mismo commit** las excluye: insertar mil
+  filas de telemetría no mueve ni una celda de esa tarjeta.
+- **Causa raíz**: la frase se escribió mirando el productor de `a2a_events`, no la
+  query de la tarjeta — que estaba dos pantallas más abajo **y la estaba cambiando
+  yo**. Es la tercera vez en esta HU que una frase de reemplazo nace falsa.
+- **Fix**: **acotado, no reemplazado**. El docblock ahora dice que la razón que
+  había era falsa y **por qué**, y se niega explícitamente a poner otra causa en su
+  lugar: la volatilidad real no está medida. La conclusión —el 60 es una tolerancia
+  elegida, no una afirmación sobre las fuentes— no cambia, porque nunca dependió de
+  la causa. Sí hay un candidato (`compose.ts` escribe eventos **con** `agent_id`),
+  y justamente por eso no se nombra: nadie midió cada cuánto.
+- **Aplicar en**: la opción por defecto al sacar una frase falsa sigue siendo
+  **borrar o acotar**. Y el caso peor de reemplazarla no es escribir una razón
+  vieja: es escribir una que **tu propio diff** vuelve falsa en el mismo commit.
+
+### [2026-08-25 14:30] Fix-pack 3 — MNR-2: el único default optimista de la pantalla
+
+- **Error**: `avisoDeTope` leía los dos campos de techo con un default optimista
+  (`typeof … === 'number' ? … : 0` y `=== true`). Un payload **sin** los campos
+  ⇒ cero techos ⇒ 50 filas, verde, sin un solo aviso: la tabla que parece completa
+  que estos dos campos existen para impedir. Contradecía la regla escrita cuatro
+  funciones más arriba (*«El DEFAULT es GRIS, nunca verde»*).
+- **Causa raíz**: el `typeof` se escribió como **defensa contra un tipo raro**, no
+  como pregunta sobre el conocimiento. `? … : 0` colapsa «no vino» y «vino cero» en
+  el mismo valor, que es exactamente la distinción que esta pantalla entera
+  defiende en las otras tres tarjetas.
+- **Fix**: la ausencia cae del lado **gris** (`class="motivo"`, `var(--gris)`), con
+  su propia frase («esta respuesta no dice…»), separada del amarillo, que sigue
+  significando «pasó». Y la rama de lista vacía se re-redactó: decía «la lectura
+  tocó su tope», que con los campos ausentes **también sería falso** — ahora dice
+  «no consta que la lectura haya visto todo», que vale para las dos ramas. Corregir
+  el default sin tocar esa frase habría cambiado un default optimista por una
+  afirmación falsa.
+- **Testigo + mutante**: dos tests nuevos
+  (`dashboard-tres-preguntas.render.test.ts`, «un payload SIN los campos de techo…»
+  y «lista vacía SIN los campos de techo…»). Mutante `M-MNR2`: se restauró el
+  default viejo reemplazando las dos guardas `typeof … !== …` por `false` (aguja
+  única, verificada). Resultado: **33 passed / 2 failed** — mueren **los dos tests
+  nuevos y ninguno más**, o sea el mutante es exactamente el bug y el testigo es
+  exactamente el que lo caza. Restaurado con `cp -p` y `md5sum -c` verde.
+- **Lo que hay que decir**: hoy este camino es **inalcanzable desde este repo** (el
+  service siempre setea los dos campos, `tsc` los exige, y el endpoint no tiene
+  response-schema que pode claves). El camino residual es un deploy rodante:
+  página nueva contra instancia vieja. No se arregló porque esté pasando; se
+  arregló porque la regla no admite excepciones por «hoy no llega nadie».
+- **Aplicar en**: todo `?? valorPorDefecto` sobre un campo que reporta un
+  **límite** o una **ausencia**. Preguntá qué pinta el default cuando el campo no
+  viene: si pinta «todo bien», es un default optimista y va del lado gris.

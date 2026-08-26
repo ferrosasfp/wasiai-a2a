@@ -377,13 +377,13 @@ interface TableroCacheEntry<T> {
 /**
  * 60 s de vida para una tarjeta leída con ÉXITO.
  *
- * ⛔ Acá NO hay ninguna afirmación sobre cada cuánto cambian las fuentes. El
- * hook de `event-tracking` inserta en `a2a_events` una fila por cada request a
- * los prefijos que rastrea, así que la fuente de la tarjeta 2 puede cambiar dos
- * veces en el mismo segundo. El número es cuánta desactualización se decide
- * tolerar para no repetir tres lecturas —una de ellas, un RPC con cuota— en
- * cada reload; que el dato puede ser anterior al pedido se lo dice la pantalla
- * al operador, no este número.
+ * ⛔ Acá NO hay ninguna afirmación sobre cada cuánto cambian las fuentes. Acá
+ * decía que las cambia el hook de `event-tracking`, y es FALSO: esas filas van
+ * con `agent_id` en NULL y la tarjeta 2 las excluye. No la reemplazo por otra
+ * causa: no está medida. El número es cuánta desactualización se decide tolerar
+ * para no repetir tres lecturas —una de ellas, un RPC con cuota— en cada
+ * reload; que el dato puede ser anterior al pedido se lo dice la pantalla al
+ * operador, no este número.
  *
  * ⚠️ Acá decía "alineado con `STATS_CACHE_TTL_MS`", y no lo está: es el doble,
  * cosa que la propia frase admitía dos palabras después. Ese símbolo además

@@ -236,16 +236,30 @@
     // exactamente tantas filas como el techo, la lectura sí vio todo, y afirmar
     // lo contrario sería cambiar una frase falsa por otra. La incertidumbre es
     // el dato, y el operador la necesita igual.
+    //
+    // ⛔ Y la AUSENCIA de cualquiera de los dos campos NO es «no hay techo»: es
+    // «esta respuesta no lo dice», y eso cae del lado GRIS, como el `status`
+    // desconocido de `estadoDe`. Tratarlos como 0/false pintaba la tabla como
+    // completa sin que nadie lo hubiera afirmado — el único default optimista
+    // que tenía esta pantalla, y justo en la función que existe para impedirlo.
+    // Hoy es inalcanzable desde este repo (el service siempre los setea y `tsc`
+    // los exige), pero esta página la sirve un navegador que durante un deploy
+    // rodante puede estar hablando con una instancia vieja.
     function avisoDeTope(card) {
       var partes = [];
-      var omitidos = typeof card.agentes_omitidos === 'number' ? card.agentes_omitidos : 0;
-      if (omitidos > 0) {
-        partes.push('Hay ' + esc(omitidos) + ' agente(s) más con actividad en la ventana que esta tabla no muestra.');
+      var gris = [];
+      if (typeof card.agentes_omitidos !== 'number') {
+        gris.push('Esta respuesta no dice cuántos agentes con actividad quedaron fuera de la tabla.');
+      } else if (card.agentes_omitidos > 0) {
+        partes.push('Hay ' + esc(card.agentes_omitidos) + ' agente(s) más con actividad en la ventana que esta tabla no muestra.');
       }
-      if (card.lectura_truncada === true) {
+      if (typeof card.lectura_truncada !== 'boolean') {
+        gris.push('Esta respuesta no dice si la lectura llegó a cortarse en su tope.');
+      } else if (card.lectura_truncada === true) {
         partes.push('La lectura se cortó en su tope de eventos: puede haber quedado actividad de la ventana sin mirar.');
       }
-      return partes.length === 0 ? '' : '<div class="aviso">' + partes.join(' ') + '</div>';
+      return (gris.length === 0 ? '' : '<div class="motivo">' + gris.join(' ') + '</div>') +
+        (partes.length === 0 ? '' : '<div class="aviso">' + partes.join(' ') + '</div>');
     }
 
     // ⚠️ TRES rótulos que esta tarjeta tuvo mal y no puede volver a tener mal:
@@ -268,11 +282,14 @@
       var agentes = card.agentes || [];
       var aviso = avisoDeTope(card);
       if (agentes.length === 0) {
-        // «se preguntó y no hubo» SÓLO se puede decir cuando la lectura no tocó
-        // ningún techo. Con un techo tocado, la lista vacía no lo autoriza.
+        // «se preguntó y no hubo» SÓLO se puede decir cuando CONSTA que la
+        // lectura no tocó ningún techo. Un techo tocado no lo autoriza, y un
+        // techo DESCONOCIDO tampoco: dejan el mismo hueco. Por eso esta frase
+        // no afirma cuál de los dos pasó — eso lo dice `avisoDeTope`, que
+        // separa el amarillo («pasó») del gris («no lo sé»).
         if (aviso !== '') {
-          return '<div class="empty">Ningún agente entró en esta tabla y la lectura tocó su tope, ' +
-            'así que acá no hay ninguna afirmación sobre si hubo actividad o no.</div>' + aviso;
+          return '<div class="empty">Ningún agente entró en esta tabla y no consta que la lectura ' +
+            'haya visto todo, así que acá no hay ninguna afirmación sobre si hubo actividad o no.</div>' + aviso;
         }
         return '<div class="empty">Sin actividad en los ' + esc(card.ventana) +
           '. Es una respuesta, no una ausencia: se preguntó y no hubo.</div>';

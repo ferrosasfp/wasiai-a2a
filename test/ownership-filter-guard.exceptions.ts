@@ -261,7 +261,7 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     category: 'admin-cross-tenant',
     reason:
       'listHolds: su docblock :1171-1174 dice "cross-tenant DELIBERADO ... superficie de ALTO ' +
-      'PRIVILEGIO gateada SÓLO por requireAdminToken". Ruta src/routes/dashboard.ts:643.',
+      'PRIVILEGIO gateada SÓLO por requireAdminToken". Ruta src/routes/dashboard.ts:644.',
   },
   {
     file: 'src/services/arbiter.ts',
@@ -272,7 +272,7 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     reason:
       'resolveHold: override humano admin-gated. Lee el row real para tomar `owner_ref` como dato ' +
       'autoritativo (:1233-1235). Ruta POST /api/arbitrations/:intentId/resolve, ' +
-      'dashboard.ts:681-682, gate requireAdminTokenStrict en :683 (fail-closed en dev Y prod).',
+      'dashboard.ts:682-683, gate requireAdminTokenStrict en :684 (fail-closed en dev Y prod).',
   },
   {
     file: 'src/services/arbiter.ts',
@@ -282,8 +282,8 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     category: 'admin-cross-tenant',
     reason:
       'resolveHold: lectura best-effort de la evidencia del hold (ambiguity_reason/llm_reasoning) ' +
-      'para preservarla. Misma ruta y mismo gate que la anterior: dashboard.ts:681-683, ' +
-      'requireAdminTokenStrict. NO confundir con dashboard.ts:796, que es ' +
+      'para preservarla. Misma ruta y mismo gate que la anterior: dashboard.ts:682-684, ' +
+      'requireAdminTokenStrict. NO confundir con dashboard.ts:797, que es ' +
       'POST /api/reconciliation/:intentId/resolve y llama a reconciliationService.resolveIntent.',
   },
   {
@@ -294,7 +294,7 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     category: 'admin-cross-tenant',
     reason:
       'stats(): contador global del panel (`count: exact, head: true`, no trae filas). Ruta ' +
-      'dashboard.ts:590, gate requireAdminToken: 503 en producción si DASHBOARD_ADMIN_TOKEN no ' +
+      'dashboard.ts:591, gate requireAdminToken: 503 en producción si DASHBOARD_ADMIN_TOKEN no ' +
       'está configurado, passthrough sólo en dev.',
   },
   {
@@ -314,8 +314,8 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     verb: 'select',
     category: 'admin-cross-tenant',
     reason:
-      'readLeasedRow(intentId): el intent lo elige el operador del panel. Rutas dashboard.ts:846 ' +
-      'y :908, gate requireAdminTokenStrict (fail-closed en dev Y prod).',
+      'readLeasedRow(intentId): el intent lo elige el operador del panel. Rutas dashboard.ts:847 ' +
+      'y :909, gate requireAdminTokenStrict (fail-closed en dev Y prod).',
   },
   {
     file: 'src/services/reconciliation.ts',
@@ -335,7 +335,7 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     category: 'admin-cross-tenant',
     reason:
       'listAmbiguous: docblock :725-727 — "Cross-tenant DELIBERADO (mismo patrón y misma ' +
-      'justificación que listPending)". Ruta dashboard.ts:764.',
+      'justificación que listPending)". Ruta dashboard.ts:765.',
   },
   {
     file: 'src/services/reconciliation.ts',
@@ -344,7 +344,7 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     verb: 'select',
     category: 'admin-cross-tenant',
     reason:
-      'resolveIntent(intentId): el intent lo elige el operador del panel. Ruta dashboard.ts:796, ' +
+      'resolveIntent(intentId): el intent lo elige el operador del panel. Ruta dashboard.ts:797, ' +
       'gate requireAdminTokenStrict.',
   },
   {
@@ -355,7 +355,7 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     category: 'admin-cross-tenant',
     reason:
       'driftCheck: reporte global del drift entre el débito off-chain y el balance on-chain, por ' +
-      'key. Sólo reporta, nunca corrige (docblock :1527-1528). Ruta dashboard.ts:764.',
+      'key. Sólo reporta, nunca corrige (docblock :1527-1528). Ruta dashboard.ts:765.',
   },
   {
     file: 'src/services/reconciliation.ts',
@@ -381,7 +381,7 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
     verb: 'select',
     category: 'admin-cross-tenant',
     reason:
-      'lastCrossChainSettle: indicador de vida del rail cross-chain. Ruta dashboard.ts:439, gate ' +
+      'lastCrossChainSettle: indicador de vida del rail cross-chain. Ruta dashboard.ts:440, gate ' +
       'requireAdminTokenForTrace, que es fail-closed en dev Y prod porque el payload trae ' +
       'owner_ref, montos y tx hashes de TODOS los owners (docblock dashboard.ts:307-316).',
   },

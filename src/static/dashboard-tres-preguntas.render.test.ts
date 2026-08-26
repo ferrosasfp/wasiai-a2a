@@ -400,6 +400,57 @@ describe('render: las tres tarjetas', () => {
     expect(html).not.toContain('tope de eventos');
   });
 
+  // ── La AUSENCIA de los dos campos cae del lado GRIS ───────────────────────
+  //
+  // El render los leía con un default optimista (`|| 0`, `=== true`), así que un
+  // payload sin ellos pintaba la tabla como completa sin que nadie lo afirmara
+  // — exactamente lo que `avisoDeTope` existe para impedir, y lo contrario de
+  // la regla que la propia pantalla se escribió («el DEFAULT es GRIS»).
+  //
+  // Input que pone en rojo el default viejo: los dos `expect` de abajo. Con
+  // `typeof … === 'number' ? … : 0` y `=== true`, la salida no tiene NI el aviso
+  // gris NI el amarillo, y este test falla en las dos aserciones positivas.
+
+  it('un payload SIN los campos de techo no se pinta como tabla completa', () => {
+    const screen = loadScreen();
+    // Construido a mano, campo por campo, para que se vea qué NO está: un
+    // `...spread` con `delete` deja la ausencia invisible en la lectura.
+    const sinTechos = {
+      status: REPUTACION_SATURADA.status,
+      ventana: REPUTACION_SATURADA.ventana,
+      agentes: REPUTACION_SATURADA.agentes,
+    };
+    screen.render({ ...SNAPSHOT_OK, reputacion: sinTechos });
+
+    const html = screen.el('reputacion').innerHTML;
+    // Lo dice, y lo dice en GRIS (`motivo`), no en amarillo (`aviso`): que el
+    // campo falte no es «pasó», es «no sé».
+    expect(html).toContain('no dice cuántos agentes con actividad quedaron');
+    expect(html).toContain('no dice si la lectura llegó a cortarse en su tope');
+    expect(html).not.toContain('class="aviso"');
+    // Y NO inventa el número que no tiene.
+    expect(html).not.toContain('agente(s) más');
+  });
+
+  it('lista vacía SIN los campos de techo tampoco dice «se preguntó y no hubo»', () => {
+    const screen = loadScreen();
+    screen.render({
+      ...SNAPSHOT_OK,
+      reputacion: {
+        status: 'ok',
+        agentes: [],
+        ventana: 'últimos 30 días',
+      },
+    });
+
+    const panel = screen.el('reputacion');
+    expect(panel.innerHTML).not.toContain('se preguntó y no hubo');
+    expect(panel.innerHTML).toContain('ninguna afirmación');
+    // Y no afirma que el techo se haya tocado, porque no consta que se haya
+    // tocado: la frase del hueco vale para las dos ramas.
+    expect(panel.innerHTML).not.toContain('se cortó en su tope de eventos');
+  });
+
   it('lista vacía CON un techo tocado NO dice «se preguntó y no hubo»', () => {
     const screen = loadScreen();
     screen.render({
