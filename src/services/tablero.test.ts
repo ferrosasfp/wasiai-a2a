@@ -17,6 +17,7 @@ interface ChainCall {
   table: string;
   select: string;
   eqs: Array<[string, unknown]>;
+  nots: Array<[string, string, unknown]>;
   gte: [string, unknown] | null;
   order: [string, unknown] | null;
   limit: number | null;
@@ -67,17 +68,38 @@ vi.mock('../lib/supabase.js', () => {
           table,
           select: '',
           eqs: [],
+          nots: [],
           gte: null,
           order: null,
           limit: null,
         };
         state.calls.push(call);
 
+        /**
+         * Los filtros PRIMERO y el techo DESPUÉS, como PostgREST.
+         *
+         * El orden no es un detalle: si el falso aplicara el techo antes que el
+         * filtro, el caso que rompió la tarjeta 2 —el techo comido por filas de
+         * telemetría con `agent_id` NULL— sería inconstruible acá, y sacar el
+         * `.not(...)` del service dejaría los tests en verde.
+         */
         const eventsResult = async () => {
           if (state.eventError) {
             return { data: null, error: state.eventError };
           }
-          return { data: state.eventRows, error: null };
+          let rows: Array<{ agent_id: string | null }> = state.eventRows;
+          for (const [column, operator, value] of call.nots) {
+            if (operator !== 'is' || value !== null) {
+              throw new Error(
+                `el falso no implementa .not(${column}, ${operator})`,
+              );
+            }
+            rows = rows.filter(
+              (row) => (row as Record<string, unknown>)[column] !== null,
+            );
+          }
+          if (call.limit !== null) rows = rows.slice(0, call.limit);
+          return { data: rows, error: null };
         };
 
         const builder = {
@@ -87,6 +109,10 @@ vi.mock('../lib/supabase.js', () => {
           },
           eq(column: string, value: unknown) {
             call.eqs.push([column, value]);
+            return builder;
+          },
+          not(column: string, operator: string, value: unknown) {
+            call.nots.push([column, operator, value]);
             return builder;
           },
           gte(column: string, value: unknown) {
@@ -449,6 +475,98 @@ describe('T-REP: la reputación no estrena lógica', () => {
     const slugs = computeStandingBatch.mock.calls[0]?.[0] as string[];
     expect(slugs).toHaveLength(50);
     expect(slugs[0]).toBe('agente-0');
+  });
+
+  // ── El techo de la lectura (B-1 del AR de la iteración 2) ─────────────────
+  //
+  // `middleware/event-tracking.ts` inserta una fila en `a2a_events` por CADA
+  // request a los prefijos que rastrea, con `agent_id` en NULL.
+  //
+  // MEDIDO contra bdwv el 2026-08-25 (ventana de 30 días): 2.011 filas NULL
+  // contra 481 con agente. La cadena sin filtro tocaba el techo de 1.000 y
+  // publicaba 5 de los 6 agentes que había — `remit-kyc-validator` no estaba en
+  // el tablero y nada lo decía.
+  //
+  // CONSTRUIDO acá, que es otra cosa: el caso extremo del mismo mecanismo, con
+  // la telemetría delante de todo. Ahí el batch se llama con [] y la pantalla
+  // sale VERDE diciendo «se preguntó y no hubo».
+  it('B-1: la telemetría sin agente NO se come el techo de la lectura', async () => {
+    state.eventRows = [
+      ...Array.from({ length: 2513 }, () => ({ agent_id: null })),
+      { agent_id: 'remit-corridor-fx-solana' },
+    ];
+    computeStandingBatch.mockResolvedValue({
+      degraded: false,
+      standings: new Map([
+        ['remit-corridor-fx-solana', counters({ successCount: 3 })],
+      ]),
+    });
+
+    const card = await leerReputacion();
+
+    // El agente SÍ llega al batch, con 2.513 filas de telemetría por delante.
+    expect(computeStandingBatch).toHaveBeenCalledWith([
+      'remit-corridor-fx-solana',
+    ]);
+    if (card.status !== 'ok') throw new Error('esperaba ok');
+    expect(card.agentes.map((a) => a.slug)).toEqual([
+      'remit-corridor-fx-solana',
+    ]);
+    // Y el filtro está en la CADENA, no sólo en el resultado.
+    const call = state.calls.find((c) => c.table === 'a2a_events');
+    expect(call?.nots).toEqual([['agent_id', 'is', null]]);
+  });
+
+  it('B-1: la lectura cortada en el techo de eventos lo DICE', async () => {
+    state.eventRows = Array.from({ length: 1200 }, (_, i) => ({
+      agent_id: `agente-${i % 3}`,
+    }));
+    computeStandingBatch.mockImplementation(async (slugs: string[]) => ({
+      degraded: false,
+      standings: new Map(slugs.map((s) => [s, counters({})])),
+    }));
+
+    const card = await leerReputacion();
+
+    if (card.status !== 'ok') throw new Error('esperaba ok');
+    expect(card.lectura_truncada).toBe(true);
+    // Los 3 agentes de la lectura entran: lo que se cortó son EVENTOS, y desde
+    // ahí no se sabe cuántos agentes quedaron afuera. Por eso son dos campos.
+    expect(card.agentes_omitidos).toBe(0);
+  });
+
+  it('B-1: los agentes que no entran por el tope de la tabla se CUENTAN', async () => {
+    state.eventRows = Array.from({ length: 60 }, (_, i) => ({
+      agent_id: `agente-${i}`,
+    }));
+    computeStandingBatch.mockImplementation(async (slugs: string[]) => ({
+      degraded: false,
+      standings: new Map(slugs.map((s) => [s, counters({})])),
+    }));
+
+    const card = await leerReputacion();
+
+    if (card.status !== 'ok') throw new Error('esperaba ok');
+    expect(card.agentes).toHaveLength(50);
+    // 60 slugs vistos − 50 publicados. Con el `break` viejo, los 10 de más no
+    // se contaban siquiera: la tabla quedaba idéntica a "50 y no hay más".
+    expect(card.agentes_omitidos).toBe(10);
+    // 60 filas contra un techo de 1.000: la lectura NO se cortó.
+    expect(card.lectura_truncada).toBe(false);
+  });
+
+  it('control POSITIVO: sin ningún techo tocado, la tarjeta no reclama nada', async () => {
+    state.eventRows = [{ agent_id: 'agente-a' }];
+    computeStandingBatch.mockResolvedValue({
+      degraded: false,
+      standings: new Map([['agente-a', counters({ successCount: 1 })]]),
+    });
+
+    const card = await leerReputacion();
+
+    if (card.status !== 'ok') throw new Error('esperaba ok');
+    expect(card.agentes_omitidos).toBe(0);
+    expect(card.lectura_truncada).toBe(false);
   });
 
   it('los contadores por agente salen del batch, no se inventan', async () => {

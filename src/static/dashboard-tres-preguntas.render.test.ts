@@ -111,6 +111,8 @@ const SNAPSHOT_OK = {
       { slug: 'remit-fx', tasksSettled: 7, successCount: 6, failedCount: 1 },
     ],
     ventana: 'últimos 30 días',
+    agentes_omitidos: 0,
+    lectura_truncada: false,
   },
   escrows: {
     status: 'ok',
@@ -270,6 +272,23 @@ describe('render: las tres tarjetas', () => {
     expect(html.match(/la fila viene en NULL/g)).toHaveLength(3);
   });
 
+  it('una columna AUSENTE del payload tampoco se pinta como celda vacía', () => {
+    // `reply.send()` serializa a JSON y `JSON.stringify` BORRA las claves con
+    // valor `undefined`, así que una columna ausente en el payload llega al
+    // browser como `undefined` y no como `null`. Todos los fixtures de arriba
+    // usan `null`: sin este caso, quitar `|| valor === undefined` de
+    // `valorDeFila` deja la suite entera en verde con tres celdas en blanco.
+    const screen = loadScreen();
+    screen.render({
+      ...SNAPSHOT_OK,
+      caja: { status: 'ok', budget: {} },
+    });
+
+    const html = screen.el('caja').innerHTML;
+    expect(html).not.toContain('<span></span>');
+    expect(html.match(/la fila viene en NULL/g)).toHaveLength(3);
+  });
+
   it('CERO y NULL se ven DISTINTO (que es el punto entero de la tarjeta)', () => {
     const conCero = loadScreen();
     conCero.render({
@@ -320,6 +339,8 @@ describe('render: las tres tarjetas', () => {
     agentes: [
       { slug: 'remit-fx', tasksSettled: 5, successCount: 501, failedCount: 0 },
     ],
+    agentes_omitidos: 0,
+    lectura_truncada: false,
   };
 
   it('la ventana NO se presenta como el alcance de los contadores', () => {
@@ -334,6 +355,71 @@ describe('render: las tres tarjetas', () => {
     expect(html).toContain('últimos 30 días');
     expect(html).toContain('NO se acotan');
     expect(html).toContain('historial completo');
+    // Y NO promete completitud: la lectura tiene dos techos, así que «LOS
+    // agentes con actividad» era una afirmación que la query no entrega.
+    expect(html).not.toContain('Universo: los agentes');
+  });
+
+  // ── El tope de la lectura tiene que VERSE ─────────────────────────────────
+  //
+  // Con `agent_id` NULL comiéndose el techo de eventos, la tarjeta salía VERDE
+  // diciendo «se preguntó y no hubo». El filtro de la query cierra ese camino;
+  // esto cierra el otro: que la tabla se trunque en silencio.
+
+  it('los agentes que no entran en la tabla se dicen, con su número', () => {
+    const screen = loadScreen();
+    screen.render({
+      ...SNAPSHOT_OK,
+      reputacion: { ...REPUTACION_SATURADA, agentes_omitidos: 12 },
+    });
+
+    const html = screen.el('reputacion').innerHTML;
+    expect(html).toContain('12 agente(s) más');
+    expect(html).toContain('esta tabla no muestra');
+  });
+
+  it('la lectura cortada en su tope de eventos se dice, y NO inventa cuántos faltan', () => {
+    const screen = loadScreen();
+    screen.render({
+      ...SNAPSHOT_OK,
+      reputacion: { ...REPUTACION_SATURADA, lectura_truncada: true },
+    });
+
+    const html = screen.el('reputacion').innerHTML;
+    expect(html).toContain('se cortó en su tope de eventos');
+    // Sin `agentes_omitidos`, no hay ningún número de agentes que afirmar.
+    expect(html).not.toContain('agente(s) más');
+  });
+
+  it('control POSITIVO: sin techos tocados no hay ningún aviso de tope', () => {
+    const screen = loadScreen();
+    screen.render({ ...SNAPSHOT_OK, reputacion: REPUTACION_SATURADA });
+
+    const html = screen.el('reputacion').innerHTML;
+    expect(html).not.toContain('aviso');
+    expect(html).not.toContain('tope de eventos');
+  });
+
+  it('lista vacía CON un techo tocado NO dice «se preguntó y no hubo»', () => {
+    const screen = loadScreen();
+    screen.render({
+      ...SNAPSHOT_OK,
+      reputacion: {
+        status: 'ok',
+        agentes: [],
+        ventana: 'últimos 30 días',
+        agentes_omitidos: 0,
+        lectura_truncada: true,
+      },
+    });
+
+    const panel = screen.el('reputacion');
+    // Sigue siendo una tarjeta con datos, y justamente por eso no puede afirmar
+    // una ausencia que la lectura no comprobó.
+    expect(panel.className).toContain('ok');
+    expect(panel.innerHTML).not.toContain('se preguntó y no hubo');
+    expect(panel.innerHTML).toContain('ninguna afirmación');
+    expect(panel.innerHTML).toContain('se cortó en su tope de eventos');
   });
 
   it('«liquidadas» dice que tiene tope, así que 5 contra 501 no es un tablero roto', () => {
@@ -356,12 +442,20 @@ describe('render: las tres tarjetas', () => {
     const screen = loadScreen();
     screen.render({
       ...SNAPSHOT_OK,
-      reputacion: { status: 'ok', agentes: [], ventana: 'últimos 30 días' },
+      reputacion: {
+        status: 'ok',
+        agentes: [],
+        ventana: 'últimos 30 días',
+        agentes_omitidos: 0,
+        lectura_truncada: false,
+      },
     });
 
     const panel = screen.el('reputacion');
     expect(panel.className).toContain('ok');
     expect(panel.innerHTML).toContain('Sin actividad');
+    // Sin ningún techo tocado, «se preguntó y no hubo» SÍ es afirmable.
+    expect(panel.innerHTML).toContain('se preguntó y no hubo');
   });
 
   it('escrows con `vencidos` en null lo dice con motivo y NO muestra un cero', () => {
@@ -437,6 +531,8 @@ describe('T-UI-XSS: esc()', () => {
       reputacion: {
         status: 'ok',
         ventana: 'últimos 30 días',
+        agentes_omitidos: 0,
+        lectura_truncada: false,
         agentes: [
           {
             slug: '<img src=x onerror=alert(1)>',

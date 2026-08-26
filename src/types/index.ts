@@ -2651,10 +2651,32 @@ export interface TableroAgenteStanding {
 }
 
 export interface TableroReputacionOk {
-  /** Vacío = "pregunté y no hay actividad en la ventana". NO es una ausencia. */
+  /**
+   * Vacío = "pregunté y no hay actividad en la ventana". NO es una ausencia…
+   * salvo que alguno de los dos campos de abajo diga que la lectura tocó un
+   * techo: con un techo tocado, "vacío" ya no autoriza a decir "no hubo".
+   */
   agentes: TableroAgenteStanding[];
   /** Etiqueta legible de la ventana sobre la que se derivó el universo. */
   ventana: string;
+  /**
+   * Agentes que la lectura VIO en la ventana y esta lista NO muestra.
+   *
+   * Conteo exacto sobre lo leído: slugs distintos vistos menos filas
+   * publicadas. Obligatorio (no opcional) por lo mismo que el resto de la
+   * tarjeta: un campo que se puede omitir se omite, y la lista vuelve a
+   * parecer completa sin que nadie lo haya afirmado.
+   */
+  agentes_omitidos: number;
+  /**
+   * `true` = la lectura del universo se cortó en su techo de eventos.
+   *
+   * Dice eso y nada más. NO dice cuántos agentes faltan (desde el corte no se
+   * sabe) ni siquiera que falte alguno: con exactamente tantas filas como el
+   * techo, la lectura vio todo. Lo que sí hace es quitarle a la pantalla el
+   * derecho a decir "se preguntó y no hubo".
+   */
+  lectura_truncada: boolean;
 }
 
 export type TableroReputacionCard = TableroCard<TableroReputacionOk>;

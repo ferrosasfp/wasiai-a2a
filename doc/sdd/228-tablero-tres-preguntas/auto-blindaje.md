@@ -220,8 +220,15 @@ y con qué mutante se probó que el arreglo es real.
   `to contain 'no dice si la key está activa'`. Hay además un test que fija la
   discriminación que importa: **0 y NULL producen HTML distinto**.
 - **Aplicar en**: cualquier celda que venga de una columna nullable. El assert que
-  lo caza barato y no envejece es `not.toContain('<span></span>')`: no nombra
-  ninguna columna, así que sigue valiendo cuando se agregue la próxima.
+  lo caza barato es `not.toContain('<span></span>')`, y **su alcance es exactamente
+  las celdas que emite `kv()`** — no las columnas: una columna nueva que pase por
+  `kv()` queda cubierta sin tocar el test, y una que NO pase, no. ⚠️ Acá decía que
+  «no envejece», y es falso: medido, `reputacion.agentes[].tasksSettled: null` sale
+  `<td></td>` y `escrows.usdc_bloqueado: null` sale `<div class="big"> USDC</div>`
+  —la cifra más grande de la pantalla, vacía, en verde— y el assert no ve ninguno
+  de los dos, porque ninguno pasa por `kv()`. Hoy los dos son inconstruibles por
+  tipos (`TableroAgenteStanding` exige `number`, `TableroEscrowsBase` exige
+  `string`); lo que estaba mal era la afirmación sobre el testigo, no la pantalla.
 
 ---
 
@@ -405,3 +412,158 @@ costo que tiene.
   misma dirección, igual que el presupuesto de tests que no separaba arnés de
   casos (§7.3 del CR). Las dos veces el número estaba bien calculado para un
   mundo en el que nada sale mal.
+
+---
+
+## Fix-pack 2 — el re-AR (`ar-report-it2.md`) rechazó con 3 bloqueantes
+
+### [2026-08-25] Fix-pack 2 — B-1: el rótulo nuevo prometía un universo que la query no entrega
+
+- **Error**: el fix-pack 1 cambió `Ventana: últimos 30 días` (falso) por
+  `Universo: LOS agentes con actividad en los últimos 30 días` (también falso). La
+  query trae hasta 1.000 filas de `a2a_events` y hasta 50 slugs, así que «los» es
+  una promesa de completitud que la lectura no puede sostener. Y el techo de 1.000
+  se lo comía la telemetría: `middleware/event-tracking.ts` inserta una fila por
+  request rastreada, con `agent_id` en NULL.
+- **Causa raíz**: **cambié una frase falsa por otra frase falsa** — el mismo patrón
+  que este archivo ya documenta dos veces (`M-4`, y el rótulo de ventana original).
+  El defecto de método es escribir el reemplazo sin preguntarse *¿con qué input
+  concreto pongo esta frase en falso?*. Para «los agentes» el input era trivial:
+  el agente 51.
+- **Fix**, dos partes, y la segunda es la que cierra el agujero de verdad:
+  1. la query filtra `.not('agent_id', 'is', null)` — el techo se gasta en filas
+     que pueden aportar un agente;
+  2. los dos techos **se ven**. La tarjeta viaja con `agentes_omitidos` (conteo
+     EXACTO de agentes que la lectura vio y la tabla no muestra) y
+     `lectura_truncada` (la lectura se cortó en su techo de eventos; desde ahí no
+     se sabe cuántos agentes faltan, así que no se dice). El rótulo perdió el
+     artículo, y **la lista vacía ya no puede decir «se preguntó y no hubo» si
+     algún techo se tocó**: esa rama del render está condicionada al aviso.
+  Son dos campos y no uno a propósito: uno afirma un número y el otro afirma una
+  ignorancia, y colapsarlos obligaría a inventar el número o a callar el corte.
+- **Una frase de este mismo fix se cazó al escribir el reporte**: el aviso decía
+  «la lectura se cortó en su tope: NO se leyó toda la actividad de la ventana», y
+  eso es falso en el borde — con exactamente 1.000 filas en la ventana la lectura
+  sí vio todo. Quedó «PUEDE haber quedado actividad sin mirar», que es el estado
+  epistémico real. **Es la tercera vez en esta HU que el reemplazo de una frase
+  falsa nace falso**, y la única que se cazó antes de que la mirara un AR: la
+  pregunta que la cazó es la misma de siempre, aplicada a lo que uno acaba de
+  escribir en vez de a lo que encontró.
+- **Medido contra la base real** (bdwv, 2026-08-25, sonda de sólo lectura corrida
+  y borrada; ventana de 30 días): **2.011** filas con `agent_id` NULL contra
+  **481** con agente (2.513 NULL en toda la tabla). La cadena vieja **tocaba el
+  techo**: leía 1.000 filas y publicaba **5** agentes. La nueva lee 481 y publica
+  **6**. ⚠️ El agente que falta hoy en producción es `remit-kyc-validator`, y nada
+  en la pantalla lo decía. **Ojo con la versión más dramática de este hallazgo**:
+  «las 1.000 más recientes son todas telemetría ⇒ el batch se llama con `[]` ⇒ la
+  pantalla sale verde diciendo "no hubo"» es **construible y está en un test**,
+  pero **NO es lo que la base muestra hoy** — hoy el daño es un agente invisible,
+  no la tarjeta vacía. Los números son una FOTO: se re-derivan corriendo las dos
+  cadenas.
+- **Mutantes**: 6 aplicados, **6 muertos**. `M-B1a` (se cae el `.not`) → KILLED por
+  el testigo de las 2.513 filas. `M-B1b` (vuelve el `break`, o sea los agentes de
+  más no se cuentan) → `expected +0 to be 10`. `M-B1c` (`lecturaTruncada = false`)
+  → `expected false to be true`. `M-B1d` (vuelve `Universo: los agentes`) →
+  `not to contain 'Universo: los agentes'`. `M-B1e` (el caso vacío vuelve a afirmar
+  siempre «se preguntó y no hubo») → `not to contain 'se preguntó y no hubo'`.
+  `M-B1f` (se borra el aviso del cuerpo con tabla) → 2 tests.
+- **Aplicar en**: toda pantalla que publique una lista derivada de una query con
+  `limit`. Dos preguntas, y la segunda es la que faltó las dos veces: *¿qué input
+  concreto pone esta frase en falso?* y *si la lectura toca su techo, ¿la pantalla
+  puede decirlo, o trunca en silencio?* Un tablero que trunca en silencio miente
+  igual que uno que rotula mal.
+
+### [2026-08-25] Fix-pack 2 — B-2: la razón del TTL era otra frase falsa
+
+- **Error**: al sacar el «alineado con `STATS_CACHE_TTL_MS`» escribí en su lugar
+  *«porque ninguna de las tres fuentes de este tablero cambia en menos de un
+  minuto»*. `a2a_events` gana una fila por cada request rastreada: dos llamadas en
+  el mismo segundo cambian esa fuente en el mismo segundo.
+- **Causa raíz**: la misma de B-1, en la misma línea que ya había corregido una
+  vez. Al reemplazar una razón falsa se siente que hay que poner OTRA razón, y la
+  razón nueva no pasa por ninguna medición porque el error que se estaba
+  arreglando era el otro.
+- **Fix**: **el número no lleva una razón sobre la volatilidad de las fuentes**. El
+  docblock ahora dice que acá NO se afirma cada cuánto cambian, dice que
+  `a2a_events` puede cambiar en el mismo segundo, y deja el 60 como lo que es: una
+  tolerancia elegida. Lo único que afirma de otro archivo —«que el dato puede ser
+  anterior al pedido se lo dice la pantalla al operador»— se verifica abriendo el
+  `setEstado` del HTML.
+- **Aplicar en**: cuando saques una frase falsa, la opción por defecto es **borrar
+  o acotar**, no reemplazar. Una constante con un número puede no tener ninguna
+  justificación escrita; lo que no puede tener es una falsa.
+
+### [2026-08-25] Fix-pack 2 — B-3: 11 citas que rompí sin tocar el archivo donde viven
+
+- **Error**: `dashboard.ts` pasó de 791 a 957 líneas, y las 11 citas
+  `dashboard.ts:N` de `test/ownership-filter-guard.exceptions.ts` —que eran
+  exactas en `f391325`— quedaron apuntando a código ajeno. `:515-517` era el
+  handler de arbitrations y pasó a ser el cache del tablero.
+- **Causa raíz**: los barridos miran lo que ESCRIBISTE, no lo que DESPLAZASTE. El
+  AR de la iteración 1 verificó que el archivo de excepciones **no estuviera
+  modificado**, que es otra pregunta: un archivo intacto con citas rotas pasa ese
+  control con 10/10.
+- **Fix**: los 11 números re-anclados **derivando** el mapa `vieja→nueva` de
+  `/usr/bin/git diff -U1000000 f391325`, y cada destino verificado contra su
+  **símbolo contenedor** (la ruta que la excepción nombra), no contra un parecido
+  de texto — hay 6 líneas cuyo contenido es literalmente el mismo
+  (`preHandler: requireAdminToken`), así que el texto no distingue.
+- **La edición es LÍNEA-NEUTRA a propósito** (`--numstat` = `12 12`): los números
+  viejos y los nuevos tienen la misma cantidad de dígitos, así que nada se
+  reenvuelve y las citas que apuntan *hacia adentro* de `exceptions.ts` (`:24`,
+  `:108-117`, `:359-374`, `:458-459`, repartidas en 5 documentos) siguen valiendo.
+  Arreglar una cita desplazando otras es la corrección que empeora el repo.
+- **Lo que NO se hizo, y hay que decirlo**: estas 11 citas **siguen sin tener
+  guardián**. `test/cited-lines-guard` sólo cubre los 14 citadores de
+  `CORTE_A_PATHS`, y `ownership-filter-guard.exceptions.ts` no está en esa lista.
+  Meterlo es una HU, no un fix-pack: el registro exige `mustContain` y `symbolPath`
+  leídos a mano para cada cita. Hasta entonces, el silencio sobre estos 11 números
+  es real.
+
+### [2026-08-25] Fix-pack 2 — MNR-1 y MNR-2
+
+- **MNR-1**: `auto-blindaje.md` afirmaba que `not.toContain('<span></span>')` «no
+  envejece». **Medido con una sonda propia** (corrida y borrada): con
+  `tasksSettled: null` la tabla de la tarjeta 2 sale
+  `<tr><td>remit-fx</td><td></td><td></td><td></td></tr>` y con
+  `usdc_bloqueado: null` la tarjeta 3 sale `<div class="big"> USDC</div>` —las dos
+  en `class="panel ok"`— y el assert **no ve ninguna de las dos**, porque ninguna
+  pasa por `kv()`. Corregido a lo que el assert cubre de verdad: las celdas que
+  emite `kv()`. Los dos casos son inconstruibles hoy por tipos; lo falso era la
+  afirmación sobre el testigo.
+- **MNR-2**: el mutante que el re-AR encontró vivo (quitar `|| valor === undefined`
+  de `valorDeFila`) ahora **muere**: `not to contain '<span></span>'`. El testigo
+  renderiza una `caja` sin las cuatro columnas, que es lo que llega al browser
+  cuando `JSON.stringify` borra una clave `undefined` — todos los fixtures previos
+  usaban `null`.
+
+### [2026-08-25] Fix-pack 2 — el presupuesto, re-medido (el número de arriba envejeció)
+
+- **Medido** con el mismo comando que el re-AR (`git diff --cached --numstat
+  f391325 -- src/ .env.example README.md README.es.md`, con todo en el índice):
+  **+3.630 / −6**, contra los **3.315** que este archivo declaraba antes de este
+  fix-pack. Techo de 2x del SDD §10: **3.150** ⇒ **2,30x**, **480 líneas por
+  encima**. El renglón anterior no estaba mal: **envejeció**, y no había nada que
+  lo pusiera rojo al envejecer.
+- **De dónde sale lo que agregó este fix-pack** (`--numstat` contra `42fcd31`,
+  sólo los archivos que entran al presupuesto): **+332 / −17**, o sea las **+315**
+  netas que explican la diferencia con los 3.315. De esas 332 agregadas, **216 son
+  tests** (`tablero.test.ts` 119 + `render.test.ts` 97: los 6 mutantes de B-1 y el
+  testigo de MNR-2 necesitan sus casos, y el falso de Supabase ahora aplica el
+  `.not` y el `limit` como PostgREST) y **116 son producción**: 23 del contrato
+  (los dos campos nuevos con su porqué), 48 del service (el filtro, el conteo sin
+  `break` y el docblock con la medición contra bdwv), 36 del render
+  (`avisoDeTope` y la rama vacía condicionada) y 9 del docblock del TTL.
+
+  ⚠️ Estos números se re-midieron DESPUÉS de la última edición de prosa: la
+  primera versión de este renglón decía `+325 / 109` y quedó vieja en el mismo
+  commit, por siete líneas de comentario. Un número sobre el diff envejece con la
+  edición siguiente, incluso con la de uno mismo.
+- **Justificación**, y es la misma que la vez pasada agravada: es el **segundo**
+  fix-pack de un AR rechazado. Recortar acá es recortar testigos de bloqueantes de
+  *data integrity*. Lo único que se podría recortar es prosa, y la prosa es
+  exactamente lo que los dos AR pidieron por escrito. **La lección sigue siendo
+  para el próximo SDD**: un presupuesto que no reserva nada para el post-AR falla
+  siempre en la misma dirección, y acá falló dos veces seguidas.
+- **Fuera del presupuesto** (`test/`, que §10 no mide): las 12 líneas
+  línea-neutras de `ownership-filter-guard.exceptions.ts`.

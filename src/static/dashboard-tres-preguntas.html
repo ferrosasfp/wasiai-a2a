@@ -226,7 +226,29 @@
       return html;
     }
 
-    // ⚠️ DOS rótulos que esta tarjeta tuvo mal y no puede volver a tener mal:
+    // Los dos techos de la lectura, dichos por separado porque afirman cosas
+    // distintas: `agentes_omitidos` es un conteo EXACTO de agentes que la
+    // lectura vio y esta tabla no muestra; `lectura_truncada` es «la lectura se
+    // cortó en su techo», y de ahí no se sabe cuántos agentes quedaron afuera
+    // —ni si quedó alguno—, así que no se dice.
+    //
+    // ⚠️ Por eso el segundo dice «PUEDE haber quedado» y no «quedó»: con
+    // exactamente tantas filas como el techo, la lectura sí vio todo, y afirmar
+    // lo contrario sería cambiar una frase falsa por otra. La incertidumbre es
+    // el dato, y el operador la necesita igual.
+    function avisoDeTope(card) {
+      var partes = [];
+      var omitidos = typeof card.agentes_omitidos === 'number' ? card.agentes_omitidos : 0;
+      if (omitidos > 0) {
+        partes.push('Hay ' + esc(omitidos) + ' agente(s) más con actividad en la ventana que esta tabla no muestra.');
+      }
+      if (card.lectura_truncada === true) {
+        partes.push('La lectura se cortó en su tope de eventos: puede haber quedado actividad de la ventana sin mirar.');
+      }
+      return partes.length === 0 ? '' : '<div class="aviso">' + partes.join(' ') + '</div>';
+    }
+
+    // ⚠️ TRES rótulos que esta tarjeta tuvo mal y no puede volver a tener mal:
     //
     // 1. La VENTANA acota QUIÉNES aparecen, no los números de cada fila. El
     //    filtro de fecha vive sólo en la query del universo; los contadores
@@ -238,15 +260,26 @@
     //    «ok» sigue subiendo — o sea el estado NORMAL de este sistema muestra
     //    «liquidadas 5 · ok 501», y con el rótulo viejo eso se leía como un
     //    tablero roto o, peor, como un número creíble.
+    // 3. «Universo: LOS agentes con actividad» prometía completitud, y la
+    //    lectura tiene dos techos. Sin el artículo la frase dice lo que la
+    //    query entrega, y lo que falta lo dice `avisoDeTope`. Un tablero que
+    //    trunca en silencio miente igual que uno que rotula mal.
     function cuerpoReputacion(card) {
       var agentes = card.agentes || [];
+      var aviso = avisoDeTope(card);
       if (agentes.length === 0) {
+        // «se preguntó y no hubo» SÓLO se puede decir cuando la lectura no tocó
+        // ningún techo. Con un techo tocado, la lista vacía no lo autoriza.
+        if (aviso !== '') {
+          return '<div class="empty">Ningún agente entró en esta tabla y la lectura tocó su tope, ' +
+            'así que acá no hay ninguna afirmación sobre si hubo actividad o no.</div>' + aviso;
+        }
         return '<div class="empty">Sin actividad en los ' + esc(card.ventana) +
           '. Es una respuesta, no una ausencia: se preguntó y no hubo.</div>';
       }
-      var html = '<div class="motivo">Universo: los agentes con actividad en los ' +
+      var html = '<div class="motivo">Universo: agentes con actividad registrada en los ' +
         esc(card.ventana) + '. Los contadores de cada fila NO se acotan a esa ' +
-        'ventana: son el historial completo del agente.</div>' +
+        'ventana: son el historial completo del agente.</div>' + aviso +
         '<table><thead><tr><th>agente</th><th>liquidadas (con tope por caller)</th>' +
         '<th>ok (histórico)</th><th>fallidas (histórico)</th></tr></thead><tbody>';
       for (var i = 0; i < agentes.length; i++) {
