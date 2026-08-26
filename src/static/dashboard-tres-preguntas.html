@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WasiAI A2A · Las tres preguntas</title>
+  <!--
+    WKH-365 · Tablero de las tres preguntas (read-only).
+
+    HTML + CSS + JS inline, sin CDN y sin build step (patrón de
+    src/static/dashboard-trace.html).
+
+    Es un CASCARÓN: no trae ni un dato de tenant. Pide el token al operador y lo
+    manda por el header X-Admin-Token. El único fetch de la página es el GET del
+    tablero, y hay un test que lo mantiene así.
+
+    NO hay ningún botón que dispare un pipeline: cada ejecución real cuesta
+    dinero, y este tablero sólo mira. Tampoco hay refresco automático, a
+    diferencia del live trace: una de las tres tarjetas consulta un RPC con
+    cuota, y un reintento en bucle es carga sobre justo lo que puede estar en
+    429. Se actualiza cuando el operador lo pide.
+  -->
+  <style>
+    :root {
+      --bg: #0f1020;
+      --panel: #191a2e;
+      --panel-2: #12132a;
+      --line: #2a2c47;
+      --text: #e8e9f3;
+      --muted: #9aa0bd;
+      --ok: #00b894;
+      --warn: #fdcb6e;
+      --gris: #6b7091;
+      --accent: #6c5ce7;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 1rem; background: var(--bg); color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      font-size: 15px; line-height: 1.5;
+    }
+    h1 { font-size: 1.35rem; margin: 0 0 .25rem; }
+    h2 { font-size: 1.05rem; margin: 0 0 .35rem; }
+    p.lead { color: var(--muted); font-size: .85rem; margin: .25rem 0 1rem; max-width: 78ch; }
+    .mono { font-family: var(--mono); }
+    .bar {
+      display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 10px; padding: .6rem .75rem; margin-bottom: 1rem;
+    }
+    .bar input {
+      flex: 1 1 200px; min-width: 0; background: var(--panel-2);
+      border: 1px solid var(--line); color: var(--text);
+      border-radius: 8px; padding: .45rem .6rem; font-family: var(--mono); font-size: .85rem;
+    }
+    .bar button {
+      background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+      padding: .5rem .9rem; font-size: .85rem; cursor: pointer;
+    }
+    #estado { font-size: .8rem; color: var(--muted); flex: 1 1 100%; }
+    .grid { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+    .panel {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 10px; padding: .8rem .9rem;
+    }
+    .chip {
+      display: inline-block; font-size: .72rem; border-radius: 999px;
+      padding: .12rem .55rem; font-weight: 700; letter-spacing: .02em;
+    }
+    .chip.ok { background: rgba(0,184,148,.16); color: var(--ok); }
+    .chip.sin-dato { background: rgba(107,112,145,.22); color: var(--gris); }
+    .panel.sin-dato { opacity: .82; border-style: dashed; }
+    .motivo { color: var(--gris); font-size: .85rem; margin-top: .5rem; }
+    .big { font-size: 1.5rem; font-weight: 700; font-family: var(--mono); }
+    .kv { display: flex; justify-content: space-between; gap: .75rem; font-size: .85rem; padding: .18rem 0; }
+    .kv span:last-child { font-family: var(--mono); }
+    .aviso { color: var(--warn); font-size: .82rem; margin-top: .5rem; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; font-size: .82rem; margin-top: .4rem; }
+    th, td { text-align: right; padding: .22rem .3rem; border-bottom: 1px solid var(--line); }
+    th:first-child, td:first-child { text-align: left; font-family: var(--mono); }
+    .empty { color: var(--muted); font-style: italic; }
+    footer { margin: 2rem 0 1rem; font-size: .75rem; color: var(--muted); }
+    @media (max-width: 520px) { body { padding: .6rem; } .big { font-size: 1.25rem; } }
+  </style>
+</head>
+<body>
+  <h1>WasiAI A2A · Las tres preguntas</h1>
+  <p class="lead">
+    Tres cosas que hoy se averiguan a mano: cuánta caja le queda a la key de la
+    sonda, qué standing tienen los agentes con actividad reciente, y cuánta plata
+    sigue trabada en escrows de Solana devnet. Esta pantalla sólo lee: abrirla o
+    actualizarla no gasta ni un centavo.
+  </p>
+
+  <div class="bar">
+    <input id="admin-token" type="password" placeholder="Token de admin (X-Admin-Token)" autocomplete="off">
+    <button id="load-btn" type="button">Actualizar</button>
+    <div id="estado">Pegá el token de admin y tocá Actualizar.</div>
+  </div>
+
+  <div class="grid">
+    <div class="panel" id="caja"><h2>1 · La caja de la sonda</h2><div class="empty">Todavía no se cargó nada.</div></div>
+    <div class="panel" id="reputacion"><h2>2 · La reputación</h2><div class="empty">Todavía no se cargó nada.</div></div>
+    <div class="panel" id="escrows"><h2>3 · Los escrows</h2><div class="empty">Todavía no se cargó nada.</div></div>
+  </div>
+
+  <footer>
+    WasiAI A2A Protocol · read-only · una tarjeta gris dice «no pude leer esta
+    fuente», que no es lo mismo que «está todo bien».
+  </footer>
+
+  <script>
+    'use strict';
+    var BASE = window.location.origin;
+    var ENDPOINT = '/dashboard/api/tres-preguntas';
+    var TOKEN_KEY = 'wasiai_admin_token'; // misma clave que /dashboard
+
+    // Escape para HTML. El `&` va PRIMERO (si no, se re-escaparían las entidades
+    // que genera el resto) y las comillas entran porque esta salida se interpola
+    // DENTRO de atributos. El `esc()` de dashboard.html usa el truco del text
+    // node y NO escapa comillas: no copiarlo de ahí.
+    function esc(value) {
+      if (value === null || value === undefined) return '';
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    var MOTIVOS = {
+      no_configurado: 'falta configurar qué key mirar',
+      no_encontrada: 'esa key no existe para ese dueño',
+      error_db: 'la base no contestó',
+      historial_ilegible: 'no se pudo preguntar por el historial',
+      rpc_no_configurado: 'falta un RPC de Solana propio (el público tira 429)',
+      rpc_error: 'el RPC no contestó',
+      respuesta_invalida: 'el RPC contestó algo que no se entiende'
+    };
+
+    // `MOTIVOS[reason] ||` a secas resuelve contra `Object.prototype`: con
+    // 'constructor' o 'toString' devuelve una FUNCIÓN en vez de caer al fallback
+    // que este mismo renglón promete, y justo el caso que el fallback existe
+    // para narrar (un `reason` fuera de la unión) es el que lo esquiva.
+    function motivoTexto(reason) {
+      return Object.prototype.hasOwnProperty.call(MOTIVOS, reason)
+        ? MOTIVOS[reason]
+        : 'motivo desconocido';
+    }
+
+    // El DEFAULT es GRIS, nunca verde: un `status` desconocido o ausente es
+    // "no sé", y "no sé" no puede pintarse como "está bien".
+    function estadoDe(card) {
+      var status = card ? card.status : undefined;
+      switch (status) {
+        case 'ok':
+          return { clase: 'ok', etiqueta: 'con datos' };
+        case 'sin_dato':
+          return { clase: 'sin-dato', etiqueta: 'sin dato · ' + motivoTexto(card.reason) };
+        default:
+          return { clase: 'sin-dato', etiqueta: 'sin dato · estado desconocido' };
+      }
+    }
+
+    function encabezado(titulo, card) {
+      var e = estadoDe(card);
+      return '<h2>' + esc(titulo) + ' <span class="chip ' + e.clase + '">' +
+        esc(e.etiqueta) + '</span></h2>';
+    }
+
+    // ⚠️ `esc()` ESCAPA, no formatea: mapea null/undefined a string vacío, que es
+    // lo correcto para escapar y lo peor posible para mostrar. Una columna que
+    // viene NULL de la fila tiene que verse DISTINTA de un 0 y distinta de una
+    // celda que no se pintó — si sale en blanco, el operador no puede separar
+    // «cero», «sin configurar» y «el render se rompió», que son las tres cosas
+    // que este tablero existe para separar.
+    var SIN_DATO_EN_LA_FILA = 'sin dato · la fila viene en NULL';
+
+    function valorDeFila(valor) {
+      return valor === null || valor === undefined ? SIN_DATO_EN_LA_FILA : valor;
+    }
+
+    function kv(rotulo, valor) {
+      return '<div class="kv"><span>' + esc(rotulo) + '</span><span>' +
+        esc(valorDeFila(valor)) + '</span></div>';
+    }
+
+    function sinDatoCuerpo(card) {
+      var reason = card && card.status === 'sin_dato' ? card.reason : undefined;
+      return '<div class="motivo">No se pudo contestar esta pregunta: ' +
+        esc(reason ? motivoTexto(reason) : 'estado desconocido') +
+        '. Mientras diga esto, no hay ninguna afirmación acá sobre si está bien o mal.</div>';
+    }
+
+    function pintar(id, titulo, card, cuerpo) {
+      var nodo = document.getElementById(id);
+      var e = estadoDe(card);
+      nodo.className = 'panel ' + e.clase;
+      nodo.innerHTML = encabezado(titulo, card) +
+        (e.clase === 'ok' ? cuerpo(card) : sinDatoCuerpo(card));
+    }
+
+    function cuerpoCaja(card) {
+      var html = '';
+      var budget = card.budget || {};
+      var redes = Object.keys(budget);
+      if (redes.length === 0) {
+        html += '<div class="empty">La key no tiene saldo en ninguna red.</div>';
+      } else {
+        for (var i = 0; i < redes.length; i++) {
+          html += kv('saldo en la red ' + redes[i], budget[redes[i]]);
+        }
+      }
+      html += kv('gastado hoy', card.daily_spent_usd);
+      html += kv('techo diario', card.daily_limit_usd);
+      html += kv('el contador diario se reinicia', card.daily_reset_at);
+      if (card.is_active === false) {
+        html += '<div class="aviso">La key está DESACTIVADA. El saldo de arriba es real, pero no se puede gastar.</div>';
+      } else if (card.is_active !== true) {
+        // NULL no es «activa»: nadie lo afirmó. Caer al lado optimista sería
+        // presentar como activa una key que la fila no dice que lo esté.
+        html += '<div class="aviso">La fila no dice si la key está activa (is_active en NULL). No hay ninguna afirmación acá sobre si ese saldo se puede gastar.</div>';
+      }
+      return html;
+    }
+
+    // ⚠️ DOS rótulos que esta tarjeta tuvo mal y no puede volver a tener mal:
+    //
+    // 1. La VENTANA acota QUIÉNES aparecen, no los números de cada fila. El
+    //    filtro de fecha vive sólo en la query del universo; los contadores
+    //    salen del batch de standing, que mira TODO el historial. Rotular la
+    //    tabla con «Ventana: …» decía que los tres números eran recientes.
+    // 2. «liquidadas» NO es la cuenta de tasks liquidadas: es el contador
+    //    anti-Sybil, con un TOPE por caller. Una sonda que llama todos los días
+    //    desde una sola key lo satura en el tope y lo deja clavado ahí mientras
+    //    «ok» sigue subiendo — o sea el estado NORMAL de este sistema muestra
+    //    «liquidadas 5 · ok 501», y con el rótulo viejo eso se leía como un
+    //    tablero roto o, peor, como un número creíble.
+    function cuerpoReputacion(card) {
+      var agentes = card.agentes || [];
+      if (agentes.length === 0) {
+        return '<div class="empty">Sin actividad en los ' + esc(card.ventana) +
+          '. Es una respuesta, no una ausencia: se preguntó y no hubo.</div>';
+      }
+      var html = '<div class="motivo">Universo: los agentes con actividad en los ' +
+        esc(card.ventana) + '. Los contadores de cada fila NO se acotan a esa ' +
+        'ventana: son el historial completo del agente.</div>' +
+        '<table><thead><tr><th>agente</th><th>liquidadas (con tope por caller)</th>' +
+        '<th>ok (histórico)</th><th>fallidas (histórico)</th></tr></thead><tbody>';
+      for (var i = 0; i < agentes.length; i++) {
+        var a = agentes[i];
+        html += '<tr><td>' + esc(a.slug) + '</td><td>' + esc(a.tasksSettled) +
+          '</td><td>' + esc(a.successCount) + '</td><td>' + esc(a.failedCount) + '</td></tr>';
+      }
+      return html + '</tbody></table>' +
+        '<div class="motivo">«liquidadas» es el contador anti-Sybil de la ' +
+        'reputación: cada caller aporta a lo sumo un tope fijo de tasks. Por eso ' +
+        'puede quedar MUY por debajo de «ok» sin que nada esté roto, y por eso no ' +
+        'es la cuenta de tasks liquidadas. «ok» y «fallidas» no tienen tope.</div>';
+    }
+
+    function cuerpoEscrows(card) {
+      var html = '<div class="big">' + esc(card.usdc_bloqueado) + ' USDC</div>' +
+        '<div class="motivo">trabados en escrows vivos</div>';
+      html += kv('escrows vivos', card.escrows_vivos);
+      html += kv('vivos de OTRO mint (no se suman)', card.otros_mints_count);
+      if (card.vencidos === null || card.vencidos === undefined) {
+        html += kv('vencidos', 'sin dato · ' + motivoTexto(card.vencidos_reason));
+        html += '<div class="motivo">El reloj del cluster no se pudo leer, así que no hay veredicto de vencimiento. No es cero.</div>';
+      } else {
+        html += kv('vencidos (reloj del cluster)', card.vencidos);
+      }
+      return html;
+    }
+
+    function render(snapshot) {
+      var snap = snapshot || {};
+      pintar('caja', '1 · La caja de la sonda', snap.caja, cuerpoCaja);
+      pintar('reputacion', '2 · La reputación', snap.reputacion, cuerpoReputacion);
+      pintar('escrows', '3 · Los escrows', snap.escrows, cuerpoEscrows);
+    }
+
+    function setEstado(texto) {
+      document.getElementById('estado').textContent = texto;
+    }
+
+    function token() {
+      return document.getElementById('admin-token').value;
+    }
+
+    async function actualizar() {
+      if (!token()) {
+        setEstado('Falta el token de admin: este tablero mira datos de todos los tenants.');
+        return;
+      }
+      setEstado('Consultando…');
+      var res;
+      try {
+        res = await fetch(BASE + ENDPOINT, { headers: { 'X-Admin-Token': token() } });
+      } catch (err) {
+        setEstado('No se pudo conectar con el gateway. Lo que se ve abajo es de antes.');
+        return;
+      }
+      if (res.status === 401) { setEstado('Token inválido o ausente.'); return; }
+      if (res.status === 503) { setEstado('El gateway no tiene DASHBOARD_ADMIN_TOKEN configurado, así que este tablero está cerrado.'); return; }
+      if (!res.ok) { setEstado('El servidor respondió ' + res.status + '. Lo que se ve abajo es de antes.'); return; }
+      var data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        setEstado('Respuesta ilegible. Lo que se ve abajo es de antes.');
+        return;
+      }
+      render(data);
+      // La hora es la del PEDIDO, no la de la lectura: el gateway cachea cada
+      // tarjeta por separado, así que una puede venir de una lectura anterior.
+      // Decir «Actualizado <hora>» a secas afirmaba una frescura que el diseño
+      // no garantiza.
+      setEstado('Pedido a las ' + new Date().toLocaleTimeString('es-AR', { hour12: false }) +
+        ' · cada tarjeta puede venir de un cache reciente del gateway, así que el ' +
+        'dato puede ser algo anterior a esta hora. Se actualiza sólo cuando lo ' +
+        'pedís: una de las fuentes es un RPC con cuota.');
+    }
+
+    // El token va SIEMPRE en el header X-Admin-Token, nunca en la URL: un query
+    // param queda escrito en los logs del servidor y de cualquier proxy.
+    (function init() {
+      var input = document.getElementById('admin-token');
+      var saved = window.localStorage.getItem(TOKEN_KEY);
+      if (saved) input.value = saved;
+      input.addEventListener('input', function () {
+        window.localStorage.setItem(TOKEN_KEY, input.value);
+      });
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') actualizar();
+      });
+      document.getElementById('load-btn').addEventListener('click', function () {
+        actualizar();
+      });
+      if (saved) actualizar();
+    })();
+  </script>
+</body>
+</html>

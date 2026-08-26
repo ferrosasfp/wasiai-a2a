@@ -2582,3 +2582,127 @@ export interface SettleOutcome {
 // ============================================================
 
 export * from './a2a-key.js';
+
+// ============================================================
+// TABLERO DE LAS TRES PREGUNTAS (WKH-365)
+// ============================================================
+
+/**
+ * WKH-365 — por qué no pudo contestarse una de las tres preguntas.
+ *
+ * Los siete motivos son de las tres fuentes y NO se comparten entre ellas: la
+ * caja usa los tres primeros, la reputación el cuarto, los escrows los tres
+ * últimos.
+ */
+export type SinDatoReason =
+  // caja (la fila de la key de la sonda)
+  | 'no_configurado'
+  | 'no_encontrada'
+  | 'error_db'
+  // reputación (el batch de standing)
+  | 'historial_ilegible'
+  // escrows (el RPC de Solana devnet)
+  | 'rpc_no_configurado'
+  | 'rpc_error'
+  | 'respuesta_invalida';
+
+/**
+ * WKH-365 — la rama "no sé" de cualquiera de las tres tarjetas.
+ *
+ * `reason` es OBLIGATORIO: una tarjeta que dice "sin dato" sin decir por qué no
+ * se puede distinguir de un bug del tablero.
+ */
+export interface TableroSinDato {
+  status: 'sin_dato';
+  reason: SinDatoReason;
+}
+
+/**
+ * WKH-365 — el molde de las tres tarjetas.
+ *
+ * La rama `ok` lleva SIEMPRE los datos adentro. No es cosmético: hace que un
+ * `ok` sea INCONSTRUIBLE sin haber leído la fuente, porque `T` no tiene ningún
+ * campo opcional. El compilador rechaza `{ status: 'ok' }` a secas.
+ */
+export type TableroCard<T> = ({ status: 'ok' } & T) | TableroSinDato;
+
+/** WKH-365 — la caja de la sonda, tal como la trae `a2a_agent_keys`. */
+export interface TableroCajaOk {
+  /** El jsonb `budget`, mapa chainId → saldo. */
+  budget: Record<string, string>;
+  daily_limit_usd: number | null;
+  daily_spent_usd: number | null;
+  daily_reset_at: string | null;
+  /**
+   * `false` NO es "sin dato": es un dato. Una key desactivada con saldo es
+   * información, y la pantalla la muestra como advertencia.
+   */
+  is_active: boolean | null;
+}
+
+export type TableroCajaCard = TableroCard<TableroCajaOk>;
+
+/** WKH-365 — contadores por agente, los mismos de `AgentStandingCounters`. */
+export interface TableroAgenteStanding {
+  slug: string;
+  tasksSettled: number;
+  successCount: number;
+  failedCount: number;
+}
+
+export interface TableroReputacionOk {
+  /** Vacío = "pregunté y no hay actividad en la ventana". NO es una ausencia. */
+  agentes: TableroAgenteStanding[];
+  /** Etiqueta legible de la ventana sobre la que se derivó el universo. */
+  ventana: string;
+}
+
+export type TableroReputacionCard = TableroCard<TableroReputacionOk>;
+
+/**
+ * WKH-365 — el veredicto de deadline, que degrada SOLO.
+ *
+ * El reloj del cluster es una segunda lectura del RPC, y puede fallar mientras
+ * la lista de cuentas se leyó bien. Modelarlo como unión hace imposible escribir
+ * `vencidos` en `null` sin decir por qué, y hace imposible escribir `0` cuando
+ * lo que pasó es que no se pudo comparar.
+ */
+export type TableroVencidos =
+  | { vencidos: number }
+  | { vencidos: null; vencidos_reason: SinDatoReason };
+
+export interface TableroEscrowsBase {
+  /** Cuentas en estado `Deposited`. */
+  escrows_vivos: number;
+  /** Suma de los `amount` cuyo mint es el USDC configurado, ya formateada. */
+  usdc_bloqueado: string;
+  /** Cuentas vivas de OTRO mint. Nunca se suman al total de arriba. */
+  otros_mints_count: number;
+}
+
+export type TableroEscrowsOk = TableroEscrowsBase & TableroVencidos;
+
+export type TableroEscrowsCard = TableroCard<TableroEscrowsOk>;
+
+/**
+ * WKH-365 — las tres respuestas juntas.
+ *
+ * ⛔ NO tiene ningún campo agregado de salud en la raíz (`healthy`, `ok`,
+ * `status` global, semáforo). Un agregado necesita una regla para "las tres sin
+ * dato", y esa regla se escribe mal. Cada tarjeta se lee sola.
+ */
+export interface TableroSnapshot {
+  /**
+   * Cuándo se ARMÓ esta respuesta, que no es cuándo se leyeron las tarjetas.
+   *
+   * ⚠️ El nombre importa: cada tarjeta se cachea por separado en la ruta, así
+   * que una respuesta puede traer datos leídos hasta un TTL antes. Un
+   * `generatedAt` que se refresca sobre tarjetas cacheadas afirma una frescura
+   * que el diseño no garantiza. Si alguna vez hace falta la edad REAL de cada
+   * tarjeta, va un sello por tarjeta, no un rename de éste.
+   */
+  servedAt: string;
+  caja: TableroCajaCard;
+  reputacion: TableroReputacionCard;
+  escrows: TableroEscrowsCard;
+}
