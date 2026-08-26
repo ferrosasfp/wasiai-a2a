@@ -80,6 +80,19 @@ export const DISBURSEMENT_CAPABILITIES: ReadonlySet<string> = new Set([
  *     rechaza; no paga.
  *   · `remit.corridor-discovery`, `kyc-check` — los nombres exactos publicados en
  *     bdwv (`doc/sdd/_INDEX.md:144`).
+ *   · `kyc-hosted-redirect`, `legacy-single-shot-kyc` — el MISMO validador de
+ *     KYC, declaradas en `wasiai-remittance-agents/src/manifest/registry.ts:76`
+ *     y `:77`. Su docblock (`:71-75`) dice que son ADITIVAS a las cuatro de
+ *     arriba y que declaran POR QUÉ CAMINO se hace el trabajo (rol vs camino),
+ *     no un trabajo nuevo: una es el flujo hospedado donde el documento lo
+ *     escanea la persona en la pantalla del proveedor, la otra es la marca del
+ *     `/invoke` viejo. Ninguna nombra un desembolso, y de ese mismo agente ya
+ *     está escrito acá arriba que "autoriza o rechaza; no paga".
+ *
+ *     Sin estas dos entradas, el día que la ficha se republique con ellas el
+ *     conjunto declarado pasa a tener capacidades sin clasificar, la
+ *     clasificación cae a `'unclassified'` y el agente recibe el cupo ESTRECHO
+ *     — o sea que publicar el camino más seguro lo penalizaría.
  *
  * ⚠️ `cashout-match` aparece en esa misma línea del `_INDEX.md` y se deja
  * DELIBERADAMENTE afuera: nombra un cashout y no se pudo verificar que no
@@ -96,6 +109,8 @@ export const NON_DISBURSEMENT_CAPABILITIES: ReadonlySet<string> = new Set([
   'remittance-compliance',
   'remit.corridor-discovery',
   'kyc-check',
+  'kyc-hosted-redirect',
+  'legacy-single-shot-kyc',
 ]);
 
 /**

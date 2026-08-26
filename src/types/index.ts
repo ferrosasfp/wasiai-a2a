@@ -1131,6 +1131,26 @@ export interface ComposeRequest {
    */
   frozenStepPricesUsd?: readonly number[] | undefined;
   /**
+   * WKH-225 (fix-pack AR/BLQ-MED-1): lo que ESTE MISMO run ya gastó ANTES de
+   * este tramo. Sólo lo puebla `POST /compose/resume`, con el
+   * `total_cost_usdc` de la fila suspendida.
+   *
+   * 🔴 PARTICIPA DE UNA SOLA DECISIÓN: el guard de presupuesto pre-débito. NO
+   * entra en `totalCostUsdc` del resultado (el route suma las dos mitades para
+   * el reporte y para la base del fee), NO cambia ningún monto debitado y NO
+   * toca el guard `i > 0` del doble-débito del step 0.
+   *
+   * POR QUÉ HACE FALTA: `executePipeline` arranca `totalCost` en 0 siempre. Con
+   * un run suspendido eso hacía que `min(maxBudget del caller, techo del
+   * operador)` se evaluara contra la mitad, no contra el run — o sea, los dos
+   * techos valían el DOBLE. Sumarlo acá es lo único que los vuelve a hacer
+   * valer una vez por run.
+   *
+   * Ausente ⇒ `0` ⇒ aritmética BYTE-IDÉNTICA a la de `/compose`, que es el 100%
+   * del tráfico que no viene de una reanudación.
+   */
+  preSpentUsd?: number | undefined;
+  /**
    * WKH-318: el caller declara su tolerancia a un catálogo parcial. `true` ⇒ si
    * el catálogo no es `complete`, se aborta ANTES del primer `invokeAgent` y el
    * route reembolsa el step-0. Ausente/`false` ⇒ comportamiento de hoy.
@@ -1193,6 +1213,54 @@ export interface ComposeRequest {
    * lo emitimos NOSOTROS hacia terceros y sin config lo elige el caller.)
    */
   selfHostHint?: string | undefined;
+  /**
+   * WKH-225 — la autorización para que un step de ESTE pipeline pueda quedar
+   * ESPERANDO a una persona en vez de tener que terminar dentro del request.
+   *
+   * ⛔ LO CONSTRUYE UN SOLO ARCHIVO: `src/routes/compose.ts`. Clavado por
+   * `T-SUSP-CALLSITE`, que lee el fuente de `src/services/orchestrate.ts` y
+   * exige que la cadena `suspension` no aparezca ahí. `/orchestrate` queda
+   * afuera POR CONSTRUCCIÓN, no por acuerdo: sin este campo, el lector del
+   * sobre del agente ni siquiera corre.
+   *
+   * Ausente ⇒ el pipeline se comporta EXACTAMENTE como hoy: cero filas, cero
+   * queries, cero claves nuevas en el `ComposeResult` (AC-9). Y ausente es el
+   * 100 % del tráfico mientras la bandera `COMPOSE_SUSPEND_ENABLED` no sea el
+   * string `'true'`.
+   *
+   * También queda ausente cuando el caller NO es bindeable (x402 puro /
+   * anónimo): sin credencial exacta no hay a qué atar el token de reanudación,
+   * y un token que cualquiera puede redimir no es una credencial. Fail-closed.
+   */
+  suspension?: {
+    /** La credencial EXACTA a la que queda atado el token de reanudación. */
+    caller: ResumeCaller;
+    /**
+     * `owner_ref` del caller autenticado. Es el valor con el que se filtra
+     * TODA lectura y escritura de la fila (Ownership Guard app-layer): el
+     * cliente de Supabase usa la service key y bypassea RLS.
+     */
+    ownerRef: string;
+    /** `id` de la agent key que pagó este pipeline. Ancla la fila a esa key. */
+    keyId: string;
+    /**
+     * TTL pedido por el caller, en segundos. Ausente ⇒ el máximo configurado.
+     * El piso y el techo los hace cumplir el CHECK de la columna, no esta
+     * prosa.
+     */
+    ttlSeconds?: number;
+    /**
+     * CD-15 — instante (epoch en milisegundos) en que vence la garantía del
+     * quote que congeló los precios de este run. Presente SÓLO si hubo
+     * congelamiento.
+     *
+     * Postgres toma el `LEAST` entre su propio vencimiento y éste, así que un
+     * pipeline reanudado NUNCA puede debitar un precio congelado cuya garantía
+     * ya venció. El recorte lo hace la base, no este proceso: es el mismo
+     * motivo por el que `expires_at` tampoco lo escribe Node.
+     */
+    frozenPricesExpireAtMs?: number;
+  };
 }
 
 export interface ComposeResult {
@@ -1202,6 +1270,42 @@ export interface ComposeResult {
   totalCostUsdc: number;
   totalLatencyMs: number;
   error?: string;
+  /**
+   * WKH-225 — el pipeline no terminó ni falló: quedó ESPERANDO. Presente sólo
+   * cuando un step devolvió el sobre de suspensión y el estado se persistió.
+   *
+   * 🔴 `success` SIGUE SIENDO `true` cuando esto está presente, y no es estilo
+   * (CD-2). Con `success:false` la envoltura de `compose()` llamaría a
+   * `recordStrandedRunIfAny` y CADA suspensión normal emitiría un evento
+   * `compose_stranded_payment`, que la alerta de exposición varada acumula y
+   * publica en `/health` como camino degradado. Un KYC funcionando bien haría
+   * sonar la alarma de plata varada, que es exactamente el daño que esa alerta
+   * declara combatir. Con `success:true` esa línea es un no-op y no hay diff.
+   *
+   * ⚠️ `{success:true, suspended}` NO es un estado imposible mal modelado: ES el
+   * estado suspendido. El imposible es el otro —`{success:false, suspended}`— y
+   * ningún camino lo produce (testigo `T-SUSP-IMPOSSIBLE`).
+   *
+   * Cambio de contrato ESTRICTAMENTE ADITIVO: este objeto sale por HTTP sin
+   * schema de respuesta y lo leen consumidores fuera de este repo, así que
+   * `success` no cambia de tipo ni de significado para nadie que no lo mire.
+   */
+  suspended?: ComposeSuspension;
+  /**
+   * WKH-225 — el token con el que se reanuda. Presente EXACTAMENTE cuando
+   * `suspended` lo está, y viaja una sola vez: no es recuperable después.
+   *
+   * ⛔ POR QUÉ NO ESTÁ DENTRO DE `ComposeSuspension`. Ese objeto es el que se
+   * ECHA hacia afuera y el que un cliente guarda o loguea entero; éste es la
+   * CREDENCIAL. Separarlos hace que "mostrar el estado de la suspensión" y
+   * "entregar la credencial" sean dos decisiones distintas en vez de una sola
+   * que se toma por descuido.
+   *
+   * ⛔ NUNCA en una query string, NUNCA en una URL, NUNCA en un log, NUNCA en un
+   * mensaje de error. Lo único de este camino que se puede escribir en un canal
+   * de operador es el `runId`.
+   */
+  resumeToken?: string;
   /**
    * WKH-61: discriminator para que el route handler mapee a 403 (`SCOPE_DENIED`).
    * WKH-125: `DEST_CAP_EXCEEDED` → 402 (cap por destino excedido mid-pipeline).
@@ -1508,7 +1612,7 @@ export interface OrchestrateRequest {
    * chainId resuelto (request.resolvedChainId), propagado a compose para que el
    * débito per-step de steps 1..N funcione. WKH-102 (DT-1): se propaga SIEMPRE
    * (master y delegación, single-chain semantics — modelo WKH-59), no solo bajo
-   * delegación. El guard `i>0` de src/services/compose.ts:589 protege el step 0 contra
+   * delegación. El guard `i>0` de src/services/compose.ts:634 protege el step 0 contra
    * double-charge (CD-1, intacto).
    */
   chainId?: number | undefined;
@@ -1737,6 +1841,107 @@ export interface AgentLinkClaim {
   registry: string | null;
   max_price_usdc: string;
   chain_id: number;
+}
+
+// ============================================================
+// SUSPENDED RUN TYPES (WKH-225 — paso suspendible y reanudable)
+// ============================================================
+
+/**
+ * La credencial EXACTA a la que queda atada una reanudación.
+ *
+ * Espejo deliberado de `QuoteCaller` (`services/orchestrate-quote.ts`), con la
+ * MISMA precedencia (delegación → sesión → key) y por el mismo motivo: si se
+ * invirtiera, un pipeline suspendido bajo delegación quedaría atado a la key
+ * padre y podría reanudarlo cualquier otra sesión de esa key.
+ *
+ * Es un tipo propio y no un alias del de quote a propósito: el módulo de firma
+ * de la reanudación es LEAF (sólo `node:crypto`) y no puede importar nada del
+ * grafo de servicios. Que las dos formas coincidan es la intención; que
+ * compartan módulo, no.
+ */
+export interface ResumeCaller {
+  kind: 'delegation' | 'session' | 'key';
+  id: string;
+}
+
+/**
+ * Lo que el caller recibe cuando un step suspendió el pipeline.
+ *
+ * ⛔ El `artifact` NO se interpreta, NO se reescribe, NO se valida contra una
+ * allowlist propia y NO se loguea (CD-21). Es lo que devolvió el agente, tal
+ * cual: típicamente una URL a la que va una persona. El gateway sabe que hay
+ * que esperar; no sabe a qué.
+ *
+ * ⛔ Y el identificador de reanudación NO está acá. `runId` es el `id` de la
+ * fila —sirve para correlacionar y para pedir estado—, no la credencial: el
+ * token firmado viaja en su propio campo de la respuesta HTTP y jamás en una
+ * URL, una query string, un log ni un mensaje de error (CD-8).
+ */
+export interface ComposeSuspension {
+  /** `id` de la fila de `a2a_suspended_runs`. NO es el token. */
+  runId: string;
+  /** Índice del step que suspendió. Ese step SÍ se ejecutó y SÍ se pagó. */
+  step: number;
+  /** Lo que devolvió el agente, TAL CUAL. El gateway no lo interpreta. */
+  artifact: unknown;
+  /**
+   * ISO-8601. Lo escribió POSTGRES con un trigger (CD-19), nunca este proceso:
+   * es el único punto donde una deriva de reloj entre Node y la base podría
+   * volver reanudable un run vencido, porque la LECTURA compara los dos lados
+   * contra el mismo reloj y la ESCRITURA no.
+   */
+  expiresAt: string;
+  /**
+   * Vocabulario del estándar A2A para el estado human-in-the-loop. Constante,
+   * para que el cliente no tenga que aprender un nombre nuestro.
+   *
+   * ⚠️ NO es el `status` de la fila. El de la fila es `'suspended'`, y son dos
+   * cosas distintas A PROPÓSITO: uno es protocolo hacia afuera, el otro es la
+   * máquina de estados de una tabla nuestra.
+   */
+  state: 'input-required';
+}
+
+/**
+ * Fila devuelta por el RPC `claim_suspended_run` (suspended→resuming).
+ *
+ * Trae TODO lo que hace falta para reconstruir el `ComposeRequest` de la cola
+ * del pipeline, y en particular los tres campos de la traza de contratación
+ * (`contracting_chain`, `contracting_depth`, `self_host_hint`). Sin ellos la
+ * reanudación arrancaría con cadena vacía y profundidad 0, o sea reiniciando el
+ * contador del guard anti-bucle a pedido de quien reanuda — que es exactamente
+ * el bypass que esta HU tendría que abrir y no abre (CD-17).
+ *
+ * ⛔ NO trae `token_hash` ni nada derivado del token: el claim ya lo consumió.
+ */
+export interface SuspendedRunClaim {
+  id: string;
+  owner_ref: string;
+  key_id: string;
+  caller_kind: 'delegation' | 'session' | 'key';
+  caller_id: string;
+  compose_run_id: string;
+  step_index: number;
+  steps_json: unknown;
+  last_output: unknown;
+  remaining_steps: unknown;
+  frozen_step_prices: unknown;
+  total_cost_usdc: string;
+  /**
+   * Fix-pack AR/BLQ-MED-1 — el techo declarado por el caller, o `null`.
+   *
+   * Sin él, el tramo reanudado corría con `maxBudget` ausente y `totalCost` en
+   * 0: el techo del caller Y el del operador valían UNA VEZ POR MITAD, o sea el
+   * DOBLE para un run suspendido. Llega como `string` porque el RPC lo devuelve
+   * con `::text` (WKH-196), igual que `total_cost_usdc`.
+   */
+  max_budget_usdc: string | null;
+  total_latency_ms: number;
+  contracting_chain: unknown;
+  contracting_depth: number;
+  self_host_hint: string | null;
+  chain_id: number | null;
 }
 
 // ============================================================

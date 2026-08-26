@@ -124,7 +124,7 @@
  *  3. EL VALOR SEMÁNTICO DE LA AFIRMACIÓN. Se verifica que la línea citada diga
  *     lo declarado; NO que la prosa alrededor sea verdadera. Un comentario con
  *     el número BIEN y la conclusión FALSA pasa en verde. Peor: es el modo de
- *     falla dominante — en el caso medido de `src/services/compose.ts:706` la
+ *     falla dominante — en el caso medido de `src/services/compose.ts:751` la
  *     afirmación de fondo era correcta y lo único falso era el número, que es
  *     justo lo que hace que «abrir y comparar» confirme la mentira.
  *  4. EL 94 % RESTANTE DE `src`+`test` (704 de 749 anclas medidas) y el 99,8 %
@@ -708,7 +708,7 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // 🔴 EL PISO POR FORMA NO ES DECORACIÓN. Sin él, romper el regex de P4 sólo
     // bajaría el total y el guardián seguiría verde — y adentro de P4 está la
     // cita falsa del guard anti-doble-débito del camino del dinero
-    // (`src/services/compose.ts:706`), que es invisible a las otras tres formas
+    // (`src/services/compose.ts:751`), que es invisible a las otras tres formas
     // porque se escribe `:208`, sin backticks. Ése es exactamente el modo de
     // falla que dejó pasar el barrido anterior.
     expect(TRACKED.length).toBeGreaterThan(500);

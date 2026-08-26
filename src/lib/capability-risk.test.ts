@@ -105,3 +105,49 @@ describe('R-4 · el lado seguro de lo desconocido', () => {
     expect(needsTightTrialQuota(['remittance-fx-quote'])).toBe(false);
   });
 });
+
+describe('T-CAP · WKH-225 — las 2 capacidades del camino hospedado del KYC', () => {
+  // Los nombres se copian A MANO del sitio que los publica,
+  // `wasiai-remittance-agents/src/manifest/registry.ts:76-77`, no de la lista
+  // que este archivo verifica.
+  it('T-CAP-1: `kyc-hosted-redirect` es no-disbursement', () => {
+    expect(classifyCapability('kyc-hosted-redirect')).toBe('no-disbursement');
+  });
+
+  it('T-CAP-2: `legacy-single-shot-kyc` es no-disbursement', () => {
+    expect(classifyCapability('legacy-single-shot-kyc')).toBe(
+      'no-disbursement',
+    );
+  });
+
+  it('T-CAP-3: las 6 capacidades REALES de remit-kyc-validator NO caen al cupo estrecho', () => {
+    // 🔴 ÉSTE es el test con efecto medido, y los otros dos son su andamio.
+    // Las 6 son las que el manifiesto declara HOY, en ese orden
+    // (`registry.ts:66-77`): 4 nombran el ROL, 2 nombran el CAMINO.
+    const LAS_SEIS = [
+      'kyc-verification',
+      'aml-screening',
+      'travel-rule',
+      'remittance-compliance',
+      'kyc-hosted-redirect',
+      'legacy-single-shot-kyc',
+    ];
+    expect(classifyCapabilities(LAS_SEIS)).toBe('no-disbursement');
+    expect(needsTightTrialQuota(LAS_SEIS)).toBe(false);
+
+    // Y la prueba de que el test no es vacuo: sacando las dos nuevas de la
+    // lista clasificada, el conjunto REAL volvería al cupo estrecho. Eso es lo
+    // que pasaba antes de esta HU.
+    expect(
+      needsTightTrialQuota([...LAS_SEIS, 'una-septima-sin-clasificar']),
+    ).toBe(true);
+  });
+
+  it('agregar estas dos NO afloja nada más: `cashout-match` sigue afuera', () => {
+    // Sigue sin poder verificarse que no entregue valor, y un "probablemente
+    // no" no entra a una lista cuyo efecto es AFLOJAR un cupo del camino del
+    // dinero.
+    expect(classifyCapability('cashout-match')).toBe('unclassified');
+    expect(needsTightTrialQuota(['cashout-match'])).toBe(true);
+  });
+});

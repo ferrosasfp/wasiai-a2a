@@ -257,13 +257,32 @@ export const CITED_LINES: readonly CitedLine[] = [
     // `compose.ts:130`. Hay DOS `compose.ts` en el índice de git;
     // `src/routes/compose.ts:130` es `/**` y `src/services/compose.ts:130` es
     // prosa sobre el over-fetch. El guard anti-doble-débito vive en
-    // `src/services/compose.ts:589` (era `:571` hasta WKH-335, que insertó un
+    // `src/services/compose.ts:634` (era `:571` hasta WKH-335, que insertó un
     // import y un helper por encima). Es el caso que `E-WRONG_FILE` existe para
     // explicar: buscar `i > 0` en `src/routes/compose.ts` da CERO.
+    //
+    // ⚠️ RE-APUNTADA TRES veces sin que el guard se moviera NUNCA: `:602` →
+    // `:616` en el fix-pack AR de WKH-225, y `:616` → `:634` al MERGEAR la 225
+    // sobre main. Lo corrieron, en ese orden, las 14 líneas de comentario del
+    // `preSpentUsd` que se agregaron al guard de presupuesto DOCE líneas más
+    // arriba en la misma función, y después los cambios de WKH-335/WKH-364 que
+    // main traía por encima. La línea sigue byte-idéntica a `5578998:571`.
+    //
+    // 🎯 EL MERGE ES EL CASO MÁS FILOSO DE ESTA CLASE, y por qué: las dos ramas
+    // movieron `src/services/compose.ts` y cada una re-apuntó esta cita a SU
+    // propio número (main `:589`, la rama de la 225 `:616`). En el árbol
+    // mergeado, que tiene los DOS conjuntos de cambios, NINGUNO de los dos
+    // lados es correcto: el ancla cae en una tercera línea que no existe en
+    // ninguna de las dos ramas por separado. O sea que resolver el conflicto
+    // eligiendo un lado —lo que uno hace por default, y compila igual— deja una
+    // cita que MIENTE, con el merge reportado como limpio. El `:634` se DERIVÓ
+    // buscando `if (i > 0 && scopingKeyRow` en el archivo YA mergeado; no se
+    // eligió ningún lado. Es el caso del auto-blindaje "las citas que rompés
+    // vos al arreglar otra cosa", acá sin que nadie edite la cita.
     from: 'src/types/index.ts',
-    cite: 'src/services/compose.ts:589',
+    cite: 'src/services/compose.ts:634',
     target: 'src/services/compose.ts',
-    line: 589,
+    line: 634,
     mustContain: ['if (i > 0 &&', 'scopingKeyRow'],
     symbolPath: ['composeService', 'executePipeline'],
   },
@@ -294,10 +313,10 @@ export const CITED_LINES: readonly CitedLine[] = [
   // ── src/services/compose.ts ──────────────────────────────────────────────
   {
     from: 'src/services/compose.ts',
-    cite: 'src/routes/compose.ts:63-77',
+    cite: 'src/routes/compose.ts:90-104',
     target: 'src/routes/compose.ts',
-    line: 63,
-    endLine: 77,
+    line: 90,
+    endLine: 104,
     mustContain: ['function deriveComposeDestination(resolved'],
     symbolPath: ['deriveComposeDestination'],
   },
@@ -310,10 +329,16 @@ export const CITED_LINES: readonly CitedLine[] = [
     // ⚠️ La afirmación de fondo de la prosa era CORRECTA: `stepDebitedUsd` vale
     // 0 para `i === 0`. Lo único falso era el número — que es exactamente el
     // modo de falla que hace que «abrir y comparar» confirme la mentira.
+    //
+    // ⚠️ RE-APUNTADA de `:602` a `:616` en el fix-pack AR de WKH-225, y de
+    // `:616` a `:634` al mergear la 225 sobre main (donde esta misma cita decía
+    // `:589`), por el mismo desplazamiento que la entrada de arriba y con la
+    // misma derivación contra `if (i > 0 && scopingKeyRow` en el árbol ya
+    // mergeado. El guard no se tocó en ninguna de las tres.
     from: 'src/services/compose.ts',
-    cite: ':589',
+    cite: ':634',
     target: 'src/services/compose.ts',
-    line: 589,
+    line: 634,
     mustContain: ['if (i > 0 &&', 'scopingKeyRow'],
     symbolPath: ['composeService', 'executePipeline'],
   },

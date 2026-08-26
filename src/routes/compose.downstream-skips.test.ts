@@ -44,6 +44,16 @@ vi.mock('../middleware/a2a-key.js', () => ({
     const headerKey = request.headers['x-a2a-key'];
     return typeof headerKey === 'string' ? headerKey : undefined;
   },
+  // WKH-225: `routes/compose.ts` registra además `POST /compose/resume`, cuya
+  // cadena de preHandlers usa `requireA2AKey` (autentica SIN debitar: el
+  // step-0 del run original ya se cobró). Este doble tiene que exportarlo o el
+  // plugin no registra y la suite entera se cae al arrancar. Mismo
+  // pass-through que el de arriba: no afirma nada nuevo.
+  requireA2AKey: () => [
+    async (request: FastifyRequest, _reply: FastifyReply) => {
+      (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = nextKeyRow;
+    },
+  ],
   requirePaymentOrA2AKey: () => [
     async (request: FastifyRequest, _reply: FastifyReply) => {
       (request as unknown as { a2aKeyRow: unknown }).a2aKeyRow = nextKeyRow;

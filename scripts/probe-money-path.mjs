@@ -242,7 +242,7 @@ export function assertQuoteShape(body, outputSchema) {
  * Primera fila que matchea, gana. Pura: la escalera de §5 del Story File, ejecutable.
  *
  * El discriminante de las filas 6 y 7 es el **VALOR** de `agentFailure`, no su presencia
- * (`src/types/index.ts:1269-1284`): `INPUT_REJECTED` es la sonda vieja; `AGENT_ERROR` es
+ * (`src/types/index.ts:1373-1388`): `INPUT_REJECTED` es la sonda vieja; `AGENT_ERROR` es
  * el agente fallando, o sea camino del dinero roto. AUSENTE es "no sé qué contestó el
  * agente en el intento que decidió" ⇒ fila 9, la regla por defecto.
  * ⛔ El status del agente NO se recupera re-parseando el string de `error`.

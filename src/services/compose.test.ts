@@ -2109,7 +2109,7 @@ describe('composeService.compose — WKH-59 multi-step debit (AC-2)', () => {
   // ─────────────────────────────────────────────────────────────────────
   // BLQ-MED-1 fix: fallback honesto para priceUsdc=0/null en steps 2..N.
   // AC-4 / CD-4. Mismo patrón que el preHandler de step 0
-  // (src/routes/compose.ts:63-77), replicado en el service.
+  // (src/routes/compose.ts:90-104), replicado en el service.
   // ─────────────────────────────────────────────────────────────────────
 
   it('T-COMPOSE-DEBIT-7 should debit step 1 with $1.00 fallback when priceUsdc===0 (BLQ-MED-1)', async () => {
