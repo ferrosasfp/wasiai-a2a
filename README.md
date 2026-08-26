@@ -375,7 +375,7 @@ State measured in this repo, not quoted from another document. Each number below
 
 | Metric | Value |
 |---|---|
-| Test files | **304 test files** in the root suite. Derived from the `include` of `vitest.config.ts` over the git index, and checked in both READMEs, by `test/readme-numbers.test.ts` |
+| Test files | **305 test files** in the root suite. Derived from the `include` of `vitest.config.ts` over the git index, and checked in both READMEs, by `test/readme-numbers.test.ts` |
 | Test cases | printed by `npm test`. Deliberately not written down here: it changes with every test added, and a test that pinned it would have to run the suite it is counting |
 | Coverage floor enforced by CI | statements **80%**, branches **70%**, functions **80%**, lines **80%** (`vitest.config.ts:26-31`). Below any of the four, `npm run test:coverage` exits non-zero and the `coverage` job fails |
 | Coverage measured | `npm run test:coverage` printed 87.49% statements, 79.64% branches, 92.48% functions and 89.02% lines on 2026-08-15 |

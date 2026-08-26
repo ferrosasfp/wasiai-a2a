@@ -1,0 +1,33 @@
+# D-1 (RE-EJECUTADO tras el FIX-PACK 2 / MNR-5) — la sonda en ROJO con credencial invalida (0 USDC)
+# fecha: 2026-08-25T21:02:35Z  host: DESKTOP-T2ULTF0  node: v22.22.0
+# rama: feat/227-sonda-money-path  HEAD al correrlo: 3d83c03  (el arbol que revisó el AR-it2)
+# comando: A2A_PROBE_KEY=<credencial invalida> npm run probe:money-path
+#
+# ANCLA AL CODIGO, no al commit. `git hash-object scripts/probe-money-path.mjs` =
+#   e687abdcd116bb88e852465da63c363040462140
+# y ese blob es IDENTICO al de HEAD (`git rev-parse HEAD:scripts/probe-money-path.mjs`).
+# El FIX-PACK 2 toca SOLO `test/` y `doc/`, asi que el commit que cierra esta HU deja el
+# script byte-identico: verificable con `git diff 3d83c03 <commit> -- scripts/` (vacio).
+# Se ancla al blob y no al id de commit porque el id de un commit que INCLUYE este log no
+# se puede escribir dentro del log — el blob del script si, y es lo que produce la salida.
+#
+# por que se re-ejecuta (MNR-5 del ar-report-it2.md): la corrida anterior declaraba
+# `HEAD: 8865721 (fix-pack todavia sin commitear)` y el arbol entregado era 3d83c03, asi
+# que el log archivado no nombraba el arbol entregado. AC-4 pide la sonda demostrada en
+# ROJO con el log archivado; el log tiene que corresponder al codigo que se entrega.
+# esperado: fila 4 -> CONFIG -> exit 3, nunca DOWN. Produccion NO esta implicada.
+---
+
+> wasiai-a2a@0.1.0 probe:money-path
+> node scripts/probe-money-path.mjs
+
+CONFIG: la credencial de la sonda (KEY_NOT_FOUND) — producción no está implicada | agent=remit-corridor-fx-solana schemaSha256=ee87a63f8e71 omitted=[destCountry] httpStatus=403 agentFailure=- durationMs=746
+---
+exit code observado: 3
+# COSTE: 0 USDC. La credencial muere en el middleware (403 KEY_NOT_FOUND) ANTES de que
+# `/compose` ejecute ningun paso, asi que no hay debito. Es la unica corrida de la HU
+# contra produccion que no gasta.
+# contraste con las DOS corridas previas (D-1-credencial-invalida.log y la version
+# anterior de este archivo): misma clase (CONFIG), mismo error_code (KEY_NOT_FOUND),
+# mismo schemaSha256 (ee87a63f8e71) y mismo omitted ([destCountry]). Lo unico que cambia
+# es `durationMs` (596 -> 746), que es latencia de red. La atribucion es estable.
