@@ -9,8 +9,9 @@
  * internamente ante un 429 con backoff y no admite un timeout por llamada, así
  * que el modo de falla que esta tarjeta existe para reportar —"el RPC me está
  * tirando 429"— se convertiría en una request colgada. Acá es `fetch` crudo con
- * `AbortSignal.timeout`, sin reintento y sin fallback: un tablero no puede
- * duplicar la carga del RPC que el camino del dinero necesita.
+ * `AbortSignal.timeout`, sin reintento y sin SEGUNDO INTENTO contra otra URL: un
+ * tablero no puede duplicar la carga del RPC. (La cadena de variables de
+ * `getEscrowScanRpcUrl` elige UNA antes de salir; no reintenta con las otras.)
  */
 
 import { formatUnits } from 'viem';
@@ -158,16 +159,71 @@ function clockUnixTimestamp(
 }
 
 /**
- * La tarjeta 3 del tablero.
- *
- * ⚠️ `SOLANA_RPC_URL` se lee del entorno DIRECTO y no vía `getSolanaRpcUrl()`:
- * el default de ese helper es el endpoint público de devnet, que devuelve 429
- * sostenido y no sirve como fuente. Se dice que no está configurado en vez de
- * fingir que se consultó.
+ * Las variables de las que sale la URL de esta tarjeta, EN ORDEN de preferencia.
+ * El orden es normativo y `escrow-scan.test.ts` lo fija: un test que sólo
+ * verifique "usa alguna URL" no sirve, porque el defecto que esta lista existe
+ * para evitar es elegir la EQUIVOCADA.
  */
+const RPC_URL_ENV_VARS = [
+  'SOLANA_RPC_URL_PROGRAM_ACCOUNTS',
+  'SOLANA_RPC_URL_FALLBACK',
+  'SOLANA_RPC_URL',
+] as const;
+
+/**
+ * La URL contra la que se barre, o `null` si no hay ninguna configurada.
+ *
+ * ⚠️ ESTA TARJETA TIENE VARIABLE PROPIA (`SOLANA_RPC_URL_PROGRAM_ACCOUNTS`), y
+ * no es capricho. Dos razones, las dos medidas:
+ *
+ * 1. `getProgramAccounts` NO está en todos los planes. El proveedor dedicado que
+ *    hoy sirve a producción (Alchemy) lo excluye del plan gratuito —textual:
+ *    "getProgramAccounts is not available on the Free tier"— y es exactamente el
+ *    método que esta tarjeta necesita. Colgada de la URL del money-path, la
+ *    tarjeta decía `sin_dato` PARA SIEMPRE: no porque no hubiera datos, sino
+ *    porque le preguntaba a un endpoint que no contesta esa pregunta.
+ * 2. Las otras dos URLs TIENEN DUEÑO, y su dueño es el camino del dinero.
+ *    `SOLANA_RPC_URL` es el proveedor PRIMARIO del cobro inbound —`chain.ts:288`
+ *    lo dice: contra otro ledger "a signature that never existed on devnet could
+ *    be honoured"— y `SOLANA_RPC_URL_FALLBACK` es el SEGUNDO proveedor, que
+ *    `chain.ts:312` exige que sea **distinto** del primero. Que un tablero se
+ *    colgara de la primaria era un acoplamiento invisible en la dirección
+ *    peligrosa: quien moviera esa variable por razones de PAGOS rompía el
+ *    tablero sin enterarse, y quien la moviera por razones de TABLERO tocaría la
+ *    variable de la que depende cada cobro.
+ *
+ * Por eso el orden es dedicada → fallback → primaria: primero la que no le
+ * pertenece a nadie más, y sólo como último recurso las del dinero, que se leen
+ * pero NUNCA se escriben desde acá.
+ *
+ * ⚠️ Se lee del entorno DIRECTO y no vía `getSolanaRpcUrl()`, cuyo default es el
+ * endpoint público de devnet. ⛔ Y acá decía que ese público "devuelve 429
+ * sostenido y no sirve como fuente": **eso quedó desmentido**. Medido con el
+ * patrón real del tablero (1 llamada, esperar 12 s, repetir) da 5/5 exitosas a
+ * ~300 ms; los 429 los produjo un diagnóstico que martillaba el endpoint, no
+ * este tablero. El motivo real de no usar el default es otro: un default
+ * silencioso convierte "nadie configuró nada" en una lectura que parece
+ * configurada. Si el público ES la fuente que se quiere, se pone en
+ * `SOLANA_RPC_URL_PROGRAM_ACCOUNTS` y se ve en el entorno. Ninguna configurada ⇒
+ * `rpc_no_configurado`: se dice que no se pudo leer, no se finge.
+ *
+ * El `.trim()` no es cosmético: `chain.ts:308` ya trata un
+ * `SOLANA_RPC_URL_FALLBACK` de puro espacio como ausente, y sin él esta cadena
+ * leería la MISMA variable distinto que su dueño — un valor en blanco taparía
+ * en silencio a la siguiente de la lista.
+ */
+function getEscrowScanRpcUrl(): string | null {
+  for (const name of RPC_URL_ENV_VARS) {
+    const raw = process.env[name]?.trim();
+    if (raw !== undefined && raw !== '') return raw;
+  }
+  return null;
+}
+
+/** La tarjeta 3 del tablero. */
 export async function scanEscrows(): Promise<TableroEscrowsCard> {
-  const rpcUrl = process.env.SOLANA_RPC_URL;
-  if (rpcUrl === undefined || rpcUrl === '') {
+  const rpcUrl = getEscrowScanRpcUrl();
+  if (rpcUrl === null) {
     return sinDato('rpc_no_configurado');
   }
 
