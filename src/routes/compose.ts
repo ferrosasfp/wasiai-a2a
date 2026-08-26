@@ -10,6 +10,7 @@ import { splitsActive } from '../config/split-config.js';
 import { MAX_COMPOSE_STEPS } from '../lib/compose-limits.js';
 import {
   type ComposeStepShapeError,
+  validateAuthorityPinning,
   validateComposeStepShape,
 } from '../lib/compose-step-shape.js';
 import {
@@ -206,6 +207,14 @@ function validateComposeBody(steps: unknown): ComposeValidationError | null {
     const stepError = validateComposeStepShape((steps as unknown[])[i], i);
     if (stepError) return stepError;
   }
+
+  // WKH-366 / AC-6: va DESPUÉS del shape (así el mensaje de un step malformado
+  // sigue siendo el histórico) y ANTES del `return null`. Hereda
+  // pre-débito/pre-discovery de dónde corre esta función: la usan
+  // `validateComposeBodyHandler` (el guard real) y el route handler
+  // (defense-in-depth).
+  const pinErr = validateAuthorityPinning(steps as unknown[]);
+  if (pinErr) return pinErr;
 
   return null;
 }

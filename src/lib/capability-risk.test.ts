@@ -16,9 +16,11 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  AUTHORIZATION_CAPABILITIES,
   classifyCapabilities,
   classifyCapability,
   needsTightTrialQuota,
+  requiresPinnedAgent,
 } from './capability-risk.js';
 
 describe('R-4 · qué capacidades DESEMBOLSAN', () => {
@@ -149,5 +151,83 @@ describe('T-CAP · WKH-225 — las 2 capacidades del camino hospedado del KYC', 
     // dinero.
     expect(classifyCapability('cashout-match')).toBe('unclassified');
     expect(needsTightTrialQuota(['cashout-match'])).toBe(true);
+  });
+});
+
+describe('T-B · WKH-366 — las 2 capacidades del dialecto compose del KYC', () => {
+  // Los nombres se copian A MANO del sitio que los publica,
+  // `wasiai-remittance-agents/src/manifest/registry.ts:275` y `:300`, no de la
+  // lista que este archivo verifica.
+  it('T-B1: las dos nuevas son `no-disbursement`, NINGUNA cae a `unclassified`', () => {
+    // 🔪 MATA: sacar cualquiera de las dos de `NON_DISBURSEMENT_CAPABILITIES`.
+    // Sin ellas, publicar el camino que NO manda el documento por la red le
+    // daría al agente el cupo ESTRECHO — el penal al revés.
+    expect(classifyCapability('kyc-session-create')).toBe('no-disbursement');
+    expect(classifyCapability('kyc-decision-read')).toBe('no-disbursement');
+    expect(classifyCapability('kyc-session-create')).not.toBe('unclassified');
+    expect(classifyCapability('kyc-decision-read')).not.toBe('unclassified');
+
+    // Y el efecto medido: el conjunto REAL que va a declarar cada ficha nueva no
+    // cae al cupo estrecho.
+    expect(needsTightTrialQuota(['kyc-session-create'])).toBe(false);
+    expect(needsTightTrialQuota(['kyc-decision-read'])).toBe(false);
+  });
+
+  it('T-B1: `requiresPinnedAgent` normaliza — mayúsculas y espacios NO son un bypass', () => {
+    // 🔪 MATA: escribir `AUTHORIZATION_CAPABILITIES.has(capability)` sin
+    // `normalize`. Con eso, `KYC-Decision-Read` esquivaría el guard del
+    // Coordinador con un cambio de mayúsculas.
+    expect(requiresPinnedAgent('kyc-session-create')).toBe(true);
+    expect(requiresPinnedAgent('kyc-decision-read')).toBe(true);
+    expect(requiresPinnedAgent('KYC-Decision-Read')).toBe(true);
+    expect(requiresPinnedAgent('  kyc-decision-read ')).toBe(true);
+    expect(requiresPinnedAgent('  KYC-SESSION-CREATE  ')).toBe(true);
+  });
+
+  it('T-B2 (CD-18): `AUTHORIZATION_CAPABILITIES` no contiene NINGUNA capacidad preexistente', () => {
+    // 🔴 LA LISTA DE PREEXISTENTES SE ESCRIBE LITERAL ACÁ, no se deriva del
+    // módulo que este test mide: derivarla de `DISBURSEMENT_CAPABILITIES` /
+    // `NON_DISBURSEMENT_CAPABILITIES` haría que el test se moviera junto con lo
+    // que vigila y aplaudiera cualquier cosa. Son las 15 que existían ANTES de
+    // WKH-366 (4 de desembolso + 11 inocuas).
+    //
+    // 🔪 MATA: agregar `'kyc-verification'` —o cualquier otra preexistente— a
+    // `AUTHORIZATION_CAPABILITIES`. Eso rompería con 400 a todo consumidor
+    // externo que hoy componga un step de KYC por capacidad, y desde este repo
+    // NO se puede medir quién hace eso.
+    const PREEXISTENTES_ANTES_DE_WKH366 = [
+      // DISBURSEMENT (4)
+      'remittance-payout',
+      'cashout',
+      'value-delivery',
+      'fiat-disbursement',
+      // NON_DISBURSEMENT (11)
+      'remittance-fx-quote',
+      'usdc-to-pen',
+      'corridor-pricing',
+      'kyc-verification',
+      'aml-screening',
+      'travel-rule',
+      'remittance-compliance',
+      'remit.corridor-discovery',
+      'kyc-check',
+      'kyc-hosted-redirect',
+      'legacy-single-shot-kyc',
+    ];
+    expect(PREEXISTENTES_ANTES_DE_WKH366).toHaveLength(15);
+
+    for (const capability of PREEXISTENTES_ANTES_DE_WKH366) {
+      expect(AUTHORIZATION_CAPABILITIES.has(capability), capability).toBe(
+        false,
+      );
+      expect(requiresPinnedAgent(capability), capability).toBe(false);
+    }
+
+    // Y el set es EXACTAMENTE las dos nuevas: sin esto, agregar una tercera
+    // capacidad que no esté en la lista de arriba pasaría inadvertida.
+    expect([...AUTHORIZATION_CAPABILITIES].sort()).toEqual([
+      'kyc-decision-read',
+      'kyc-session-create',
+    ]);
   });
 });

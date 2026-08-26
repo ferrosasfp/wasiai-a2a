@@ -94,6 +94,19 @@ export const DISBURSEMENT_CAPABILITIES: ReadonlySet<string> = new Set([
  *     clasificación cae a `'unclassified'` y el agente recibe el cupo ESTRECHO
  *     — o sea que publicar el camino más seguro lo penalizaría.
  *
+ *   · `kyc-session-create`, `kyc-decision-read` — WKH-366. Son del MISMO
+ *     validador de KYC, partido en los dos pasos del dialecto compose y
+ *     declaradas en `wasiai-remittance-agents/src/manifest/registry.ts:275` y
+ *     `:300`. Vale palabra por palabra el argumento de las dos de arriba: de ese
+ *     agente ya está escrito acá que «autoriza o rechaza; no paga», y ninguna de
+ *     las dos nombra un desembolso — una crea la pantalla hospedada donde la
+ *     persona escanea su documento, la otra LEE el veredicto de esa sesión.
+ *
+ *     Sin estas dos entradas, `classifyCapability` cae a `'unclassified'` y el
+ *     agente recibiría el cupo ESTRECHO: publicar el camino más seguro —el que
+ *     NO manda el documento por la red— lo penalizaría. Es el mismo argumento
+ *     del párrafo anterior, y por eso van juntas.
+ *
  * ⚠️ `cashout-match` aparece en esa misma línea del `_INDEX.md` y se deja
  * DELIBERADAMENTE afuera: nombra un cashout y no se pudo verificar que no
  * entregue valor. Un "probablemente no" no entra a una lista cuyo efecto es
@@ -111,7 +124,48 @@ export const NON_DISBURSEMENT_CAPABILITIES: ReadonlySet<string> = new Set([
   'kyc-check',
   'kyc-hosted-redirect',
   'legacy-single-shot-kyc',
+  'kyc-session-create',
+  'kyc-decision-read',
 ]);
+
+/**
+ * Capacidades cuyo OUTPUT ES UN VEREDICTO DE AUTORIZACIÓN DE DINERO. Un step que
+ * las declara NO puede resolverse por ranking: quién contesta cambia qué se
+ * autoriza.
+ *
+ * 🔴 CONTIENE EXACTAMENTE LAS DOS CAPACIDADES NUEVAS, Y NINGUNA PREEXISTENTE. Es
+ * una decisión de alcance deliberada, no una lista a medio hacer:
+ *
+ *  · Meter `kyc-verification`, `kyc-check`, `kyc-hosted-redirect` o cualquier
+ *    otra ROMPERÍA CON 400 a cualquier consumidor externo que hoy componga un
+ *    step de KYC por capacidad. Desde este repo NO se puede medir quién hace eso
+ *    (`/orchestrate` no emite steps por capacidad, y chaski-v3 sólo usa
+ *    `remittance-fx-quote` / `remittance-payout`), y "no lo veo desde acá" NO es
+ *    "no existe".
+ *  · Las dos de acá tienen, por construcción, CERO consumidores el día que se
+ *    publican. El guard es fail-closed sobre superficie NUEVA y cero regresión
+ *    sobre la vieja.
+ *
+ * ⛔ AGREGAR UNA CAPACIDAD PREEXISTENTE A ESTE SET ES UN CAMBIO DE CONTRATO PARA
+ * TERCEROS, no una línea más en un `Set`. Cerrarlo requiere medir el tráfico vivo
+ * primero (residual R-1 de WKH-366).
+ */
+export const AUTHORIZATION_CAPABILITIES: ReadonlySet<string> = new Set([
+  'kyc-session-create',
+  'kyc-decision-read',
+]);
+
+/**
+ * ¿Esta capacidad exige que el caller nombre al agente en vez de delegar la
+ * elección al ranking?
+ *
+ * Normaliza con el MISMO `normalize` que `classifyCapability` (`:176-178`):
+ * sin eso, mandar `KYC-Decision-Read` esquivaría el guard con un cambio de
+ * mayúsculas — un bypass de una línea.
+ */
+export function requiresPinnedAgent(capability: string): boolean {
+  return AUTHORIZATION_CAPABILITIES.has(normalize(capability));
+}
 
 /**
  * Normaliza como YA lo hace el filtro de capabilities de discovery

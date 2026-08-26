@@ -189,6 +189,97 @@ describe('registryService.register — owner_ref persisted (WKH-63)', () => {
       );
     });
 
+    // ── WKH-366 fix-pack (AR/BLQ-ALTO-1): el namespace RESERVADO ────────────
+    //
+    // 🔴 QUÉ SOSTIENE ESTO. `self-published` es el `registry_id` sintético que el
+    // gateway le pone a los agentes de `POST /agents`; su docblock decía que "NO
+    // existe como fila en `registries`", y no existir NO es estar reservado.
+    // Hasta este fix, cualquier caller autenticado podía crear la fila real.
+    //
+    // 🧬 MUTANTE: borrar el `if (isReservedRegistryName(...))` de `register` ⇒ las
+    // cuatro filas de abajo se ponen rojas (la promesa resuelve en vez de tirar).
+    // 🧬 MUTANTE: comparar contra el `name` CRUDO en vez del normalizado ⇒ se
+    // ponen rojas las tres últimas, que son las que producen el mismo PK por otro
+    // camino. Ésa es la mutación que importa: un check case-sensitive sobre el
+    // nombre es indistinguible del bueno mirando sólo la primera fila.
+    it.each([
+      ['exacto', 'self-published'],
+      ['en mayúsculas', 'SELF-PUBLISHED'],
+      ['con espacios en vez del guion', 'Self Published'],
+    ])('rejects the reserved namespace — %s', async (_caso, name) => {
+      const mock = chainMock();
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+      await expect(registerName(name)).rejects.toThrow(/is reserved/);
+      // Nunca llega al insert: el rechazo es puro sobre el body.
+      expect((mock.insert as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+        0,
+      );
+    });
+
+    // ⚠️ PRECEDENCIA, MEDIDA Y NO ASUMIDA: `' self-published '` NO sale por acá.
+    // El guard de whitespace de borde (DT-23.4) corre ANTES en `register` y se lo
+    // lleva primero. Se deja escrito en vez de reordenar los guards: el desenlace
+    // es el mismo (rechazo, 400, sin insert) y mover un guard preexistente para
+    // que el mensaje quede lindo es un cambio de comportamiento gratis en la
+    // puerta de escritura del catálogo.
+    //
+    // 🔴 Y POR LA RUTA —que es por donde entra un caller real— ESE MISMO INPUT SÍ
+    // sale como "reserved", porque `validateRegisterBody` corre PRE-COBRO y su
+    // check normaliza con `.trim()` (`isReservedRegistryName`). Ese camino tiene
+    // su propio testigo: **T-NCR-19**, cuarta fila del `it.each` (el caso
+    // `'con whitespace de borde'`), en
+    // `src/routes/registries.no-charge-before-validating.test.ts`.
+    //
+    // ⚠️ ACÁ HABÍA UN PUNTERO A UN ARCHIVO QUE NO EXISTE (WKH-366, MNR-3 del AR
+    // ronda 2): decía `routes/registries.reserved-namespace.test.ts`. El
+    // CONTENIDO de la afirmación era cierto; el archivo, no. Por eso el puntero
+    // ahora se ancla en el NOMBRE del testigo y no en una línea: `T-NCR-19` se
+    // falsea con un `grep -rn 'T-NCR-19' src/` y leer si sale de un `it(`, y un
+    // nombre no se desplaza cuando alguien inserta una línea más arriba.
+    //
+    // Y NO SE DA DE ALTA EN `CITED_LINES`, medido y no supuesto: `scanSource`
+    // sobre ESTE archivo devuelve sólo los falsos positivos de un timestamp ISO
+    // —cero citas reales—, porque una referencia sin número de línea le es
+    // invisible por construcción (caso (a) de su docblock, «la prosa suelta»).
+    // Declararla exigiría (1) ponerle un número de línea —o sea cambiar un ancla
+    // que no envejece por una que sí— y (2) meter
+    // este archivo en `CORTE_A_PATHS`, que tiene assert duro
+    // `expect(CORTE_A_PATHS.length).toBe(14)` en `G-C1`. Ampliar el universo del
+    // Corte A es un Corte, no un renglón de un fix-pack de MENORes.
+    it('the border-whitespace variant is rejected FIRST by the whitespace guard', async () => {
+      const mock = chainMock();
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+      await expect(registerName(' self-published ')).rejects.toThrow(
+        /leading\/trailing whitespace/,
+      );
+      expect((mock.insert as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(
+        0,
+      );
+    });
+
+    // ✅ CALIBRACIÓN. Sin esto, las tres filas de arriba serían verdes con un
+    // `register` que rechaza TODO nombre, y no se notaría.
+    it('a name that merely CONTAINS the reserved one is NOT rejected', async () => {
+      const mock = chainMock({
+        maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+        single: vi.fn().mockResolvedValue({
+          data: rowOf({ id: 'self-published-mirror', owner_ref: OWNER_A }),
+          error: null,
+        }),
+      });
+      mockFrom.mockReturnValue(
+        mock as unknown as ReturnType<typeof supabase.from>,
+      );
+      // 🔴 La reserva es sobre el ID DERIVADO, no sobre una subcadena: reservar
+      // por `includes` sacaría de circulación un espacio de nombres entero que
+      // nadie decidió reservar.
+      await expect(registerName('self-published-mirror')).resolves.toBeTruthy();
+    });
+
     it('rejects a name whose PK already exists (pre-check get(id))', async () => {
       // get(id) → maybeSingle resolves an existing row → clash.
       const mock = chainMock({

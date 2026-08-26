@@ -40,15 +40,32 @@ vi.mock('node:dns', () => ({
   },
 }));
 
-vi.mock('../services/registry.js', () => ({
-  registryService: {
-    list: vi.fn(),
-    get: vi.fn(),
-    register: vi.fn(),
-    update: vi.fn(),
-    delete: vi.fn(),
-  },
-}));
+// ⚠️ MOCK PARCIAL, Y ESO TIENE UN FILO MEDIDO: la factory enumera lo que devuelve,
+// así que **todo export nuevo que la route importe y no esté acá llega `undefined`**
+// y el handler revienta con un 500 opaco. Pasó: `isReservedRegistryName`
+// (WKH-366 fix-pack) puso los cinco T-REG de este archivo en 500 —"expected 500 to
+// be 422"— sin que el mensaje nombrara la causa.
+//
+// 🔴 SÓLO `registryService` SE DOBLA. Lo demás sale de `importOriginal`, o sea de
+// la implementación REAL, y no por comodidad: `isReservedRegistryName` es una
+// función PURA (sin I/O), y doblarla con un `vi.fn()` que devuelve `undefined`
+// dejaría el guard del namespace reservado apagado en todo este archivo sin que
+// nada se pusiera rojo. Lo que hay que aislar es la BASE, no la aritmética.
+vi.mock('../services/registry.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../services/registry.js')>();
+  return {
+    isReservedRegistryName: real.isReservedRegistryName,
+    RESERVED_REGISTRY_IDS: real.RESERVED_REGISTRY_IDS,
+    SystemRegistryImmutableError: real.SystemRegistryImmutableError,
+    registryService: {
+      list: vi.fn(),
+      get: vi.fn(),
+      register: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+    },
+  };
+});
 
 // AB-WKH-55: mock the auth middleware so the x402 fallback never runs.
 // WKH-63 fix-pack (BLQ-ALTO-1): inject a fake a2aKeyRow so the new
