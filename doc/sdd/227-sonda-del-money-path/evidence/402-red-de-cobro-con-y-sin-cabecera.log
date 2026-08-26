@@ -1,0 +1,74 @@
+# CONTROL POSITIVO del FIX-PACK 3 — en QUE RED y en QUE ACTIVO cobra /compose
+# fecha: 2026-08-25 (UTC-5) / 2026-08-26T00:16Z  objetivo: wasiai-a2a-production.up.railway.app
+# COSTE: 0 USDC / 0 PYUSD. Los dos requests van SIN credencial: el 402 es el desafio de
+# pago, o sea el estado ANTERIOR a cualquier debito. Nada se cobro.
+#
+# POR QUE EXISTE: la sonda no mandaba `x-payment-chain`. Sin esa cabecera el gateway cobra
+# en SU red default, y toda la aritmetica de la HU decia "USDC" sobre un activo que no era
+# USDC. Este log es la medicion que lo destapa y la que fija el activo nuevo.
+#
+# cuerpo (identico en los dos):
+#   {"steps":[{"agent":"remit-corridor-fx-solana","input":{"amountUsd":25,"payoutMethod":"yape"}}]}
+---
+
+## A) SIN x-payment-chain  (el comportamiento de HEAD, el defecto)
+
+$ curl -s -X POST .../compose -H 'content-type: application/json' -d "$BODY"
+HTTP 402
+{"error":"payment-signature header is required","accepts":[{"scheme":"exact",
+ "network":"eip155:2368",
+ "maxAmountRequired":"30300000000000000",
+ "payTo":"0xf432baf1315ccDB23E683B95b03fD54Dd3e447Ba","maxTimeoutSeconds":300,
+ "asset":"0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9",
+ "extra":null,"merchantName":"WasiAI"}],"x402Version":2}
+
+  network eip155:2368  = kite-ozone-testnet
+  asset   0x8E04...2ec9 = PYUSD, 18 decimales
+  30300000000000000 / 1e18 = 0,0303  ->  **0,0303 PYUSD**
+
+## B) CON x-payment-chain: solana-devnet  (el comportamiento del fix-pack)
+
+$ curl -s -X POST .../compose -H 'content-type: application/json' \
+       -H 'x-payment-chain: solana-devnet' -d "$BODY"
+HTTP 402
+{"error":"payment-signature header is required","accepts":[{"scheme":"exact",
+ "network":"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+ "maxAmountRequired":"30300",
+ "payTo":"FxiqrG1etYCHvxSZKTcC7SZg5dk4DpALib542Z5JYJbs","maxTimeoutSeconds":900,
+ "asset":"4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+ "extra":{"reference":"6KQPSucsVdwCF2bqdkU84XDSCgJgV1DDBdE37oPVLw7K",
+          "issuedAt":1787703381,"expiresAt":1787704281,
+          "mint":"4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "nonce":"QGXbFmHwH5TenVDXn6LDis"},
+ "merchantName":"WasiAI"}],"x402Version":2}
+
+  network solana:EtWT... = Solana devnet
+  asset   4zMMC9...ncDU  = USDC de devnet
+  30300 / 1e6 = 0,0303   ->  **0,0303 USDC**
+
+---
+
+## LO QUE SE MIDIO, Y LO QUE SE CRUZO CONTRA EL REPO
+
+- Los DECIMALES no vienen en el 402. Se cruzaron contra el codigo, no se supusieron:
+  `src/adapters/solana/chain.ts:22`  DEFAULT_USDC_DECIMALS = 6
+  `src/adapters/solana/chain.ts:21`  DEFAULT_USDC_MINT_DEVNET = 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU
+  o sea que el `asset` del 402 ES el mint de USDC devnet que el repo declara por default.
+- El MONTO no cambia: 0,0303 en las dos redes. Lo que cambia es el ACTIVO y la RED.
+  La aritmetica de presupuesto de la HU (>= 60 / 30 dias, DAILY_LIMIT >= 2,00) queda igual;
+  lo que se corrige es la palabra "USDC", que antes del fix-pack era falsa.
+- El `payTo` cambia de una address EVM a una pubkey base58: son dos rieles distintos.
+
+## SUB-HALLAZGO NO BUSCADO — el rail inbound de Solana esta ENCENDIDO en produccion
+
+Que B) conteste 402 (y no 400) lo prueba: `src/middleware/x402.non-evm-inbound.test.ts`
+(T-204-02) fija que con las envs del rail inbound APAGADAS ese mismo request da **400
+`X402_INBOUND_UNSUPPORTED`**, y T-204-09 muestra que el interruptor son cuatro envs.
+Produccion las tiene puestas. La suite no esta mal —mide la config de SU proceso— pero
+quien lea ese archivo suponiendo que describe produccion, supone mal.
+
+## LO QUE ESTE LOG **NO** DEMUESTRA
+
+Que la sonda con una key VALIDA y fondeada cotice. Eso es D-2, sigue pendiente de la
+credencial del founder, y ninguna medicion de acá lo reemplaza: estos dos requests van sin
+credencial a proposito, que es lo que los hace gratis.

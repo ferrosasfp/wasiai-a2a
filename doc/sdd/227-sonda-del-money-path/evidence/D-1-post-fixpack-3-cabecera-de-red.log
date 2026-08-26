@@ -1,0 +1,48 @@
+# D-1 (RE-EJECUTADO tras el FIX-PACK 3 — la cabecera `x-payment-chain`)
+# la sonda en ROJO con credencial invalida. COSTE: 0 USDC.
+# fecha: 2026-08-26T00:22:56Z  host: DESKTOP-T2ULTF0  node: v22.22.0
+# rama: feat/227-sonda-money-path  HEAD al correrlo: e76f9ca (el fix-pack 3 aun sin commitear)
+# comando: A2A_PROBE_KEY=wasi_a2a_credencial_invalida_demo npm run probe:money-path
+#
+# ANCLA AL CODIGO, no al commit (mismo criterio que el log anterior: el id del commit que
+# INCLUYE este log no se puede escribir dentro del log):
+#   git hash-object scripts/probe-money-path.mjs = 6a26cab54747cb7f9a42dd5b702cebe388c4a574
+# Ese blob es el del fix-pack 3 y DEBE quedar identico en el commit que lo cierra:
+#   git rev-parse <commit>:scripts/probe-money-path.mjs  ->  6a26cab5...
+# El blob anterior (e687abdc..., D-1-post-fixpack.log) ya NO corresponde: el fix-pack 3 SI
+# toca `scripts/`.
+#
+# POR QUE SE RE-EJECUTA: el fix-pack 3 agrega `x-payment-chain: solana-devnet` al unico
+# POST /compose. Habia que verificar que la fila 4 de la escalera sigue dando CONFIG/exit 3
+# y no se convirtio en un DOWN por un rechazo nuevo del gateway.
+# esperado: fila 4 -> CONFIG -> exit 3, nunca DOWN. Produccion NO esta implicada.
+---
+
+> wasiai-a2a@0.1.0 probe:money-path
+> node scripts/probe-money-path.mjs
+
+CONFIG: la credencial de la sonda (KEY_NOT_FOUND) — producción no está implicada | agent=remit-corridor-fx-solana schemaSha256=ee87a63f8e71 omitted=[destCountry] httpStatus=403 agentFailure=- durationMs=802
+---
+exit code observado: 3
+
+# CONTRASTE con la corrida previa (D-1-post-fixpack.log), campo por campo:
+#   clase        CONFIG            = CONFIG          (igual)
+#   error_code   KEY_NOT_FOUND     = KEY_NOT_FOUND   (igual)
+#   schemaSha256 ee87a63f8e71      = ee87a63f8e71    (igual)
+#   omitted      [destCountry]     = [destCountry]   (igual)
+#   httpStatus   403               = 403             (igual)
+#   durationMs   746 -> 802                          (latencia de red)
+# La cabecera nueva NO altero la atribucion. Que era lo que habia que medir.
+#
+# ⚠️ LO QUE ESTA CORRIDA **NO** DEMUESTRA, dicho antes de que alguien se apoye en ella:
+# no demuestra que la cabecera funcione. Una key invalida muere en el middleware de auth
+# (403 KEY_NOT_FOUND) ANTES de que la red de cobro importe, asi que este log daria
+# EXACTAMENTE lo mismo con la cabecera puesta, mal escrita o ausente — el `durationMs` es
+# lo unico que cambia y es ruido. Es un control de NO-REGRESION, no un control positivo.
+#
+# El control POSITIVO de la cabecera es otro y esta archivado aparte:
+#   402-red-de-cobro-con-y-sin-cabecera.log
+# Y el testigo en suite es T-16 (test/probe-money-path.test.mjs), con sus dos mutantes.
+#
+# COSTE: 0 USDC. La credencial muere antes del debito. Sigue siendo la unica corrida
+# contra produccion de esta HU que no gasta.

@@ -24,6 +24,41 @@ import { createHash } from 'node:crypto';
 export const BASE_URL = 'https://wasiai-a2a-production.up.railway.app';
 export const AGENT_SLUG = 'remit-corridor-fx-solana';
 
+/**
+ * La red en la que la sonda pide que le cobren, vía el header `x-payment-chain` del
+ * único `POST /compose`.
+ *
+ * ⚠️ NO es "una red testnet cualquiera": es **la red en la que cobra Chaski**, el
+ * producto cuyo camino del dinero esta sonda existe para ejercitar. Chaski manda
+ * exactamente este header con el valor de `WASIAI_A2A_PAYMENT_CHAIN`
+ * (`chaski-v3/src/infrastructure/a2a/gateway-client.ts:326`, header condicional; el
+ * valor documentado está en su `.env.example:309` = `solana-devnet`). Una sonda que
+ * paga por un riel distinto al del producto no está ejercitando el riel del producto:
+ * está ejercitando otro, y su verde no dice nada del que importa.
+ *
+ * ── QUÉ CAMBIA, MEDIDO CONTRA PRODUCCIÓN EL 2026-08-25 ────────────────────────────
+ * Los dos 402 de `POST /compose` (sin credencial ⇒ sin débito ⇒ coste 0), mismo
+ * cuerpo y mismo minuto:
+ *
+ *   SIN el header → `network: eip155:2368` (kite-ozone-testnet, la red DEFAULT del
+ *     gateway), `asset: 0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9` (**PYUSD**, 18
+ *     decimales), `maxAmountRequired: 30300000000000000` = **0,0303 PYUSD**.
+ *   CON el header → `network: solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`,
+ *     `asset: 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` (**USDC de devnet**, 6
+ *     decimales — `src/adapters/solana/chain.ts:21-22`),
+ *     `maxAmountRequired: 30300` = **0,0303 USDC**.
+ *
+ * El NÚMERO no cambió (0,0303 en las dos); el ACTIVO y la RED sí. Sin esta constante
+ * la sonda pagaba en PYUSD sobre Kite mientras toda su documentación decía "USDC".
+ *
+ * ⚠️ El saldo de una agent key es POR RED: con este header el débito prepago va contra
+ * el chainId sintético `900001` (`src/adapters/solana/chain.ts:25`), así que la key de
+ * la sonda tiene que estar fondeada AHÍ. Fondeada en otra red ⇒ 403
+ * `INSUFFICIENT_BUDGET`, que la escalera clasifica CONFIG/exit 3 y no acusa a
+ * producción.
+ */
+export const PAYMENT_CHAIN = 'solana-devnet';
+
 /** Monto de la sonda. NO sale del schema: el schema publica una RESTRICCIÓN, no un monto. */
 const DEFAULT_AMOUNT_USD = 25;
 
@@ -389,7 +424,11 @@ export async function main(env = process.env) {
     `${BASE_URL}/compose`,
     {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-a2a-key': cred.key },
+      headers: {
+        'content-type': 'application/json',
+        'x-a2a-key': cred.key,
+        'x-payment-chain': PAYMENT_CHAIN,
+      },
       body: JSON.stringify({ steps: [{ agent: AGENT_SLUG, input }] }),
     },
     COMPOSE_TIMEOUT_MS,

@@ -142,8 +142,17 @@ A2A_PROBE_KEY repo secret [NO EXISTE — 2026-08-25]
 │  ├─ El techo diario DAILY_LIMIT ≥ 2,00 USD habilita ~18 corridas de PR/día
 │  └─ 30 × 2,00 = 60 USDC/mes con PR habilitado
 │
+├─ 🔴 EN QUÉ RED (fix-pack 3, 2026-08-25): la key va fondeada en `solana-devnet`
+│  ├─ La sonda manda `x-payment-chain: solana-devnet` (la red donde cobra Chaski)
+│  ├─ El saldo de una agent key es POR RED: el débito pega en chainId 900001
+│  ├─ Fondeada en otra red ⇒ 403 INSUFFICIENT_BUDGET ⇒ CONFIG/exit 3, con la key llena
+│  └─ ⚠️ ANTES del fix-pack la sonda cobraba en PYUSD sobre kite-ozone-testnet, y
+│     cada "USDC" de este bloque era el activo equivocado. Medido en los dos 402 del
+│     2026-08-25: el MONTO no cambia (0,0303 en ambas); el ACTIVO y la RED sí
+│
 └─ Checklist (fundador):
    ☐ `A2A_PROBE_KEY` creada como **repo secret** (no environment)
+   ☐ Fondeada en **solana-devnet** (USDC devnet, mint `4zMMC9…JDncDU`, 6 decimales)
    ☐ Presupuesto ≥ 60 USDC/30 días, DAILY_LIMIT ≥ 2,00 USD/día
    ☐ ⚠️ Si scope limitado: 403 SCOPE_DENIED → CONFIG/exit 3 (no "producción caída")
 ```

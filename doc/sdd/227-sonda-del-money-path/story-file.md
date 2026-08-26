@@ -182,6 +182,17 @@ Tres hechos que cambian el diseño:
    `maxAmountRequired: "30300000000000000"` (18 decimales) ⇒ **0,0303 USDC por corrida**
    (0,03 del agente + ~1% de fee de plataforma).
 
+   ⚠️ **CORRECCIÓN — FIX-PACK 3, 2026-08-26.** Ese `30300000000000000` a 18 decimales **no
+   es USDC**: es **PYUSD** (`asset 0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9`) sobre
+   `eip155:2368` = **kite-ozone-testnet**, la red DEFAULT del gateway, que era la que
+   contestaba porque la sonda no mandaba `x-payment-chain`. Desde el fix-pack 3 la sonda
+   declara la red de Chaski y el mismo 402 devuelve `network solana:EtWTRABZ…`,
+   `asset 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` (**USDC de devnet**, **6**
+   decimales) y `maxAmountRequired: "30300"` ⇒ **0,0303 USDC**. El monto y toda la
+   aritmética de presupuesto que se derivan de él **no cambian**; el activo, la red y la
+   escala de decimales sí. Medición completa en
+   `evidence/402-red-de-cobro-con-y-sin-cabecera.log`.
+
 **Body del `POST /compose`** — shape verificado en `src/types/index.ts:984-1005` y validado
 antes del débito por `src/lib/compose-step-shape.ts`:
 

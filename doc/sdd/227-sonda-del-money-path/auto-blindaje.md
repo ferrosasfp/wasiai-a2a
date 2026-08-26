@@ -271,6 +271,69 @@ por `cp` con `assert md5` — nunca con `git checkout --`, que borra lo que se e
 
 ---
 
+### [2026-08-25 22:40] Fix-pack 3 — La sonda pagaba en PYUSD sobre Kite, no en USDC sobre Solana
+
+- **Error**: `scripts/probe-money-path.mjs` **no mandaba `x-payment-chain`** en su
+  `POST /compose` (medido: 0 ocurrencias del literal en el archivo de HEAD; control
+  positivo, `x-a2a-key` da 1). Sin esa cabecera el gateway cobra en **su red default**, y
+  toda la aritmética de la HU —0,0303 "USDC" por corrida, ≥ 60 "USDC"/30 días, ≥ 2,00
+  "USD"/día— **nombraba el activo equivocado**. El número estaba bien; el activo no.
+- **Medido contra producción el 2026-08-25**, dos `POST /compose` sin credencial (⇒ sin
+  débito ⇒ coste 0), mismo cuerpo y mismo minuto, los dos **402**:
+
+  | | `network` | `asset` | dec. | `maxAmountRequired` | = |
+  |---|---|---|---|---|---|
+  | **sin** la cabecera | `eip155:2368` (kite-ozone-testnet) | `0x8E04D099b1a8Dd20E6caD4b2Ab2B405B98242ec9` — **PYUSD** | 18 | `30300000000000000` | **0,0303 PYUSD** |
+  | **con** `x-payment-chain: solana-devnet` | `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` — **USDC devnet** | 6 | `30300` | **0,0303 USDC** |
+
+  Los 6 decimales y el mint no salen del 402: se cruzaron contra el repo
+  (`src/adapters/solana/chain.ts:21-22`), que los declara como default del rail.
+  ⚠️ Sub-hallazgo no buscado: el 402 con la cabecera **existe**, o sea que el rail
+  **inbound** de Solana está ENCENDIDO en producción. `src/middleware/x402.non-evm-inbound.test.ts`
+  (T-204-02) fija que con el rail apagado ese mismo request da **400**, no 402. La suite
+  sigue siendo correcta —mide la config de SU proceso, no la de prod— pero quien lea ese
+  archivo y suponga que describe producción, supone mal.
+
+- **Causa raíz** — y es estructural, no un descuido: **ninguna de las cuatro revisiones
+  (AR ×2, CR, F4) pudo correr la llamada autenticada**, porque la credencial que falta es
+  justo la que la habilita. Todo lo verificable sin ella se verificó bien; el defecto vivía
+  entero del otro lado de esa frontera. Lo destapó el primer intento real de fondear.
+- **Fix** (decisión del founder): la sonda declara la red, y es **la de Chaski** — *una
+  sonda que paga por un riel distinto al del producto no está ejercitando el riel del
+  producto*. No es un literal suelto: es `PAYMENT_CHAIN` (`scripts/probe-money-path.mjs:60`)
+  con la razón escrita en su docblock y la referencia cruzada al cliente que manda el mismo
+  header (`chaski-v3/src/infrastructure/a2a/gateway-client.ts:326`).
+  ⚠️ **Corrección de una cita del pedido**: el `:303` que circulaba **no** es esa línea
+  (303 es el guard de `steps.length === 0`). La línea del header es la **326**.
+- **Medido — el mutante, que es lo que faltaba**: en HEAD, borrar la cabecera dejaba la
+  suite **verde**, porque no existía ningún testigo. Con T-16 puesto:
+
+  | # | Mutante | Resultado |
+  |---|---|---|
+  | M1 | borrar la línea `'x-payment-chain': PAYMENT_CHAIN,` del POST | 🔴 **KILLED** — `1 failed \| 48 passed (49)`, `expected undefined to be 'solana-devnet'` |
+  | M2 | `PAYMENT_CHAIN = 'solana-devnett'` (typo de un carácter) | 🔴 **KILLED** — `1 failed \| 48 passed (49)`, cae el cruce contra `src/adapters/chain-resolver.ts` |
+
+  Restaurado por `cp` desde una copia previa, con `md5sum` verificado en las dos vueltas
+  (`4259232abcd26a6e38355e85d32fe2d2`). ⛔ Nunca `git checkout --`.
+  M2 existe porque M1 solo no alcanza: un valor que el resolver no reconoce manda la
+  cabecera igual y el cobro NO cae donde se cree.
+- **Lo que este testigo NO cubre**, dicho antes de que alguien se apoye en su verde: prueba
+  que la cabecera **sale**, no que el gateway **cobre** ahí. Eso último sólo lo prueba una
+  corrida con credencial fondeada (D-2), que sigue pendiente del founder.
+- ⚠️ **Límite del gate, medido y no evadido**: `npm run lint` es `biome check src/` — **no
+  mira `scripts/` ni `test/`**, que es exactamente donde vive todo este fix-pack. Los tres
+  pasos del gate se corrieron igual, en orden y una vez (tsc 0 · lint 0 sobre 503 archivos ·
+  `299 passed \| 6 skipped (305)` / `6010 passed \| 19 skipped (6029)`), pero el eslabón de
+  lint **no aporta evidencia sobre estos dos archivos**. Decirlo es la diferencia entre
+  correr el gate y creer que el gate cubre lo que uno tocó.
+- **Aplicar en**: **todo cliente que consuma un endpoint cobrable de este gateway.** La red
+  de cobro tiene un default silencioso, y un default silencioso no falla: cobra en otro
+  lado. Y la lección de proceso: **si una revisión no puede ejecutar el camino, decilo en su
+  veredicto en vez de aprobar lo que sí pudiste ver** — cuatro revisiones seguidas dejaron
+  pasar esto sin que ninguna mintiera.
+
+---
+
 ## ⛔ Precondición de MERGE — no se resuelve con código (AR/BLQ-MED-3)
 
 `gh secret list --repo ferrosasfp/wasiai-a2a` → **vacío** — medición del **AR**, 2026-08-25.
@@ -291,8 +354,18 @@ primero que gana es que lo silencien — el riesgo #2 del propio SDD, materializ
 tocó, no se apagó y no se acotó. Queda escrito acá para que el merge no ocurra sin eso:
 
 - [ ] `A2A_PROBE_KEY` existe como **repo secret** (no environment secret)
-- [ ] presupuesto **≥ 60 USDC / 30 días** — 44 cubre sólo el reloj (48 × 0,0303 × 30 =
-      43,63); el techo diario de 2,00 habilita 18 corridas de PR/día, y 30 × 2,00 = 60
+- [ ] 🔴 **la key está fondeada en `solana-devnet`, NO en la red default del gateway.**
+      Desde el fix-pack 3 la sonda manda `x-payment-chain: solana-devnet`, y el saldo de
+      una agent key es **por red**: el débito va contra el chainId sintético **900001**
+      (`src/adapters/solana/chain.ts:25`). Fondeada en otra red ⇒ 403
+      `INSUFFICIENT_BUDGET` ⇒ CONFIG/exit 3 cada 30 minutos, con la key llena
+- [ ] presupuesto **≥ 60 USDC / 30 días** — y desde el fix-pack 3 ese "USDC" es literal:
+      **USDC de devnet**, mint `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`, 6 decimales.
+      ⚠️ Antes del fix-pack la sonda cobraba en **PYUSD sobre kite-ozone-testnet** y la
+      palabra "USDC" de esta lista era falsa. La aritmética **no cambia**: 0,0303 por
+      corrida medido en las dos redes (402 del 2026-08-25). 44 cubre sólo el reloj
+      (48 × 0,0303 × 30 = 43,63); el techo diario de 2,00 habilita 18 corridas de PR/día,
+      y 30 × 2,00 = 60
 - [ ] `DAILY_LIMIT` ≥ **2,00 USD/día** (⚠️ el 1,46 de §16 quedó corto: ver la entrada del
       `pull_request` de arriba)
 - [ ] ⚠️ si la key se crea con `allowed_agent_slugs` o con tope por llamada, el 403
@@ -321,11 +394,17 @@ comentario), y **derivado**, no copiado:
 
 | Archivo | Código antes | Código ahora | Presupuesto §15 |
 |---|---|---|---|
-| `scripts/probe-money-path.mjs` | 241 | **262** | 260 |
-| `test/probe-money-path.test.mjs` | 211 | **365** | 220 |
+| `scripts/probe-money-path.mjs` | 241 | **267** | 260 |
+| `test/probe-money-path.test.mjs` | 211 | **382** | 220 |
 | `.github/workflows/probe-money-path.yml` | 72 | **100** | 95 |
 | `package.json` + 2 README | 3 | 3 | 3 |
-| **Total** | 527 | **730** | 578 (techo 1156) |
+| **Total** | 527 | **752** | 578 (techo 1156) |
+
+⚠️ La columna "ahora" se **re-derivó** en el fix-pack 3 (antes decía 262 / 365 / 730). El
+fix-pack 3 suma **+22**: +5 en el script (la cabecera y su constante; el docblock que
+explica POR QUÉ esa red no cuenta como código con este criterio) y +17 en el test (T-16 y
+el registro de cabeceras del doble de `fetch`). Sigue en **1,30x del presupuesto, bajo el
+techo**.
 
 **1,26x del presupuesto, bajo el techo.** El fix-pack 2 suma **+17 líneas, todas en el
 archivo de tests**: la columna de atribución de T-5 (20 fragmentos, uno por fila) y el

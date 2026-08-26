@@ -11,6 +11,7 @@
  * T-7       → AC-8  credencial ausente: exit 3, y exit 0 con SKIP en `pull_request`
  * T-8, T-9  → AC-5, AC-6, AC-4  afirmaciones sobre el YAML REAL
  * T-10..T-12→ AC-2, AC-7, CD-4, CD-6, CD-14, CD-15  ejecutables sobre el fuente real
+ * T-16      → FIX-PACK 2026-08-25: la sonda declara EN QUÉ RED se le cobra (la de Chaski)
  */
 
 import { spawnSync } from 'node:child_process';
@@ -24,6 +25,7 @@ import {
   deriveInput,
   isRetryable,
   main,
+  PAYMENT_CHAIN,
   schemaFingerprint,
 } from '../scripts/probe-money-path.mjs';
 
@@ -336,15 +338,17 @@ describe('WKH-364 · main() con `fetch` doblado: cero red, y ningún POST de má
    */
   const conFetch = async (respuestas, env) => {
     const llamadas = [];
+    const cabeceras = [];
     const original = globalThis.fetch;
     globalThis.fetch = async (url, init) => {
       llamadas.push(`${init?.method ?? 'GET'} ${url}`);
+      cabeceras.push(init?.headers ?? {});
       const r = respuestas[llamadas.length - 1];
       return { status: r.status, json: async () => r.body };
     };
     try {
       const exit = await main({ A2A_PROBE_KEY: 'credencial-de-mentira', ...env });
-      return { exit, llamadas };
+      return { exit, llamadas, cabeceras };
     } finally {
       globalThis.fetch = original;
     }
@@ -389,6 +393,34 @@ describe('WKH-364 · main() con `fetch` doblado: cero red, y ningún POST de má
     expect(r.llamadas).toHaveLength(2);
     expect(r.llamadas[0]).toContain('GET https://');
     expect(r.llamadas[1]).toContain('POST https://');
+  });
+
+  it('T-16: el POST /compose declara EN QUÉ RED se le cobra, y el slug es uno que el gateway reconoce', async () => {
+    // Por qué existe este testigo: la sonda nació SIN esta cabecera y la suite entera
+    // estaba verde. Sin ella el gateway cobra en su red default, que —medido contra
+    // producción el 2026-08-25— es kite-ozone-testnet en PYUSD, no Solana devnet en
+    // USDC (ver el docblock de PAYMENT_CHAIN). O sea: el defecto no era un número mal
+    // puesto, era que la sonda ejercitaba OTRO riel que el del producto, y ninguna
+    // revisión podía verlo porque ninguna pudo correr la llamada autenticada.
+    const r = await conFetch(
+      [
+        { status: 200, body: CARD },
+        { status: 200, body: { success: true, steps: [{ output: { rate: 3.7, netDeliveredLocal: 90 } }] } },
+      ],
+      {},
+    );
+    expect(r.exit).toBe(0);
+
+    // (a) el cableado: la cabecera viaja en el POST, con el valor de la constante.
+    expect(r.cabeceras[1]['x-payment-chain']).toBe(PAYMENT_CHAIN);
+    // (b) y NO en el GET, que es gratis y no cobra nada: ahí sería ruido.
+    expect(r.cabeceras[0]['x-payment-chain']).toBeUndefined();
+    // (c) el VALOR no es un literal de fantasía. El gateway traduce el header con el
+    //     mapa de `chain-resolver.ts`; un slug fuera de ese mapa no cae en la red
+    //     esperada, cae en un rechazo. Se cruza contra la fuente REAL del repo, que es
+    //     lo que hace que un typo en la constante ponga esto en rojo.
+    const resolver = readFileSync(resolve(REPO_ROOT, 'src/adapters/chain-resolver.ts'), 'utf8');
+    expect(resolver).toContain(`'${PAYMENT_CHAIN}': '${PAYMENT_CHAIN}',`);
   });
 });
 
