@@ -148,6 +148,8 @@ function esperadoVencidos(): number {
 let fetchStub: ReturnType<typeof vi.fn>;
 const ORIGINAL_ENV = {
   rpc: process.env.SOLANA_RPC_URL,
+  rpcDedicada: process.env.SOLANA_RPC_URL_PROGRAM_ACCOUNTS,
+  rpcFallback: process.env.SOLANA_RPC_URL_FALLBACK,
   mint: process.env.SOLANA_USDC_MINT_DEVNET,
   decimals: process.env.SOLANA_USDC_DECIMALS,
   program: process.env.SOLANA_ESCROW_PROGRAM_ID,
@@ -184,6 +186,11 @@ function ultimoBody(): Array<Record<string, unknown>> {
 
 beforeEach(() => {
   process.env.SOLANA_RPC_URL = 'https://rpc.test.invalid';
+  // Las otras dos de la cadena arrancan AUSENTES: si el entorno de quien corre
+  // la suite las tiene seteadas, el resto de los tests estaría barriendo contra
+  // una URL que ningún test eligió.
+  delete process.env.SOLANA_RPC_URL_PROGRAM_ACCOUNTS;
+  delete process.env.SOLANA_RPC_URL_FALLBACK;
   process.env.SOLANA_USDC_MINT_DEVNET = USDC_MINT;
   process.env.SOLANA_USDC_DECIMALS = String(USDC_DECIMALS);
   delete process.env.SOLANA_ESCROW_PROGRAM_ID;
@@ -195,6 +202,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
   for (const [key, value] of [
     ['SOLANA_RPC_URL', ORIGINAL_ENV.rpc],
+    ['SOLANA_RPC_URL_PROGRAM_ACCOUNTS', ORIGINAL_ENV.rpcDedicada],
+    ['SOLANA_RPC_URL_FALLBACK', ORIGINAL_ENV.rpcFallback],
     ['SOLANA_USDC_MINT_DEVNET', ORIGINAL_ENV.mint],
     ['SOLANA_USDC_DECIMALS', ORIGINAL_ENV.decimals],
     ['SOLANA_ESCROW_PROGRAM_ID', ORIGINAL_ENV.program],
@@ -554,5 +563,148 @@ describe('el program id que se barre', () => {
 
     const params = ultimoBody()[0]?.params as [string, unknown];
     expect(params[0]).toBe(process.env.SOLANA_ESCROW_PROGRAM_ID);
+  });
+});
+
+// ── T-ESC-RPC: DE QUÉ variable sale la URL, y en qué orden ───────────────────
+
+/**
+ * ⚠️ Estos tres testigos NO afirman "usa alguna URL": afirman CUÁL. El defecto
+ * que arreglan es elegir la equivocada —la tarjeta leía `SOLANA_RPC_URL`, que es
+ * el proveedor PRIMARIO del money-path y en producción es un plan que ni
+ * siquiera ofrece `getProgramAccounts`—, así que un aserto de "se llamó a
+ * fetch con algo" habría pasado antes y después del arreglo.
+ *
+ * Las tres URLs son DISTINTAS entre sí a propósito: es lo que hace que el
+ * aserto discrimine. Y cada caso afirma además a quién NO se le preguntó, para
+ * que un cambio que ordene mal la lista no pueda pasar por casualidad.
+ */
+describe('T-ESC-RPC: de qué variable sale la URL', () => {
+  const DEDICADA = 'https://dedicada.test.invalid';
+  const FALLBACK = 'https://fallback.test.invalid';
+  const PRIMARIA = 'https://primaria.test.invalid';
+
+  /** La URL del último `fetch`, o `null` si nunca se llamó. */
+  function urlUsada(): string | null {
+    const call = fetchStub.mock.calls.at(-1);
+    return call === undefined ? null : (call[0] as string);
+  }
+
+  function setEnv(env: {
+    dedicada?: string;
+    fallback?: string;
+    primaria?: string;
+  }): void {
+    for (const [key, value] of [
+      ['SOLANA_RPC_URL_PROGRAM_ACCOUNTS', env.dedicada],
+      ['SOLANA_RPC_URL_FALLBACK', env.fallback],
+      ['SOLANA_RPC_URL', env.primaria],
+    ] as Array<[string, string | undefined]>) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+
+  beforeEach(() => {
+    fetchStub.mockResolvedValue(
+      jsonResponse(okBatch([], clockAccount(CLOCK_NOW))),
+    );
+  });
+
+  // ── Testigo 1: la dedicada se ELIGE ────────────────────────────────────────
+
+  it('T-ESC-RPC-1: con SOLANA_RPC_URL_PROGRAM_ACCOUNTS seteada, se barre contra ESA', async () => {
+    setEnv({ dedicada: DEDICADA, primaria: PRIMARIA });
+
+    const card = await scanEscrows();
+
+    expect(card.status).toBe('ok');
+    expect(urlUsada()).toBe(DEDICADA);
+    // Y NO contra la del money-path, que es de donde salía el defecto.
+    expect(urlUsada()).not.toBe(PRIMARIA);
+  });
+
+  // ── Testigo 2: el ORDEN declarado, los tres escalones ──────────────────────
+
+  it('T-ESC-RPC-2a: con las TRES presentes gana la dedicada', async () => {
+    setEnv({ dedicada: DEDICADA, fallback: FALLBACK, primaria: PRIMARIA });
+
+    await scanEscrows();
+
+    expect(urlUsada()).toBe(DEDICADA);
+    expect(urlUsada()).not.toBe(FALLBACK);
+    expect(urlUsada()).not.toBe(PRIMARIA);
+  });
+
+  it('T-ESC-RPC-2b: sin la dedicada gana el FALLBACK, no la primaria', async () => {
+    setEnv({ fallback: FALLBACK, primaria: PRIMARIA });
+
+    await scanEscrows();
+
+    expect(urlUsada()).toBe(FALLBACK);
+    expect(urlUsada()).not.toBe(PRIMARIA);
+  });
+
+  it('T-ESC-RPC-2c: sin la dedicada Y sin el fallback, recién ahí la primaria', async () => {
+    setEnv({ primaria: PRIMARIA });
+
+    await scanEscrows();
+
+    expect(urlUsada()).toBe(PRIMARIA);
+  });
+
+  it('T-ESC-RPC-2d: el orden es el DECLARADO en el módulo, escalón por escalón', async () => {
+    // El mismo recorrido de 2a/2b/2c en una sola corrida, para que el aserto sea
+    // sobre la SECUENCIA y no sobre tres casos que podrían satisfacerse con
+    // órdenes distintos entre sí.
+    const elegidas: Array<string | null> = [];
+
+    setEnv({ dedicada: DEDICADA, fallback: FALLBACK, primaria: PRIMARIA });
+    await scanEscrows();
+    elegidas.push(urlUsada());
+
+    setEnv({ fallback: FALLBACK, primaria: PRIMARIA });
+    await scanEscrows();
+    elegidas.push(urlUsada());
+
+    setEnv({ primaria: PRIMARIA });
+    await scanEscrows();
+    elegidas.push(urlUsada());
+
+    expect(elegidas).toEqual([DEDICADA, FALLBACK, PRIMARIA]);
+  });
+
+  it('un valor en blanco NO tapa al siguiente de la cadena', async () => {
+    // `chain.ts:308` ya trata un fallback de puro espacio como ausente. Si acá
+    // no se hiciera lo mismo, un `SOLANA_RPC_URL_PROGRAM_ACCOUNTS='   '` dejaría
+    // la tarjeta apuntando a una URL vacía en vez de bajar un escalón.
+    setEnv({ dedicada: '   ', fallback: FALLBACK, primaria: PRIMARIA });
+
+    await scanEscrows();
+
+    expect(urlUsada()).toBe(FALLBACK);
+  });
+
+  // ── Testigo 3: ninguna configurada sigue siendo rpc_no_configurado ─────────
+
+  it('T-ESC-RPC-3: sin NINGUNA de las tres → rpc_no_configurado, y no se llama al RPC', async () => {
+    setEnv({});
+
+    const card = await scanEscrows();
+
+    expect(card).toEqual({ status: 'sin_dato', reason: 'rpc_no_configurado' });
+    expect(fetchStub).not.toHaveBeenCalled();
+    expect(urlUsada()).toBeNull();
+  });
+
+  it('la dedicada sola alcanza: sin las dos del money-path la tarjeta igual contesta', async () => {
+    // El punto de tener variable propia: el tablero deja de depender de que el
+    // camino del dinero esté configurado.
+    setEnv({ dedicada: DEDICADA });
+
+    const card = await scanEscrows();
+
+    expect(card.status).toBe('ok');
+    expect(urlUsada()).toBe(DEDICADA);
   });
 });

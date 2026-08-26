@@ -382,7 +382,7 @@ Scripts reales del `package.json`:
 
 Sin `SUPABASE_URL` real el servidor arranca igual y responde `/health`, pero todo lo que toque catálogo o presupuesto falla: la persistencia no es opcional.
 
-`.env.example` documenta **192 variables** con sus defaults (contadas con `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`, y esa misma cuenta la re-deriva `test/readme-numbers.test.ts` en cada `npm test`), y las pocas que cambian el comportamiento del dinero están agrupadas ahí.
+`.env.example` documenta **193 variables** con sus defaults (contadas con `grep -cE '^[A-Z][A-Z0-9_]*=' .env.example`, y esa misma cuenta la re-deriva `test/readme-numbers.test.ts` en cada `npm test`), y las pocas que cambian el comportamiento del dinero están agrupadas ahí.
 
 Dos guardas de arranque que conviene conocer antes de tocar config de mainnet:
 
