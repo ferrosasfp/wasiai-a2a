@@ -15,6 +15,7 @@ import {
   resolveMinReputation,
   UnknownDiscoverParamError,
 } from '../lib/discovery-query.js';
+import { resolveAgentForDetailView } from '../services/agent-detail.js';
 import { discoveryService } from '../services/discovery.js';
 
 /**
@@ -334,7 +335,10 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
       const { slug } = request.params;
       const { registry } = request.query;
 
-      const agent = await discoveryService.getAgent(slug, registry);
+      // WKH-369 (AC-1/AC-2): el detalle federado se enriquece con lo que
+      // publica la lista, o se declara no resuelto. El enriquecimiento vive en
+      // el RESOLVER y no en `getAgent` (CD-11): ese camino lo comparte /compose.
+      const agent = await resolveAgentForDetailView(slug, registry);
 
       if (!agent) {
         return reply.status(404).send({ error: 'Agent not found' });

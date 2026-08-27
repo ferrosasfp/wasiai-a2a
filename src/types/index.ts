@@ -455,6 +455,14 @@ export interface Agent {
    * Omitido (no `null`) salvo que la admisión haya ocurrido de verdad.
    */
   trial?: AgentTrialAdmission;
+  /**
+   * WKH-369 (AC-2/DT-6): la vista de detalle no pudo resolver `capabilities`.
+   * Omitido (no `null`) cuando SÍ se resolvieron — incluso si el agente
+   * declara cero. Distingue «no tiene capacidades» de «no las pudimos leer»:
+   * sin esta clave, un `capabilities: []` es una afirmación sobre el agente.
+   * `capabilities` sigue siendo `string[]` y jamás `null` (DT-6).
+   */
+  capabilitiesState?: 'unresolved';
 }
 
 /**

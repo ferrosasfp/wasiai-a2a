@@ -6,10 +6,8 @@ import {
 } from '../adapters/erc8004-reputation.js';
 import { BazaarSchemaError } from '../lib/bazaar.js';
 import { agentCardService, resolveBaseUrl } from '../services/agent-card.js';
-import {
-  discoveryService,
-  extractDeclaredTokenId,
-} from '../services/discovery.js';
+import { resolveAgentForDetailView } from '../services/agent-detail.js';
+import { extractDeclaredTokenId } from '../services/discovery.js';
 import { identityService } from '../services/identity.js';
 import { registryService } from '../services/registry.js';
 import { reputationService } from '../services/reputation.js';
@@ -40,7 +38,9 @@ const agentCardRoutes: FastifyPluginAsync = async (fastify) => {
       const { slug } = request.params;
       const { registry } = request.query;
 
-      const agent = await discoveryService.getAgent(slug, registry);
+      // WKH-369 (AC-5): `skills` se deriva de `agent.capabilities`, así que el
+      // card federado salía sin skills. Mismo resolver que /discover/:slug.
+      const agent = await resolveAgentForDetailView(slug, registry);
 
       if (!agent) {
         return reply.status(404).send({ error: 'Agent not found' });
