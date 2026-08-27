@@ -98,6 +98,10 @@ import { registryService } from './registry.js';
 const REGISTRY_ID = 'wasiai';
 const REGISTRY_NAME = 'WasiAI'; // ⚠️ id !== name: es la mitad del valor del fixture (CD-10)
 const CAPS_FED = ['remittance', 'remit', 'kyc', 'compliance'];
+/** Capacidades que publica el DETALLE de `fed-detalle-rico` (fix-pack, T-11). */
+const CAPS_DETALLE_RICO = ['payments', 'kyc'];
+/** Capacidades del federado INACTIVO (fix-pack, T-13). */
+const CAPS_INACTIVO = ['telemetry'];
 
 function makeRegistry(): RegistryConfig {
   return {
@@ -122,7 +126,15 @@ function makeRegistry(): RegistryConfig {
   };
 }
 
-/** Payloads de LISTA: lo que devuelve el `discoveryEndpoint`. */
+/**
+ * Payloads de LISTA: lo que devuelve el `discoveryEndpoint`.
+ *
+ * ⚠️ CR MNR-3: `listPayload` y `detailPayload` están COPIADAS en
+ * `../routes/discover.detail-capabilities.test.ts`, y ya divergieron una vez
+ * (`price_per_call` presente en una copia y ausente en la otra, las dos
+ * diciéndose «la forma medida en producción»). **Si tocás una, tocá la otra.**
+ * Unificarlas exige un archivo fuera del Scope IN: es `TD-369-7`.
+ */
 function listPayload(): Record<string, unknown>[] {
   return [
     {
@@ -143,6 +155,21 @@ function listPayload(): Record<string, unknown>[] {
       tags: [],
       price_per_call_usdc: 0.002,
       status: 'active',
+    },
+    // Fix-pack (AR MNR-1): el testigo de EFECTO de `includeInactive: true`. La
+    // lista filtra `status === 'active'` por default (`discovery.ts:448-450`),
+    // así que sin la bandera este agente desaparece del listado y el resolver
+    // lo declararía `unresolved` teniendo capacidades perfectamente resueltas.
+    // Antes de esto, la bandera sólo estaba cubierta por la FORMA del argumento
+    // (T-10), no por su consecuencia.
+    {
+      id: 'a-fed-4',
+      name: 'Fed Inactivo',
+      slug: 'fed-inactivo',
+      description: 'Agente federado inactivo',
+      tags: [...CAPS_INACTIVO],
+      price_per_call_usdc: 0.003,
+      status: 'inactive',
     },
   ];
 }
@@ -174,6 +201,39 @@ function detailPayload(slug: string): Record<string, unknown> | null {
       category: 'compliance',
       reputation: { score: null, count: 0 },
       status: 'active',
+    };
+  }
+  // Fix-pack (AR BLQ-BAJO-1): un registro cuyo endpoint de DETALLE **sí**
+  // publica el campo que el `agentMapping` declara (`tags`), y que NO está en
+  // la lista. Es el input que producía la respuesta auto-contradictoria
+  // `capabilities: ['payments','kyc']` + `capabilitiesState: 'unresolved'`.
+  // ⛔ A propósito NO entra en `SLUGS_MEDIDOS`: su lista vacía contra un detalle
+  // con contenido clasificaría `difiere` y volvería vacuo el `difiere: 0` de
+  // T-03, que mide la paridad lista↔detalle, no este borde.
+  if (slug === 'fed-detalle-rico') {
+    return {
+      id: 'a-fed-5',
+      name: 'Fed Detalle Rico',
+      slug: 'fed-detalle-rico',
+      description: 'Agente federado cuyo detalle sí publica capacidades',
+      category: 'compliance',
+      tags: [...CAPS_DETALLE_RICO],
+      price_per_call: 0.001,
+      reputation: { score: null, count: 0 },
+      status: 'active',
+    };
+  }
+  if (slug === 'fed-inactivo') {
+    // El DETALLE no trae `tags` (la divergencia medida) y sirve inactivos.
+    return {
+      id: 'a-fed-4',
+      name: 'Fed Inactivo',
+      slug: 'fed-inactivo',
+      description: 'Agente federado inactivo',
+      category: 'compliance',
+      price_per_call: 0.003,
+      reputation: { score: null, count: 0 },
+      status: 'inactive',
     };
   }
   return null;
@@ -236,6 +296,24 @@ afterEach(() => {
 
 type Bucket = 'difiere' | 'coincideConContenido' | 'coincideEnVacio';
 
+/**
+ * 🔴 CD-1, mecanizada de verdad (AR BLQ-BAJO-2).
+ *
+ * `coincideConContenido` NO mecanizaba nada: el único agente que lo satisfacía
+ * era `self-agent`, que hace early-return en el resolver y **por construcción
+ * no puede exhibir el defecto**. O sea que el testigo de "el fixture no está
+ * vacío" lo firmaba un agente que no pertenece a la población del bug — el
+ * mismo error de muestreo que esta HU existe para matar, movido adentro del
+ * guard que existía para impedirlo.
+ *
+ * `coincideConContenidoFederado` sólo puede subir con un agente **federado**
+ * (`registry_id !== SELF_PUBLISHED_REGISTRY_ID`) cuyas capacidades **no** estén
+ * vacías. Con `CAPS_FED = []` es 0, y T-03 se pone rojo.
+ */
+type Conteo = Record<Bucket, number> & {
+  coincideConContenidoFederado: number;
+};
+
 function clasificar(lista: string[], detalle: string[]): Bucket {
   const iguales =
     lista.length === detalle.length && lista.every((c, i) => c === detalle[i]);
@@ -252,21 +330,55 @@ const SLUGS_MEDIDOS = [
 
 async function medirParidad(
   detalleDe: (slug: string) => Promise<Agent | null>,
-): Promise<Record<Bucket, number>> {
+): Promise<Conteo> {
   const listado = await discoveryService.discover({ includeInactive: true });
-  const conteo: Record<Bucket, number> = {
+  const conteo: Conteo = {
     difiere: 0,
     coincideConContenido: 0,
     coincideEnVacio: 0,
+    coincideConContenidoFederado: 0,
   };
   for (const slug of SLUGS_MEDIDOS) {
     const enLista = listado.agents.find((a) => a.slug === slug);
     const detalle = await detalleDe(slug);
-    conteo[
-      clasificar(enLista?.capabilities ?? [], detalle?.capabilities ?? [])
-    ]++;
+    const bucket = clasificar(
+      enLista?.capabilities ?? [],
+      detalle?.capabilities ?? [],
+    );
+    conteo[bucket]++;
+    // El registro sale del agente REAL, no de una tabla paralela de slugs: una
+    // segunda expresión de "quién es federado" divergiría del resolver.
+    const registryId = detalle?.registry_id ?? enLista?.registry_id;
+    if (
+      bucket === 'coincideConContenido' &&
+      registryId !== SELF_PUBLISHED_REGISTRY_ID
+    ) {
+      conteo.coincideConContenidoFederado++;
+    }
   }
   return conteo;
+}
+
+/**
+ * Los warns del RESOLVER, aislados del ruido que `discovery.ts` mete en el
+ * MISMO `logSpy` (el mock de `../lib/logger.js` devuelve un único objeto para
+ * todos los módulos).
+ *
+ * ⚠️ Por qué se filtra y no se cuenta el total — medido, no supuesto:
+ * `resolvePriceWithFallback` (`discovery.ts:1535-1541`) emite **un warn por
+ * slug por PROCESO**, deduplicado en un `Set` de módulo que ningún
+ * `clearAllMocks` alcanza. Con el archivo entero, ese warn de
+ * `fed-fuera-del-listado` lo consume T-02a; con `vitest -t 'T-12'` lo consume
+ * T-12, y el conteo total pasa de 1 a 2. Un assert sobre el total era verde en
+ * la suite y rojo corriendo el test solo: un guard que depende del ORDEN no es
+ * un guard. Se filtra por la presencia de `error_code`, que es el contrato de
+ * log estructurado del repo (WKH-318) y NO por los dos códigos que este test
+ * espera — filtrar por ésos lo volvería tautológico.
+ */
+function warnsDelResolver(): Record<string, unknown>[] {
+  return logSpy.warn.mock.calls
+    .map((c) => c[0] as Record<string, unknown>)
+    .filter((payload) => typeof payload?.error_code === 'string');
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────
@@ -317,8 +429,12 @@ describe('WKH-369 · resolveAgentForDetailView', () => {
     );
 
     expect(conteo.difiere).toBe(0);
-    // CD-1 mecanizada: con un fixture de capacidades vacías esto es imposible.
-    expect(conteo.coincideConContenido).toBeGreaterThanOrEqual(1);
+    // 🔴 CD-1 mecanizada (fix-pack, AR BLQ-BAJO-2). Sólo la puede satisfacer un
+    // agente FEDERADO con capacidades no vacías: `self-agent` está excluido por
+    // `registry_id`, y con `CAPS_FED = []` no queda ningún federado con
+    // contenido. La versión anterior (`coincideConContenido >= 1`) la firmaba
+    // `self-agent`, que hace early-return y no puede exhibir el defecto.
+    expect(conteo.coincideConContenidoFederado).toBeGreaterThanOrEqual(1);
     expect(conteo.coincideEnVacio).toBeGreaterThanOrEqual(1);
   });
 
@@ -333,6 +449,11 @@ describe('WKH-369 · resolveAgentForDetailView', () => {
     expect(conteo.difiere).toBe(1);
     expect(conteo.coincideConContenido).toBe(1);
     expect(conteo.coincideEnVacio).toBe(2);
+    // De dónde sale ese `1` de `coincideConContenido`, escrito para que no se
+    // lea como un testigo del arreglo: es `self-agent`, y NINGÚN federado
+    // coincide con contenido mientras el defecto esté puesto. Es el número que
+    // el guard de CD-1 mira en T-03.
+    expect(conteo.coincideConContenidoFederado).toBe(0);
 
     const poblacion = conteo.difiere + conteo.coincideConContenido;
     const tasa = Math.round((100 * conteo.difiere) / poblacion);
@@ -385,5 +506,75 @@ describe('WKH-369 · resolveAgentForDetailView', () => {
       registry: 'wasiai',
       includeInactive: true,
     });
+  });
+
+  // ─── Fix-pack del AR/CR ────────────────────────────────────────────────
+
+  it('T-11 (AR BLQ-BAJO-1): capacidades ya resueltas por el DETALLE no se marcan `unresolved`', async () => {
+    // `fed-detalle-rico` NO está en la lista, así que cae en la rama 5b. Su
+    // payload de detalle SÍ publica `tags`, o sea que el gateway sí pudo leer
+    // sus capacidades. Marcarlas `unresolved` publicaría datos válidos con una
+    // etiqueta que le pide al consumidor descartarlos.
+    const agent = await resolveAgentForDetailView('fed-detalle-rico');
+
+    expect(agent?.capabilities).toEqual(['payments', 'kyc']);
+    // Las DOS aserciones hacen falta: la primera fija que el dato sobrevive, la
+    // segunda que no viaja acompañado de una afirmación que lo contradice.
+    expect(agent?.capabilitiesState).toBeUndefined();
+    expect('capabilitiesState' in (agent as object)).toBe(false);
+  });
+
+  it('T-12 (AR BLQ-MED-1): «ausente del catálogo» y «catálogo caído» emiten logs DISTINTOS', async () => {
+    // Rama 5b — el agente no está en el listado.
+    await resolveAgentForDetailView('fed-fuera-del-listado');
+    const ausente = warnsDelResolver();
+
+    expect(ausente).toHaveLength(1);
+    expect(ausente[0]).toMatchObject({
+      error_code: 'DETAIL_AGENT_ABSENT_FROM_CATALOG',
+      slug: 'fed-fuera-del-listado',
+      registry_id: 'wasiai',
+      marked: true,
+    });
+
+    // Rama `catch` — el catálogo no se pudo leer.
+    logSpy.warn.mockClear();
+    vi.mocked(registryService.getWithSecrets).mockRejectedValue(
+      new Error('registro caido'),
+    );
+    await resolveAgentForDetailView('fed-con-caps');
+    const caido = warnsDelResolver();
+
+    expect(caido).toHaveLength(1);
+    expect(caido[0]).toMatchObject({
+      error_code: 'DETAIL_CATALOG_UNREADABLE',
+      slug: 'fed-con-caps',
+      registry_id: 'wasiai',
+      failure: 'unknown',
+      marked: true,
+    });
+
+    // ⛔ Acá había un tercer assert —
+    // `expect(ausente[0].error_code).not.toBe(caido[0].error_code)` — y se sacó
+    // midiendo: dados los dos `toMatchObject` de arriba, que fijan DOS literales
+    // distintos, no existe input que lo ponga rojo. Era una aserción que no
+    // puede fallar, o sea prosa disfrazada de guard. Lo que separa las dos
+    // causas son los dos literales, y cada uno tiene su propio rojo (mutantes
+    // MUTANTE-3a y MUTANTE-3b del fix-pack).
+    //
+    // Lo que SÍ sigue siendo cierto y no se assertea porque es una DECISIÓN, no
+    // un invariante: el payload que ve el cliente es el mismo en las dos ramas.
+    // La separación vive en la telemetría, que es quien actúa sobre la causa.
+  });
+
+  it('T-13 (AR MNR-1): un federado INACTIVO resuelve sus capacidades, no se declara `unresolved`', async () => {
+    // El testigo de EFECTO de `includeInactive: true`. `getAgent` no filtra por
+    // status (`discovery.ts:1408-1462`), así que el detalle sirve inactivos;
+    // la lista los filtra salvo con la bandera.
+    const agent = await resolveAgentForDetailView('fed-inactivo');
+
+    expect(agent?.status).toBe('inactive');
+    expect(agent?.capabilities).toEqual(['telemetry']);
+    expect(agent?.capabilitiesState).toBeUndefined();
   });
 });

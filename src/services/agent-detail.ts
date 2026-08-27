@@ -20,19 +20,62 @@
  *   aproximación derivada de `category` u otra heurística del detalle.
  * CD-16: `metadata` no se toca. Sigue siendo el cuerpo crudo del endpoint de
  *   detalle: es la superficie desde la que otras sondas derivan su input.
+ *
+ * ⚠️ COSTO POR REQUEST, medido en el fix-pack (AR BLQ-BAJO-3). El
+ * enriquecimiento agrega un `discover()` completo contra UN registro: un fetch
+ * upstream con el over-fetch de `resolveUpstreamFetchLimit` (piso 200 filas) y
+ * una query a supabase por cada fila devuelta que declare token ERC-8004
+ * (`discovery.attachIdentities`). Antes de esta HU el detalle hacía como mucho
+ * UNA. Por eso el fix-pack le sacó a `GET /discover/:slug` la exención de rate
+ * limit que traía de WKH-AUDIT-A2A: esa exención se había concedido sobre la
+ * premisa "read-only y barato de servir", y esta HU es exactamente lo que la
+ * invalidó. Ver `routes/discover.ts`.
  */
 
+import { classifyFetchFailure } from '../lib/discovery-sources.js';
+import { getLogger } from '../lib/logger.js';
 import type { Agent } from '../types/index.js';
 import { SELF_PUBLISHED_REGISTRY_ID } from '../types/index.js';
 import { discoveryService } from './discovery.js';
+
+const log = getLogger('agent-detail');
+
+/**
+ * AC-2 + AR BLQ-BAJO-1: el marcador dice **el gateway no pudo leer las
+ * capacidades**, no «no las pude confirmar contra la lista».
+ *
+ * Si el payload de DETALLE ya trajo capacidades (un registro cuyo
+ * `agentMapping.capabilities` sí resuelve en el detalle), esas capacidades son
+ * un dato leído de verdad y salen SIN marcador. Marcarlas igual publicaría
+ * datos válidos con una etiqueta que le pide al consumidor descartarlos — peor
+ * que no etiquetar nada, y auto-contradictorio con la tabla de contrato:
+ * `capabilities: [...]` + `capabilitiesState: 'unresolved'` no tiene lectura.
+ *
+ * La ausencia de confirmación no se pierde: queda en el `log.warn` del
+ * call-site, que es donde la puede usar el operador. Lo que NO viaja al cliente
+ * es una afirmación que contradice el dato que la acompaña.
+ */
+function markUnresolvedIfEmpty(agent: Agent): boolean {
+  if (agent.capabilities.length > 0) return false;
+  agent.capabilitiesState = 'unresolved';
+  return true;
+}
 
 /**
  * Resuelve la vista de DETALLE de un agente, enriquecida con lo que publica la
  * lista. `registryId` es el mismo valor que hoy recibe `getAgent` (el
  * querystring `?registry=`), y es un ID: termina en `.eq('id', …)`.
  *
- * Aditivo y degradable (Exemplar B): NUNCA produce un 5xx. Si el catálogo no se
- * puede leer, el agente sale igual y la vista se declara no resuelta (AC-2).
+ * Aditivo y degradable (Exemplar B): **el enriquecimiento** NUNCA produce un
+ * 5xx. Si el catálogo no se puede leer, el agente sale igual y la vista se
+ * declara no resuelta (AC-2).
+ *
+ * ⚠️ El calificativo es load-bearing (CR MNR-2): la FUNCIÓN sí puede 5xxear.
+ * `getAgent` corre FUERA del `try` y propaga — su `getWithSecrets` consulta
+ * `registries` y una fila inaccesible tira. Está afuera a propósito: sin agente
+ * no hay nada que enriquecer, y tragarse ese error convertiría un 500 honesto
+ * ("no pude preguntar") en un 404 falso ("no existe"), que es la misma
+ * confusión de causas que esta HU existe para matar.
  */
 export async function resolveAgentForDetailView(
   slug: string,
@@ -70,10 +113,40 @@ export async function resolveAgentForDetailView(
       return agent;
     }
 
-    agent.capabilitiesState = 'unresolved';
+    // AR BLQ-MED-1: esta rama y el `catch` producían un payload byte-idéntico y
+    // CERO logs. «el agente no está en el catálogo» y «el catálogo no se pudo
+    // leer» son causas distintas con acciones distintas, y sin señal
+    // estructurada un registro caído durante horas se ve igual que un slug que
+    // legítimamente no está publicado. Precedente del repo: WKH-318, que hizo
+    // que toda fuente degradada de `discover()` rinda cuentas con un `warn`.
+    // El payload sigue siendo el mismo a propósito (el cliente sólo necesita
+    // saber que no está confirmado); lo que se separa es la telemetría.
+    const marcado = markUnresolvedIfEmpty(agent);
+    log.warn(
+      {
+        error_code: 'DETAIL_AGENT_ABSENT_FROM_CATALOG',
+        slug: agent.slug,
+        registry_id: agent.registry_id,
+        rows: listado.agents.length,
+        marked: marcado,
+      },
+      '[agent-detail.absent-from-catalog] the agent was not in the registry listing; its capabilities could not be confirmed',
+    );
     return agent;
-  } catch {
-    agent.capabilitiesState = 'unresolved';
+  } catch (err) {
+    const marcado = markUnresolvedIfEmpty(agent);
+    log.warn(
+      {
+        error_code: 'DETAIL_CATALOG_UNREADABLE',
+        slug: agent.slug,
+        registry_id: agent.registry_id,
+        // Misma clasificación que usa `discover()` para sus `sources[]`: cinco
+        // clases nombradas, y lo desconocido es `unknown`, nunca `ok`.
+        failure: classifyFetchFailure(err),
+        marked: marcado,
+      },
+      '[agent-detail.catalog-unreadable] the registry listing could not be read; the agent capabilities could not be confirmed',
+    );
     return agent;
   }
 }

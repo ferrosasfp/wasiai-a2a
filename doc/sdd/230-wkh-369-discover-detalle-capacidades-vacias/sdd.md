@@ -737,6 +737,29 @@ apareció una de las cinco de arriba. La más probable es la caché.
 | **TD-369-4** | `resolvePriceWithFallback` sostiene, **sin decirlo**, la paridad de precio del detalle. Borrarlo mandaría el `priceUsdc` del detalle a `0` en silencio | §3.3 `[MEDIDO-F2]` | Se **acota** con T-06b, que lo deja fijado por un test. Documentar el acoplamiento en el propio docblock es otra HU |
 | **TD-369-5** | `metadata.inputSchema` no existe en ninguna vista: el crudo trae `input_schema` (snake_case) en las dos, y `agent-card.ts:132-133` lee `inputSchema` | `[MEDIDO-F2]`, incidental | Fuera del alcance de esta HU. **Toca a WKH-364** (las sondas derivan su input de ahí) |
 
+### Deuda nueva, declarada en el FIX-PACK del AR/CR (2026-08-27)
+
+Las cinco de arriba se midieron en F2. Las cuatro de abajo salieron de la revisión y se
+declaran acá porque **deuda silenciosa es el hallazgo; deuda declarada es información**.
+
+| # | Qué | Evidencia | Por qué no ahora |
+|---|---|---|---|
+| **TD-369-6** | 🔴 **El marcador `capabilitiesState` NO llega al Agent Card.** `services/agent-card.ts:124` construye la card campo por campo (no hay `...agent`), así que un federado no resuelto sale con `skills: []` — el mismo `[]` ambiguo que esta HU mata, en la otra ruta de detalle que AC-5 inscribe | CR BLQ-BAJO-1 · **pineado ejecutando** por `T-14` en `routes/discover.detail-capabilities.test.ts`: el mismo agente por los dos caminos, con `unresolved` en uno y `skills: []` sin marcador en el otro | `services/agent-card.ts` está **fuera del Scope IN** (§3 lo lista como "no se toca": AC-5 se satisface sin editarlo). Y el `AgentCard` es un artefacto de **protocolo A2A**: meterle una clave no estándar tiene costo para todo consumidor A2A y merece su propia HU con su propio contrato. **No hay regresión**: hoy TODAS las cards federadas salían vacías. Cuando se cierre, `T-14` se pone rojo — es el punto |
+| **TD-369-7** | El fixture (`listPayload` / `detailPayload`) está **duplicado** entre `services/agent-detail.test.ts` y `routes/discover.detail-capabilities.test.ts`, y **ya divergió una vez** (`price_per_call` presente en una copia y ausente en la otra, las dos diciéndose «la forma medida en producción») | CR MNR-3 | Unificarlas exige un **octavo archivo** fuera del Scope IN. En el fix-pack las dos copias se **igualaron** y cada una lleva el aviso de que la otra existe; lo que queda pendiente es que el aviso sea mecánico y no prosa |
+| **TD-369-8** | `getAgent` sigue devolviendo `capabilities: []` para todo federado, y nada avisa al **tercer** consumidor que lo llame: el aviso vive en `agent-detail.ts`, que ese consumidor no va a abrir | CR MNR-4. Exposición **hoy es cero**, medida: `grep -rn '\.capabilities' compose.ts agent-price.ts` → 0 | CD-11 prohíbe editar `discovery.ts`, y es lo que hace automáticas a CD-3/CD-4/AC-7. El aviso tiene que ir al docblock de `getAgent`: es una línea, pero en el archivo que esta HU se comprometió a no tocar |
+| **TD-369-9** | `capabilitiesState` no está documentado en `doc/INTEGRATION.md` (`:390`, `:427`, `:525`), que es donde el repo documenta la respuesta de `/discover` | CR MNR-5 | `doc/**` está fuera del Scope IN (§3). No rompe a nadie (clave aditiva, sin response schema), pero la semántica «`capabilities: []` **sin** el marcador ES una afirmación sobre el agente» es justo la que un integrador necesita |
+
+### Lo que el fix-pack SÍ arregló y por eso NO es deuda
+
+| Hallazgo | Qué se hizo | Testigo |
+|---|---|---|
+| AR BLQ-BAJO-3 · fan-out sin rate limit | `GET /discover/:slug` **pierde** `config: { rateLimit: false }` y hereda el límite global, igual que su ruta hermana `GET /discover` | `T-15` (429 en la request N+1) |
+| AR BLQ-MED-1 · `catch` mudo | Dos `log.warn` estructurados con `error_code` distinto por rama, reusando `classifyFetchFailure` | `T-12` |
+| AR BLQ-BAJO-1 · `unresolved` falso | El marcador sólo se escribe si `capabilities.length === 0` | `T-11` |
+| AR BLQ-BAJO-2 · CD-1 no mecanizada | `coincideConContenidoFederado`, que sólo puede satisfacer un federado con capacidades no vacías | `T-03` |
+| AR MNR-1 · `includeInactive` sin testigo de efecto | Un federado `status: 'inactive'` en el fixture | `T-13` |
+| AR MNR-2 · `AGENT_BLOCKLIST` | **Sin cambio de código.** Con el arreglo de BLQ-BAJO-1, un slug blocklisteado cuyo detalle no publique capacidades sigue saliendo `unresolved` — y eso es correcto: el gateway efectivamente **no pudo leerlas** de la lista. Lo que cambia es que ahora **queda log**: `DETAIL_AGENT_ABSENT_FROM_CATALOG` con `rows` del listado | `T-12` (el `error_code`) |
+
 ---
 
 ## 12. Waves de implementación

@@ -321,10 +321,46 @@ const discoverRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * GET /discover/:slug
    * Get a specific agent by slug
+   *
+   * ⚠️ WKH-369 (AR BLQ-BAJO-3): esta ruta traía `config: { rateLimit: false }`
+   * desde `bd7ea69` (WKH-AUDIT-A2A), que sacó la exención de `GET /` y de
+   * `POST /` y dejó ésta afuera. El motivo escrito era el de la lista de
+   * exentas de `middleware/rate-limit.ts:9-10`: «read-only and cheap to serve».
+   *
+   * Esta HU invalidó esa premisa. El detalle pasó de **1 fetch upstream + como
+   * mucho 1 query de identidad** a **1 fetch upstream + un `discover()`
+   * completo** contra el registro del agente: over-fetch de hasta 200 filas
+   * (`resolveUpstreamFetchLimit`, piso 200) y una query a supabase por cada
+   * fila devuelta que declare token ERC-8004 (`discovery.attachIdentities`,
+   * `Promise.all` sin batch). Medido en el fix-pack, con la ruta armada y un
+   * solo `GET /discover/:slug`:
+   *
+   * | catálogo | filas que declaran token | `supabase.from()` |
+   * |---|---|---|
+   * | 200 filas | todas | **201** |
+   * |  29 filas (el orden de magnitud de hoy) | todas | **30** |
+   * | 200 filas | ninguna | **0** |
+   * | *línea base* (la ruta llamando a `getAgent` pelado) | — | **1** |
+   *
+   * El multiplicador **no** es el tamaño del catálogo: es la cantidad de filas
+   * que DECLARAN token ERC-8004, porque `attachIdentities` saltea sin query a
+   * las que no. Y el cliente de supabase es el que también sirve `/compose` y
+   * `/orchestrate`: saturar el pool degrada el camino del dinero.
+   *
+   * Se eligió **rate-limitar** y no acotar el fan-out porque acotarlo no es
+   * gratis y sí es incorrecto: `resolveUpstreamFetchLimit(n) = max(n, 200)`,
+   * así que un `limit` menor NO baja el fetch upstream, y el `slice` del page
+   * size corre **después del sort** (`discovery.ts:668`), de modo que un límite
+   * chico podría dejar al agente pedido fuera de la ventana y producir un
+   * `capabilitiesState: 'unresolved'` FALSO. Caché está descartada por el SDD
+   * (TD-369-3).
+   *
+   * Sin la exención hereda el límite global (`RATE_LIMIT_MAX`, default 60/min
+   * por IP), que es exactamente el que ya gobierna a `GET /discover` — la ruta
+   * hermana que hace el MISMO fan-out.
    */
   fastify.get(
     '/:slug',
-    { config: { rateLimit: false } },
     async (
       request: FastifyRequest<{
         Params: { slug: string };

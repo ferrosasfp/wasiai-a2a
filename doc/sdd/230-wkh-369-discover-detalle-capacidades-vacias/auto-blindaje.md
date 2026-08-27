@@ -29,7 +29,14 @@ copia hecha **antes**, nunca con `git checkout --`.
 
 Backup de sesión: `…/scratchpad/wkh369-f3/` (subdirectorio propio — ver §3, E-4).
 
-| ID | `archivo:línea` mutado | Mutación | Rojo REAL |
+> ⚠️ **LAS CITAS DE ESTA TABLA SON DEL ÁRBOL `6d1cb63`, NO DEL FINAL.** El fix-pack del
+> AR/CR (§7) reescribió `src/services/agent-detail.ts` y le movió TODAS las líneas: hoy la
+> asignación de `capabilities` está en `:103`, el `catch` en `:136` y el guard de
+> self-published en `:90`. Las mutaciones se midieron contra `6d1cb63` y ahí valían; dejarlas
+> sin fechar sería exactamente la clase de cita que el CR encontró cuatro veces en este mismo
+> archivo. **Las citas contra el árbol final están en §7.**
+
+| ID | `archivo:línea` mutado (árbol `6d1cb63`) | Mutación | Rojo REAL |
 |---|---|---|---|
 | **T-01** | `src/services/agent-detail.ts:60` | comentar `agent.capabilities = entrada.capabilities;` | `AssertionError: expected [] to deeply equal [ 'remittance', 'remit', 'kyc', …(1) ]` |
 | **T-02a** | `src/services/agent-detail.ts:73` | comentar `agent.capabilitiesState = 'unresolved';` (rama 5b) | `AssertionError: expected undefined to be 'unresolved' // Object.is equality` |
@@ -74,7 +81,9 @@ por esta HU (los 19 aciertos son comentarios preexistentes de otros archivos).
 - **Causa raíz**: sacando el guard de self-published, el resolver llama a
   `discover({ registry: 'self-published', includeInactive: true })`. Ese valor es
   **exactamente** `SELF_PUBLISHED_REGISTRY_NAME`, así que `discover()` entra por el merge
-  **local** (`discovery.ts:249`, `publishedAgentService.listAsAgents()`), `getWithSecrets`
+  **local** (el gate está en `discovery.ts:251` y la llamada a
+  `publishedAgentService.listAsAgents()` en `:253`; `:249` era la declaración de
+  `localAgents`, o sea el renglón vecino — CR MNR-1), `getWithSecrets`
   devuelve `undefined` y `registries` queda vacío ⇒ **cero fetch outbound**. El contador de
   `mockFetch` sigue en 0 y la aserción del Story File **pasa con el mutante puesto**.
 - **Fix**: T-09 lleva DOS aserciones. La del contador (la que el Story File pide) se conserva
@@ -103,16 +112,18 @@ por esta HU (los 19 aciertos son comentarios preexistentes de otros archivos).
 
 ### [2026-08-27] W1 — dos errores de tipos que `vitest` no puede ver
 - **Error**: con los 10 tests en VERDE, el paso 1 del gate dio dos `error TS`:
-  1. `agent-detail.test.ts:221` — el doble de `getWithSecrets` devolvía `null` y la firma real
-     es `Promise<RegistryConfig | undefined>`.
-  2. `agent-detail.ts:61` — `agent.reputation = entrada.reputation` con
+  1. `agent-detail.test.ts:221` (árbol `6d1cb63`) — el doble de `getWithSecrets` devolvía
+     `null` y la firma real es `Promise<RegistryConfig | undefined>`.
+  2. `agent-detail.ts` — `agent.reputation = entrada.reputation` con
      `exactOptionalPropertyTypes: true`: `number | undefined` no es asignable a `number`.
 - **Causa raíz**: `vitest` transpila sin chequear tipos. **Diez tests verdes no dicen nada
   sobre `tsc`**, y el Story File manda correr el gate *desde el paso 1* justamente por esto.
 - **Fix**: (1) el doble devuelve `undefined`. (2) La copia de `reputation` respeta la
   doctrina «omitido, no `null`» del repo: si la entrada de la lista no trae el campo, se
   **borra** del detalle en vez de escribirle `undefined`
-  (`src/services/agent-detail.ts:65-69`). En la práctica la rama de borrado no se alcanza —
+  (`src/services/agent-detail.ts:104-112` en el árbol FINAL; era `:65-69` en `6d1cb63`, y este
+  renglón decía `:61`, que ahí era un **comentario** — una cita de un estado transitorio del
+  archivo, CR MNR-1). En la práctica la rama de borrado no se alcanza —
   `mapAgent` siempre produce `reputation` (puede ser `NaN`) — pero escribir
   `agent.reputation = undefined` habría publicado la clave con valor `null` tras el
   `JSON.stringify`, que es exactamente la ambigüedad que esta HU existe para matar.
@@ -142,32 +153,41 @@ por esta HU (los 19 aciertos son comentarios preexistentes de otros archivos).
 - **Fix**: el import se partió en dos: `resolveAgentForDetailView` de `agent-detail.js` y
   **sólo** `extractDeclaredTokenId` de `discovery.js`. En `src/routes/discover.ts`
   `discoveryService` **sí** se queda: lo usan los handlers de `GET`/`POST /discover`
-  (líneas 234 y 304).
+  (`discover.ts:235` y `:305` en el árbol FINAL; este renglón decía «234 y 304», que eran
+  correctas en `18e4550` y **las desplazó mi propio import** — CR MNR-1. Re-verificadas
+  después del fix-pack, que agregó ~28 líneas de docblock pero **debajo**, en `:321-361`).
 - **Aplicar en**: `tsc` y `vitest` son **ciegos** a un import sin usar; sólo lo ve `biome`, y
   `lint` va **segundo** en el gate. Es el modo de falla que ya sobrevivió 5 revisiones en este
   repo.
 
 ---
 
-## 4. Delta del gate contra la línea base (W3.5 — completo y en orden, una vez)
+## 4. ❌ RETRACTADO — este renglón declaraba un VERDE que no existía (W3.5)
+
+> 🔴 **Lo que decía este apartado era FALSO y el AR y el CR lo midieron los dos.** Se deja el
+> texto original tachado porque borrarlo sería borrar la evidencia del error. La corrección
+> vive en §7.0, y el gate real, verde, en §7.9.
+
+Lo que este apartado afirmaba:
 
 ```
-npx tsc -p tsconfig.json --noEmit  → "TypeScript compilation completed", exit 0
-npm run lint                       → "Checked 519 files in 281ms. No fixes applied."
-npm test                           → Test Files  312 passed | 6 skipped (318)
-                                     Tests      6304 passed | 19 skipped (6323)
+npm test → Test Files  312 passed | 6 skipped (318)
+           Tests      6304 passed | 19 skipped (6323)
 ```
 
-| | Base | Ahora | Delta |
-|---|---|---|---|
-| archivos que lintea `biome` | 516 | 519 | **+3** (los 3 archivos nuevos de `src/`) |
-| archivos de test | 310 | 312 | **+2** |
-| tests | 6290 | 6304 | **+14** — exactamente los 14 de esta HU |
-| fallos | 0 | 0 | — |
+…y la tabla cerraba con `fallos | 0 | 0 | —`.
 
-Los avisos de `Failed to load source map for typescript.js` y las líneas
-`DOWN:`/`CONFIG:`/`PASS:` de la sonda del money-path aparecen **igual** en la línea base:
-son preexistentes, no consecuencia de esta HU.
+**Lo que salía de verdad en `6d1cb63`**, medido dos veces por el AR y una por el CR:
+
+```
+Test Files  1 failed | 311 passed | 6 skipped (318)
+Tests       4 failed | 6300 passed | 19 skipped (6323)
+exit 1
+```
+
+Los totales **coinciden** (`311 + 1 = 312`, `6300 + 4 = 6304`): no fue otra corrida, fue la
+misma corrida con la línea `Tests` leída a medias. Ver §7.0 para el mecanismo, que es lo único
+de todo esto que viaja fuera de la HU.
 
 ---
 
@@ -216,3 +236,299 @@ no ejecutado.
    `AL DIA`, y las tres anclas de `sed` de W−1 mostraron **exactamente** lo esperado
    (`discover.ts:337`, `agent-card.ts:43`, `types/index.ts:457`), así que el árbol no se
    movió respecto del SDD.
+
+---
+
+# 7. FIX-PACK del AR + CR — 2026-08-27
+
+> Los dos reportes dieron **RECHAZADO** (`ar-report.md`, `cr-report.md`). Acá va, hallazgo por
+> hallazgo, qué se hizo y con qué evidencia. **Todas las citas de esta sección son contra el
+> árbol FINAL**, no contra `6d1cb63`.
+>
+> Backup de esta sesión: `…/scratchpad/dev369fix/` — subdirectorio **propio**, y cada `.bak`
+> verificado con `/usr/bin/diff -q` contra el original antes de usarse. ⛔ Ningún
+> `git checkout --`.
+
+## 7.0 🔴 La lección: corrí el gate COMPLETO, sobre un árbol donde mi entregable NO EXISTÍA
+
+- **Error**: `auto-blindaje.md §4` declaraba `fallos: 0` y el gate estaba en **exit 1**, con
+  4 rojos en `test/readme-numbers.test.ts`. F4 usa este archivo como evidencia.
+- **Causa raíz** — y no es «leí mal el `tail`»: `test/readme-numbers.test.ts:82-90` enumera
+  con `execFileSync('git', ['ls-files'])`, o sea **contra el ÍNDICE de git, no contra el
+  disco**. Mientras `agent-detail.ts`, `agent-detail.test.ts` y
+  `discover.detail-capabilities.test.ts` estuvieron **untracked**, el guardián no los veía y
+  daba verde con los números viejos (316/516). Los números sólo cambian a 318/519 **después
+  del `git add`**.
+  Medido por el CR: `git ls-tree -r --name-only 18e4550 src | grep -c '\.ts$'` → 516;
+  el mismo comando sobre `6d1cb63` → 519.
+- **Fix**: `git add -A` **ANTES** del gate final, y recién entonces los tres pasos. Los cuatro
+  números de `README.md:378`/`:383` y `README.es.md:412`/`:417` pasan a 318 y 519.
+- **Rojo citado (el estado previo al arreglo ES el mutante, y su rojo es literal)**:
+  ```
+  AssertionError: expected 316 to be 318 // Object.is equality   ← readme-numbers.test.ts:283
+  AssertionError: expected 516 to be 519 // Object.is equality   ← readme-numbers.test.ts:289
+  Tests  4 failed | 9 passed (13)
+  ```
+  Con los README actualizados y el índice al día: `Tests 13 passed (13)`.
+- **Aplicar en**: **todo gate de este repo, siempre.** Es una variante NUEVA de «correr las
+  partes de un gate no es correr el gate»: acá el gate se corrió **entero y en orden**, pero
+  **sobre el árbol equivocado**. Un guardián que enumera con `git ls-files` es ciego a lo que
+  todavía no está en el índice — y lo que todavía no está en el índice es, justamente, lo que
+  acabás de escribir. **El árbol que el gate mide es el ÍNDICE, no tu working copy.**
+  Corolario que también viaja: `npm test | tail` puede terminar con `[exited with code 0]`
+  porque ése es el exit del **pipe**; el exit de `npm` está en `PIPESTATUS[0]`.
+
+⛔ **Salida del Scope IN, autorizada por el orquestador**: `README.md` y `README.es.md`. Es
+rutina de este repo, con precedente doble — `86cd78f` los actualizó dentro de su HU y
+`ee8a10a` existe **sólo** para arreglar este mismo olvido.
+
+## 7.1 AR BLQ-BAJO-3 — 200 queries por request en una ruta pública SIN rate limit
+
+- **Qué había**: `routes/discover.ts` declaraba `config: { rateLimit: false }` en
+  `GET /discover/:slug`. Esa exención viene de `bd7ea69` (WKH-AUDIT-A2A), que sacó la de
+  `GET /` y `POST /` y **dejó ésta afuera**, sobre el motivo escrito en la lista de exentas
+  de `middleware/rate-limit.ts:9-10`: «read-only and cheap to serve». Esta HU **invalidó esa
+  premisa** y el SDD no lo vio: §4.5 y `R-6` midieron **sólo latencia** (+220 ms), nunca el
+  volumen de queries ni la exención.
+- **La medición, hecha por mí** (sonda temporal `src/routes/zzfixpack369probe.test.ts`, que
+  contaba `supabase.from()` interceptando `lib/supabase.js`; borrada después):
+
+  | catálogo | filas que declaran token ERC-8004 | `supabase.from()` por UN `GET /discover/:slug` |
+  |---|---|---|
+  | 200 filas | todas | **201** |
+  | 29 filas (el orden de magnitud de hoy) | todas | **30** |
+  | 200 filas | ninguna | **0** |
+  | *línea base* — la ruta llamando a `getAgent` pelado | — | **1** |
+
+  El multiplicador **no** es el tamaño del catálogo: es cuántas filas **declaran** token,
+  porque `attachIdentities` (`discovery.ts:936-955`) saltea sin query a las que no.
+- **La decisión, y por qué NO fue acotar el fan-out**: acotarlo no sólo no alcanza, es
+  **incorrecto**. `resolveUpstreamFetchLimit(n) = max(n, 200)`
+  (`lib/discovery-fetch-limit.ts:74-79`), así que pasarle un `limit` menor **no baja el fetch
+  upstream**; y el `slice` del page size corre **después del sort**
+  (`discovery.ts:668`), de modo que un límite chico podría dejar al agente pedido **fuera de
+  la ventana** y producir un `capabilitiesState: 'unresolved'` **FALSO** — o sea, cambiar un
+  problema de costo por uno de corrección. Caché está descartada por el SDD (`TD-369-3`).
+  ⇒ Se le **saca la exención** y hereda el límite global (`RATE_LIMIT_MAX`, default 60/min por
+  IP), que es exactamente el que ya gobierna a `GET /discover`: la ruta hermana que hace el
+  **mismo** fan-out.
+- **Testigo**: `T-15` en `routes/discover.detail-capabilities.test.ts`. Es de
+  **comportamiento**, no de la forma del objeto de config: un `{ config: {} }` vacío también
+  «no declara `rateLimit: false`» y no probaría nada.
+- **Rojo citado** (mutante: devolver `{ config: { rateLimit: false } }`):
+  ```
+  FAIL  T-15: la request N+1 al detalle federado devuelve 429 con `RATE_LIMIT_EXCEEDED`
+  AssertionError: expected 200 to be 429 // Object.is equality
+  ```
+
+## 7.2 AR BLQ-MED-1 — el `catch` era MUDO y colapsaba dos causas
+
+- **Qué había**: las dos ramas de no-resolución escribían el marcador y volvían **sin emitir
+  un solo log** (sonda del AR: `error`/`warn`/`info` los tres en 0), y «ausente del catálogo»
+  vs «catálogo caído» producían un `JSON.stringify` **idéntico**.
+- **Fix**: dos `log.warn` estructurados, uno por rama, con `error_code` distinto
+  (`DETAIL_AGENT_ABSENT_FROM_CATALOG` en `agent-detail.ts:127`,
+  `DETAIL_CATALOG_UNREADABLE` en `:140`), reusando `classifyFetchFailure`
+  (`lib/discovery-sources.ts:107`) — la MISMA clasificación que `discover()` usa para sus
+  `sources[]`. Precedente copiado: WKH-318, `discovery.ts:277-284`.
+  El **payload al cliente sigue igual en las dos ramas, a propósito**: el cliente sólo
+  necesita saber que no está confirmado; quien actúa sobre la CAUSA es el operador, y su
+  canal es la telemetría.
+- **Testigo**: `T-12` en `services/agent-detail.test.ts`.
+- **Dos rojos citados**:
+  ```
+  # MUTANTE-3a — se borra el log.warn del catch (vuelve a ser mudo)
+  AssertionError: expected [] to have a length of 1 but got +0
+
+  # MUTANTE-3b — las dos ramas colapsan en el MISMO error_code
+  AssertionError: expected { …(5) } to match object { …(5) }
+  ```
+
+## 7.3 AR BLQ-BAJO-1 — `unresolved` FALSO sobre capacidades ya resueltas
+
+- **Qué había**: la rama 5b marcaba `unresolved` **sin mirar** si el detalle ya traía
+  capacidades. Para un registro cuyo endpoint de detalle sí publica el campo, la respuesta
+  salía auto-contradictoria: `capabilities: ['payments','kyc']` **junto con**
+  `capabilitiesState: 'unresolved'`.
+- **La decisión, entre las dos que el AR ofrecía**: se eligió **marcar sólo si
+  `capabilities.length === 0`** (`markUnresolvedIfEmpty`, `agent-detail.ts:58-62`) y **no**
+  agregar un segundo literal («no confirmado»). El motivo: el marcador significa *el gateway
+  no pudo LEER las capacidades*, y si el detalle ya las trajo, el gateway sí las leyó — el
+  cruce contra la lista es un **enriquecimiento**, no la única fuente de verdad. Así la tabla
+  de contrato del Story File §5.2 queda literalmente cierta y el contrato público no crece.
+  La ausencia de confirmación no se pierde: viaja en el `warn` de §7.2.
+- **Testigo**: `T-11`, con un quinto agente de fixture (`fed-detalle-rico`) cuyo DETALLE sí
+  publica `tags` y que NO está en la lista. ⛔ A propósito **fuera** de `SLUGS_MEDIDOS`: su
+  lista vacía contra un detalle con contenido clasificaría `difiere` y volvería vacuo el
+  `difiere: 0` de T-03.
+- **Rojo citado** (mutante: sacar el guard de longitud):
+  ```
+  AssertionError: expected 'unresolved' to be undefined
+  ```
+
+## 7.4 AR BLQ-BAJO-2 — CD-1 NO estaba mecanizada, y es el corazón de la HU
+
+- **Qué había**: `expect(conteo.coincideConContenido).toBeGreaterThanOrEqual(1)` con el
+  comentario «con un fixture vacío esto es imposible». **Era falso.** Ese contador lo
+  satisfacía **`self-agent`**, que hace early-return en `agent-detail.ts:90` y **por
+  construcción no puede exhibir el defecto**: el testigo de CD-1 lo firmaba un agente fuera
+  de la población del bug — el mismo error de muestreo del issue original, movido adentro del
+  test que existía para impedirlo.
+- **Fix**: `coincideConContenidoFederado`, que sólo sube con un agente
+  `registry_id !== SELF_PUBLISHED_REGISTRY_ID` **y** con capacidades no vacías. El registro
+  sale del agente REAL (`detalle?.registry_id ?? enLista?.registry_id`), no de una tabla
+  paralela de slugs que pudiera divergir del resolver. T-03 assertea sobre ése; T-04 además
+  fija `coincideConContenidoFederado: 0` bajo el defecto, para que el `1` de
+  `coincideConContenido` no se lea como testigo del arreglo.
+- **Los tres rojos, con el CONTROL que es la evidencia de verdad** (misma mutación del AR):
+  ```
+  # MUTANTE-5a — CAPS_FED = []  (fixture vacío, código sano)
+  AssertionError: expected 0 to be greater than or equal to 1
+
+  # MUTANTE-5b — CAPS_FED = []  +  EL BUG PUESTO  (la reproducción exacta del AR)
+  AssertionError: expected 0 to be greater than or equal to 1
+
+  # CONTROL — el guard VIEJO (`coincideConContenido >= 1`) con EXACTAMENTE el mismo input
+  Tests  1 passed | 12 skipped (13)      ← VERDE. Ésa era la falla.
+  ```
+  El control es lo que prueba que el arreglo arregla algo: con el mismo input, el guard viejo
+  aplaude y el nuevo no.
+
+## 7.5 CR BLQ-BAJO-1 — la card A2A pierde el marcador ⇒ `TD-369-6`, **pineada**
+
+- **Qué hay**: `services/agent-card.ts:124` construye la card campo por campo (no hay
+  `...agent`), así que `capabilitiesState` se pierde y un federado no resuelto sale con
+  `skills: []` — el mismo `[]` ambiguo que la HU mata, en la otra ruta que AC-5 inscribe.
+- **La decisión, entre las dos que el CR ofrecía**: **(a) declararlo**, no surfacearlo.
+  `services/agent-card.ts` está **fuera del Scope IN** (§3 del Story File lo lista
+  explícitamente como «no se toca»), y el `AgentCard` es un artefacto de **protocolo A2A**:
+  meterle una clave no estándar tiene costo para todo consumidor A2A y merece su propia HU con
+  su propio contrato. No hay regresión: hoy **todas** las cards federadas salían vacías.
+- **Pero declarar no es sólo escribir**: la deuda queda **pineada ejecutando** por `T-14`, que
+  pide el MISMO agente por los dos caminos y fija la asimetría. `TD-369-6` está escrita en
+  `sdd.md §11`.
+- **Rojo citado** (mutante: hacer que la card SÍ arrastre el marcador, o sea cerrar TD-369-6):
+  ```
+  AssertionError: expected 'unresolved' to be undefined
+  ```
+  ⇒ el día que alguien cierre la deuda, este test se pone rojo y lo obliga a actualizar el
+  pin. Es el punto.
+
+## 7.6 Los MENORES
+
+| # | Qué | Qué se hizo |
+|---|---|---|
+| **CR MNR-1** | 4 citas de este archivo apuntaban al renglón vecino, y **dos las desplazó mi propio cambio** | Re-ancladas contra el árbol FINAL (§2 → `discovery.ts:251`/`:253`; §3 → `agent-detail.ts:104-112`; §3 → `discover.ts:235` y `:305`). Y la tabla de §1 lleva ahora el commit contra el que se midió, porque el fix-pack le movió las líneas otra vez |
+| **CR MNR-2** | «NUNCA produce un 5xx» era falso: `getAgent` está fuera del `try` y propaga | Restituido el calificativo del Story File §5.2 («NUNCA **por el enriquecimiento**») **y** escrito por qué `getAgent` se queda afuera: sin agente no hay nada que enriquecer, y tragarse ese error convertiría un 500 honesto («no pude preguntar») en un 404 falso («no existe») — la misma confusión de causas que la HU mata. `agent-detail.ts:69-78` |
+| **CR MNR-3** | El fixture duplicado **ya había divergido** (`price_per_call` en una copia y no en la otra) | Las dos copias igualadas campo por campo, y cada una lleva el aviso de que la otra existe. Unificarlas exige un octavo archivo ⇒ `TD-369-7` |
+| **CR MNR-4** | Nada avisa al tercer consumidor de `getAgent` | `TD-369-8`. Exposición hoy **cero**, re-medida: `grep -c '\.capabilities' compose.ts agent-price.ts` → `0` y `0` |
+| **CR MNR-5** | `capabilitiesState` no está en `doc/INTEGRATION.md` | `TD-369-9`. `doc/**` fuera del Scope IN |
+| **AR MNR-1** | `includeInactive` cubierto por la FORMA del argumento, no por su efecto | **Arreglado**, no declarado: fixture con un federado `status: 'inactive'` + `T-13`. Rojo del mutante `includeInactive: false` → `AssertionError: expected [] to deeply equal [ 'telemetry' ]` — un rojo de **consecuencia**, no de forma del argumento |
+| **AR MNR-2** | `AGENT_BLOCKLIST` produce `unresolved` con motivo falso | **Sin cambio de código, y con motivo.** Un slug blocklisteado desaparece de la lista pero sigue resolviendo por `getAgent`; con el arreglo de §7.3 sale `unresolved` sólo si sus capacidades vinieron vacías, y eso es **correcto**: el gateway efectivamente no las pudo leer de la lista. Lo que cambia es que ahora **queda log** (`DETAIL_AGENT_ABSENT_FROM_CATALOG`, con `rows` del listado), así que el operador puede separarlo |
+| **AR MNR-3** | = CR BLQ-BAJO-1 | §7.5 |
+
+## 7.7 Error propio del fix-pack: mi propio guard dependía del ORDEN de los tests
+
+- **Error**: `T-12` asserteaba `expect(logSpy.warn.mock.calls).toHaveLength(1)`. Con el
+  archivo entero: **verde**. Con `vitest -t 'T-12'`: **rojo**, `expected [ …(2) ] to have a
+  length of 1 but got 2`. Lo encontré porque el rojo del MUTANTE-3a llegó con el mensaje
+  equivocado — el mensaje del mutante fue lo que destapó el defecto del test.
+- **Causa raíz**: `resolvePriceWithFallback` (`discovery.ts:1535-1541`) emite **un warn por
+  slug por PROCESO**, deduplicado en un `Set` de módulo que **ningún `clearAllMocks`
+  alcanza**. Con la suite completa ese warn de `fed-fuera-del-listado` lo consume T-02a; solo,
+  lo consume T-12. Y el mock de `../lib/logger.js` devuelve **un único** objeto para todos los
+  módulos, así que el ruido de `discovery.ts` cae en el mismo spy.
+- **Fix**: `warnsDelResolver()` filtra por la **presencia de `error_code`** (el contrato de log
+  estructurado del repo, WKH-318) y no por los dos códigos que el test espera — filtrar por
+  ésos lo volvería tautológico. Además se **borró** un tercer assert
+  (`ausente[0].error_code !== caido[0].error_code`) que, dados los dos `toMatchObject` de
+  arriba, **ningún input podía poner rojo**: era prosa disfrazada de guard.
+- **Verificación**: los **19** tests de la HU corridos **uno por uno** con `-t`, además de por
+  archivo. Los 19 pasan aislados.
+- **Aplicar en**: todo assert sobre un espía COMPARTIDO entre módulos, y todo contador global
+  en un test. **Un guard que depende del orden no es un guard**, y la forma barata de
+  detectarlo es correr cada test solo. El segundo hábito: cuando el rojo de un mutante llega
+  con el mensaje equivocado, **el sospechoso es el test**, no el mutante.
+
+## 7.8 Higiene — probada, no supuesta
+
+```
+/usr/bin/git status --porcelain src/services/discovery.ts   → VACÍA   (CD-11: cero líneas)
+/usr/bin/git status --porcelain src/services/agent-card.ts  → VACÍA   (mutado y restaurado)
+/usr/bin/grep -rn "MUTANTE" src/{services,routes}/{agent-detail,discover}*.ts → sin restos
+sonda temporal src/routes/zzfixpack369probe.test.ts        → BORRADA
+```
+
+Camino del dinero: **cero líneas**. Pin de KYC: **cero líneas**. Ni `src/adapters/**`, ni
+`middleware/x402.ts`, ni `fee-*`, ni settle, ni escrow aparecen en el diff.
+
+## 7.9 EL GATE — completo, en orden, UNA vez, y **después** de `git add -A`
+
+`/usr/bin/git status --porcelain` antes de correrlo: **10 archivos, los 10 en el índice**
+(`A`/`M`, ni un `??`). Ése es el cambio de procedimiento que sale de §7.0.
+
+```
+############ PASO 1 · npx tsc -p tsconfig.json --noEmit ############
+EXIT_TSC=0
+
+############ PASO 2 · npm run lint ############
+> wasiai-a2a@0.1.0 lint
+> biome check src/
+Checked 519 files in 223ms. No fixes applied.
+EXIT_LINT=0
+
+############ PASO 3 · npm test ############
+EXIT_TEST=0      ← PIPESTATUS[0], el exit de npm, NO el del pipe
+ Test Files  312 passed | 6 skipped (318)
+      Tests  6309 passed | 19 skipped (6328)
+   Duration  14.66s
+```
+
+⚠️ **La línea `Tests` está copiada entera**, que es lo que no se hizo la primera vez. No hay
+`N failed` en ninguno de los dos renglones: el `312 passed` de hoy es `312 passed` a secas, no
+`311 passed + 1 failed` como el `312` de §4.
+
+| | Base (`18e4550`) | `6d1cb63` (rechazado) | **Fix-pack (final)** |
+|---|---|---|---|
+| `tsc` | exit 0 | exit 0 | **exit 0** ✅ |
+| `lint` | 516 archivos | 519 archivos | **519 archivos** ✅ |
+| archivos de test | 310 passed (316) | 311 passed **+ 1 FAILED** (318) | **312 passed** (318) ✅ |
+| tests | 6290 passed (6309) | 6300 passed **+ 4 FAILED** (6323) | **6309 passed** (6328) ✅ |
+| exit de `npm test` | 0 | **1** ❌ | **0** ✅ |
+
+Delta de tests contra la base: **+19**, que son exactamente los 19 de la HU (14 del Story File
++ los 5 del fix-pack: T-11, T-12, T-13, T-14, T-15). Los avisos de
+`Failed to load source map for typescript.js` y las líneas `DOWN:`/`CONFIG:`/`PASS:` de la
+sonda del money-path aparecen **igual** en la línea base: son preexistentes.
+
+## 7.10 Escala del fix-pack (regla 10 de `CLAUDE.md`)
+
+| Concepto | Presupuesto §9 | HU cerrada (`6d1cb63`) | **Con el fix-pack** | |
+|---|---|---|---|---|
+| Código de producción, sin prosa | ≤ 70 | 38 | **67** | ✅ |
+| Tests (líneas de los 2 archivos) | ≤ 420 | 670 | **1014** | ⚠️ **2.4×** |
+| Archivos de producción tocados | 4 | 4 | **4** | ✅ |
+
+Desglose del código de producción: `agent-detail.ts` **60** · `agent-card.ts` (route) 3 ·
+`discover.ts` 2 · `types/index.ts` 2. El crecimiento de 38 → 60 en el resolver son
+`markUnresolvedIfEmpty` (5 líneas) y los dos `log.warn` estructurados (~17): **el cuerpo
+completo de BLQ-BAJO-1 y BLQ-MED-1**, nada más.
+
+**El exceso de tests cruza el umbral 2× y por eso se justifica por escrito, no en silencio.**
+*¿Qué parte seguiría existiendo si lo escribiera alguien que ya conoce este repo?* Las
+**344 líneas** que suma el fix-pack se reparten así, y ninguna es lógica de producción
+disfrazada:
+
+- **~130 son fixture**: dos agentes nuevos (`fed-detalle-rico`, `fed-inactivo`) × dos payloads
+  (lista y detalle) × **dos archivos**, porque CD-7 prohíbe el atajo y `TD-369-7` explica por
+  qué no se pueden compartir sin salir del Scope IN. Cada uno es el ÚNICO input que exhibe su
+  defecto: sin `fed-detalle-rico` no existe el caso de BLQ-BAJO-1, sin `fed-inactivo` no
+  existe el testigo de efecto de `includeInactive`.
+- **~95 son los 5 tests nuevos**, uno por hallazgo BLOQUEANTE que el AR/CR pidió mecanizar.
+- **~120 son comentario**, y es donde está el excedente real. Se escribió a propósito en tres
+  lugares: por qué `coincideConContenidoFederado` existe y qué mataba el guard viejo, por qué
+  `warnsDelResolver` filtra en vez de contar (§7.7), y el pin de `TD-369-6`. Los tres son
+  hallazgos que **ya se perdieron una vez** por no estar escritos.
+
+Lo recortable identificado sigue siendo el mismo y sigue sin ejecutarse: unificar el fixture
+(`TD-369-7`, ~130 líneas menos ahora), que exige un octavo archivo fuera del Scope IN.
