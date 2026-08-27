@@ -532,3 +532,175 @@ disfrazada:
 
 Lo recortable identificado sigue siendo el mismo y sigue sin ejecutarse: unificar el fixture
 (`TD-369-7`, ~130 líneas menos ahora), que exige un octavo archivo fuera del Scope IN.
+
+---
+
+# 8. CIERRE de los 2 MENOR del re-AR (`ar-report-2.md`) — 2026-08-27, iteración 2
+
+Punto de partida: `29d55e3`, AR-2 **APROBADO**, 6 bloqueantes cerrados. Esto es sólo el
+residual. **Cero cambios en `discovery.ts` (CD-11), cero en `services/agent-card.ts`, cero en
+el camino del dinero.** Archivos tocados: `src/services/agent-detail.ts`,
+`src/services/agent-detail.test.ts`, y los dos documentos de la HU.
+
+## 8.1 AR-2 MNR-1 — el docblock afirmaba separar dos CAUSAS, y separa dos RAMAS
+
+- **Qué había**: `agent-detail.ts:116-123` decía que los dos `error_code` distinguen «el agente
+  no está en el catálogo» de «el catálogo no se pudo leer», y nombraba «un registro caído
+  durante horas». **Falso, y medido por el AR-2**: el `catch` sólo se alcanza si `discover()`
+  **tira**, y `discover()` está construido (WKH-318) para **degradar en vez de tirar**. Con 503
+  en el endpoint de LISTA y 200 en el de detalle, el catálogo está caído y el resolver emite
+  `DETAIL_AGENT_ABSENT_FROM_CATALOG`.
+- **Por qué no es cosmética**: quien grepee `DETAIL_CATALOG_UNREADABLE` para contar registros
+  caídos ve **cero** y concluye que no hubo ninguno. Falso negativo **por instrumento** — la
+  misma familia de error que esta HU existe para matar.
+- **Fix (a)**: el docblock dice ahora qué separan de verdad los dos códigos —`discover()`
+  RESPONDIÓ sin la fila **vs** `discover()` TIRÓ— y **desmiente por escrito** la frase vieja,
+  en vez de borrarla en silencio. Nota gemela de 4 líneas en el propio `catch`, porque quien
+  aterriza ahí no ve el bloque de arriba.
+- **Fix (b)**: el warn de la rama ausente **lleva el estado de las fuentes**, que es lo único
+  que discrimina la causa:
+  ```ts
+  catalog_status: listado.catalogStatus,
+  sources: listado.sources.map((s) => ({ name: s.name, state: s.state })),
+  ```
+  El objeto ya estaba en la mano (`:100`): **cero I/O nueva**.
+- **Testigo nuevo**: `T-16` en `services/agent-detail.test.ts` — la sonda del AR-2 mecanizada
+  (503 en la lista, 200 en el detalle). Assertea que corren **las dos** ramas de telemetría en
+  la MISMA request, en orden, y que el warn del resolver trae `catalog_status: 'partial'` +
+  `sources: [{ name: 'WasiAI', state: 'failed' }]` con `rows: 0`.
+- **Tres rojos citados** (cada uno restaurado con `cp` desde su backup):
+  ```
+  # MUTANTE-4a — se borra `catalog_status` del warn
+  AssertionError: expected { …(6) } to match object { slug: 'fed-con-caps', …(5) }
+
+  # MUTANTE-4b — se borra `sources` del warn
+  AssertionError: expected { …(6) } to match object { slug: 'fed-con-caps', …(5) }
+
+  # MUTANTE-4c — `sources` viaja, pero el ESTADO se hardcodea `'ok'`
+  AssertionError: expected { …(7) } to match object { slug: 'fed-con-caps', …(5) }
+  ```
+  **4c es el que importa**: 4a/4b sólo prueban que la CLAVE está; 4c prueba que lo que llega es
+  el estado **real** de la fuente y no una constante optimista. Un guard que sólo mata 4a/4b se
+  contenta con `state: 'ok'` sobre un registro caído.
+
+### Un rojo que NO estaba previsto, y por qué el test quedó mejor
+
+La primera versión de `T-16` asserteaba `expect(warns).toHaveLength(1)` y salió
+`expected [ { …(3) }, { …(7) } ] to have a length of 1 but got 2`. **El segundo warn era el
+`REGISTRY_SOURCE_FAILED` de `discovery.ts:408-415`**, que también lleva `error_code` y por eso
+pasa el filtro de `warnsDelResolver`. O sea: el "ruido" era exactamente **la correlación que el
+docblock nombra como la forma de recuperar la causa**. En vez de filtrarlo, el test lo
+assertea:
+
+```ts
+expect(warns.map((w) => w.error_code)).toEqual([
+  'REGISTRY_SOURCE_FAILED',
+  'DETAIL_AGENT_ABSENT_FROM_CATALOG',
+]);
+```
+
+- **Causa raíz**: escribí la aserción de conteo desde la sonda del AR-2 (que imprimía los dos
+  warns) sin mirar que el helper **no** filtra por módulo, sino por presencia de `error_code`
+  (§7.7 lo dice, lo leí, y aun así asserté el conteo del resolver solo).
+- **Aplicar en**: todo test que cuente llamadas a un `logSpy` compartido entre módulos. El
+  conteo es del SPY, no del módulo bajo prueba.
+- **Verificado order-independent**: `vitest -t 'T-16'` aislado → `PASS (1) FAIL (0)`, o sea que
+  no repite el defecto de §7.7.
+
+## 8.2 AR-2 MNR-2 — el cross-reference nombraba el mutante que no es
+
+- **Qué había**: `agent-detail.test.ts:562-563` decía que los dos literales de `error_code`
+  tienen «cada uno su propio rojo (mutantes MUTANTE-3a y MUTANTE-3b)». **§7.2 de este mismo
+  documento define MUTANTE-3a como borrar el `log.warn` del `catch`** — mata el SILENCIO, no un
+  literal. Y MUTANTE-3b colapsa **los dos a la vez**, así que tampoco respalda "cada uno".
+- **Fix**: se corrigió **el lado equivocado, que era el test** (§7.2 describe bien lo que
+  midió). El comentario cita ahora `MUTANTE-5a`/`MUTANTE-5b`, medidos en ESTE cierre, y deja
+  escrito qué mata MUTANTE-3a para que el puntero viejo no se vuelva a inventar.
+- **Los dos rojos, medidos ahora** (uno por literal, mutando **uno por vez**):
+  ```
+  # MUTANTE-5a — colapsa SOLO el literal de la rama AUSENTE
+  T-12: AssertionError: expected { …(7) } to match object { …(4) }
+  T-16: AssertionError: expected [ 'REGISTRY_SOURCE_FAILED', …(1) ] to deeply equal [ 'REGISTRY_SOURCE_FAILED', …(1) ]
+        Tests  2 failed | 12 passed (14)
+
+  # MUTANTE-5b — colapsa SOLO el literal del CATCH
+  T-12: AssertionError: expected { …(5) } to match object { …(5) }
+        Tests  1 failed | 13 passed (14)
+  ```
+  Con esto la frase del comentario pasó de ser **prosa** a ser **medición**: era cierta, pero
+  nadie la había ejecutado así.
+
+## 8.3 Lo que queda sin cerrar ⇒ `TD-369-10` (nueva, en `sdd.md §11`)
+
+Ningún `error_code` nombra la causa dominante. Cerrado el MNR-1, «el endpoint de lista se cayó»
+**sigue** saliendo bajo `DETAIL_AGENT_ABSENT_FROM_CATALOG`; lo que discrimina es el **valor** de
+`catalog_status`, no el código. Agrupar por `error_code` sigue sin poder contar registros
+caídos. Un tercer código (`DETAIL_CATALOG_DEGRADED`) es un cambio al vocabulario de logs de
+WKH-318 y re-particiona lo que `T-12` fija hoy en dos ramas: merece su propio contrato, no un
+renglón de un cierre de menores. **No hay pérdida de señal** — el dato viaja en el mismo warn.
+
+## 8.4 Números del README — verificados, NO tocados
+
+Es lo que rompió la iteración anterior, así que se midió antes de decidir: `T-16` es un **caso
+nuevo dentro de un archivo existente**. Los dos números que el guardián `readme-numbers.test.ts`
+re-deriva son **archivos de test** (`README.md:378`, `README.es.md:412`) y **archivos de lint**
+(`:383` / `:417`); ninguno cambia con un caso. El conteo de **casos** está a propósito **no
+escrito** en la tabla (`README.md:379`: *"Deliberately not written down here"*). ⇒ **cero
+ediciones de README**, y el guardián queda verde por el motivo correcto, no por casualidad.
+
+## 8.5 Higiene
+
+Backups en subdirectorio **propio** del scratchpad (`wkh369-ar2-mut/`), los dos verificados con
+`/usr/bin/diff -q` **antes** de mutar. Cinco mutaciones con `python3` + `assert count == 1`,
+las cinco restauradas con `cp` y la restauración comprobada con `/usr/bin/diff -q`.
+**Nunca `git checkout --`.** Sin `cat` (bajo el proxy devolvió 69 líneas de un archivo de 79):
+lectura con `sed -n` / `awk` numerando líneas.
+
+## 8.6 Escala de este cierre (regla 10)
+
+Método, escrito porque el número de §7.10 **no** salió de acá y las dos cifras no coinciden:
+líneas `+` del `git diff main` sobre los 4 archivos de producción, sin blancos y sin las que
+empiezan en `//`, `/*` o `*`. Con ese método el AR-2 (`29d55e3`) da **66**, no los 67 que dice
+§7.10 (contados a mano, en otro momento). Lo comparable es el **delta**, medido con el mismo
+comando en los dos extremos:
+
+| Concepto | AR-2 (`29d55e3`) | **+ este cierre** | |
+|---|---|---|---|
+| Código de producción, sin prosa | 66 | **68** (+2 exactas) | ✅ ≤ 70 |
+| Archivos de producción tocados | 4 | **4** (ninguno nuevo) | ✅ |
+| Diff en `src/` de este cierre | — | `agent-detail.ts` +33/−7 · `agent-detail.test.ts` +55/−3 | |
+
+Las **dos** líneas de producción son exactamente el cuerpo del MNR-1(b) (`catalog_status` y
+`sources`). Las otras 31 de `agent-detail.ts` son comentario, y ~26 de ellas **desmienten por
+escrito una afirmación falsa** en vez de borrarla: eso es el hallazgo del MNR-1, no el
+excedente. Del lado del test, 55 líneas para `T-16` incluyen su doble de `fetch` inline (13),
+que no se puede compartir con el `beforeEach` sin hacer opcional la ruta sana.
+
+## 8.7 EL GATE — completo, en orden, y **después** de `git add -A`
+
+`git status --porcelain` con los 5 archivos **staged** y el worktree limpio antes de correrlo
+(regla 9 + §7.0: el gate se corre sobre el árbol que contiene el entregable).
+
+```
+############ PASO 1 · npx tsc -p tsconfig.json --noEmit ############
+TypeScript compilation completed
+EXIT=0
+
+############ PASO 2 · npm run lint ############
+> biome check src/
+Checked 519 files in 261ms. No fixes applied.
+EXIT=0
+
+############ PASO 3 · npm test ############
+ Test Files  312 passed | 6 skipped (318)
+      Tests  6310 passed | 19 skipped (6329)
+EXIT=0
+```
+
+Delta contra el AR-2 (`29d55e3`: `519` · `312/318` · `6309/6328`): **+1 caso** (`T-16`), cero
+archivos, cero de lint. Es exactamente lo que §8.4 predijo antes de correrlo, y por eso los
+READMEs no se tocaron.
+
+Los avisos `Failed to load source map for typescript.js` y las líneas `DOWN:`/`CONFIG:`/`PASS:`
+de la sonda del money-path siguen siendo **preexistentes** (aparecen igual en la línea base
+de §0).

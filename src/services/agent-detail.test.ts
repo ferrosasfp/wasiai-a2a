@@ -558,13 +558,65 @@ describe('WKH-369 · resolveAgentForDetailView', () => {
     // `expect(ausente[0].error_code).not.toBe(caido[0].error_code)` — y se sacó
     // midiendo: dados los dos `toMatchObject` de arriba, que fijan DOS literales
     // distintos, no existe input que lo ponga rojo. Era una aserción que no
-    // puede fallar, o sea prosa disfrazada de guard. Lo que separa las dos
-    // causas son los dos literales, y cada uno tiene su propio rojo (mutantes
-    // MUTANTE-3a y MUTANTE-3b del fix-pack).
+    // puede fallar, o sea prosa disfrazada de guard. Lo que separa las dos ramas
+    // son los dos literales, y cada uno tiene su propio rojo — medido en el
+    // cierre AR-2 como `MUTANTE-5a` (colapsar sólo el literal de la rama
+    // ausente) y `MUTANTE-5b` (colapsar sólo el del `catch`).
+    //
+    // ⚠️ AR-2 MNR-2: acá se citaba «MUTANTE-3a y MUTANTE-3b». La sustancia era
+    // cierta pero el puntero nombraba otro mutante: `auto-blindaje.md §7.2`
+    // define MUTANTE-3a como **borrar el `log.warn`** del `catch`, que mata el
+    // SILENCIO, no un literal. El que sí ataca los literales es MUTANTE-3b, y
+    // colapsa los dos a la vez.
     //
     // Lo que SÍ sigue siendo cierto y no se assertea porque es una DECISIÓN, no
     // un invariante: el payload que ve el cliente es el mismo en las dos ramas.
     // La separación vive en la telemetría, que es quien actúa sobre la causa.
+  });
+
+  it('T-16 (AR-2 MNR-1): con la LISTA caída, el warn de «ausente» LLEVA el estado de las fuentes', async () => {
+    // La sonda del AR-2, mecanizada: 503 en el endpoint de LISTA, 200 en el de
+    // DETALLE. `discover()` degrada en vez de tirar (WKH-318), así que el
+    // `catch` NO se alcanza y el catálogo CAÍDO sale por la rama de «ausente».
+    // Sin `catalog_status`/`sources` en el warn, este caso es indistinguible de
+    // un slug legítimamente no publicado, y quien busque registros caídos
+    // grepeando `DETAIL_CATALOG_UNREADABLE` va a contar cero.
+    mockFetch.mockImplementation(async (input: unknown) => {
+      const url = String(input);
+      if (url.startsWith('https://example.com/agents')) {
+        return { ok: false, status: 503, json: () => Promise.resolve({}) };
+      }
+      const m = url.match(/^https:\/\/example\.com\/agent\/(.+)$/);
+      const raw = m?.[1] ? detailPayload(m[1]) : null;
+      if (!raw)
+        return { ok: false, status: 404, json: () => Promise.resolve({}) };
+      return { ok: true, json: () => Promise.resolve(raw) };
+    });
+
+    const agent = await resolveAgentForDetailView('fed-con-caps');
+    const warns = warnsDelResolver();
+
+    // Precondición, y la mitad del punto: en la MISMA request salen DOS warns
+    // estructurados — el de `discovery.ts` declarando la fuente caída, y el del
+    // resolver diciendo «ausente». Ésa es la correlación que el docblock nombra
+    // como la forma de recuperar la causa. Y fija que es la rama de «ausente»
+    // la que corre, no el `catch`: sin esto el test pasaría desde la otra rama.
+    expect(warns.map((w) => w.error_code)).toEqual([
+      'REGISTRY_SOURCE_FAILED',
+      'DETAIL_AGENT_ABSENT_FROM_CATALOG',
+    ]);
+
+    // CD-6: literales escritos a mano. `rows: 0` es el conteo del listado
+    // degradado — el número que, SOLO, hace parecer que el catálogo respondió.
+    expect(warns[1]).toMatchObject({
+      slug: 'fed-con-caps',
+      registry_id: 'wasiai',
+      rows: 0,
+      catalog_status: 'partial',
+      sources: [{ name: 'WasiAI', state: 'failed' }],
+      marked: true,
+    });
+    expect(agent?.capabilitiesState).toBe('unresolved');
   });
 
   it('T-13 (AR MNR-1): un federado INACTIVO resuelve sus capacidades, no se declara `unresolved`', async () => {

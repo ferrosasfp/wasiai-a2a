@@ -114,13 +114,32 @@ export async function resolveAgentForDetailView(
     }
 
     // AR BLQ-MED-1: esta rama y el `catch` producían un payload byte-idéntico y
-    // CERO logs. «el agente no está en el catálogo» y «el catálogo no se pudo
-    // leer» son causas distintas con acciones distintas, y sin señal
-    // estructurada un registro caído durante horas se ve igual que un slug que
-    // legítimamente no está publicado. Precedente del repo: WKH-318, que hizo
-    // que toda fuente degradada de `discover()` rinda cuentas con un `warn`.
-    // El payload sigue siendo el mismo a propósito (el cliente sólo necesita
-    // saber que no está confirmado); lo que se separa es la telemetría.
+    // CERO logs. Precedente del repo: WKH-318, que hizo que toda fuente
+    // degradada de `discover()` rinda cuentas con un `warn`. El payload sigue
+    // siendo el mismo a propósito (el cliente sólo necesita saber que no está
+    // confirmado); lo que se separa es la telemetría.
+    //
+    // ⚠️ AR-2 MNR-1 — QUÉ separan de verdad los dos `error_code`. Separan las
+    // dos RAMAS: `discover()` RESPONDIÓ sin la fila (acá) vs `discover()` TIRÓ
+    // (el `catch` de abajo). NO separan las dos CAUSAS. Acá decía que
+    // distinguían «el agente no está en el catálogo» de «el catálogo no se pudo
+    // leer», y nombraba «un registro caído durante horas»: es FALSO y está
+    // medido. `discover()` está construido (WKH-318) para DEGRADAR en vez de
+    // tirar, así que el modo de falla dominante —el endpoint de LISTA
+    // contestando 5xx/timeout— NO llega al `catch`: llega ACÁ, con `rows: 0`.
+    // Sonda del AR-2 (503 en la lista, 200 en el detalle): el catálogo estaba
+    // caído y el resolver emitía `DETAIL_AGENT_ABSENT_FROM_CATALOG`. ⇒ Quien
+    // grepee sólo `DETAIL_CATALOG_UNREADABLE` para encontrar registros caídos
+    // ve CERO y concluye que no hubo ninguno: falso negativo por instrumento,
+    // la misma familia de error que esta HU existe para matar.
+    //
+    // Lo que SÍ discrimina la CAUSA es el estado de las fuentes, y por eso
+    // viaja en este warn: `catalog_status: 'partial'` con una fuente `failed`
+    // es el catálogo caído; `complete` con `rows > 0` es un slug que
+    // legítimamente no está publicado. Se correlaciona además con el
+    // `REGISTRY_SOURCE_FAILED` que `discovery.ts:408-415` (fan-out de
+    // registros; el `:277-284` es el gemelo de la fuente LOCAL) emite en la
+    // MISMA request. Testigo de que el estado LLEGA al warn: `T-16`.
     const marcado = markUnresolvedIfEmpty(agent);
     log.warn(
       {
@@ -128,12 +147,20 @@ export async function resolveAgentForDetailView(
         slug: agent.slug,
         registry_id: agent.registry_id,
         rows: listado.agents.length,
+        // AR-2 MNR-1: sin esto, «catálogo caído» y «slug no publicado» llegan
+        // a esta MISMA rama con un payload de log indistinguible.
+        catalog_status: listado.catalogStatus,
+        sources: listado.sources.map((s) => ({ name: s.name, state: s.state })),
         marked: marcado,
       },
       '[agent-detail.absent-from-catalog] the agent was not in the registry listing; its capabilities could not be confirmed',
     );
     return agent;
   } catch (err) {
+    // AR-2 MNR-1: esta rama exige que `discover()` TIRE, y `discover()` está
+    // construido para degradar en vez de tirar. Un registro de lista caído sale
+    // por la rama de arriba (`DETAIL_AGENT_ABSENT_FROM_CATALOG`), no por acá:
+    // lo que llega hasta este `catch` es lo que `discover()` no supo degradar.
     const marcado = markUnresolvedIfEmpty(agent);
     log.warn(
       {
