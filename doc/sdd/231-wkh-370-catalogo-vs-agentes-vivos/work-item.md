@@ -127,10 +127,35 @@ apaga la investigación.
   > con `metadata` vacío y sin `payout_wallet` `[HEREDADO]`, y **un chequeo de deriva no las habría
   > cazado**. Una fila mal nacida se ve idéntica a una sana desde el catálogo.
 
-- **AC-4** (Unwanted — anti-vacuidad, ejecutable): IF el chequeo termina sin haber comparado
-  **ningún** par catálogo↔manifiesto, THEN the system SHALL salir con clase **CONFIG** y SHALL NOT
-  salir con clase conforme.
+- **AC-4** (Unwanted — anti-vacuidad, ejecutable) — ⚠️ **TEXTO AMENDADO EN DONE (2026-08-27). El
+  original queda abajo, a la vista**: IF el chequeo termina sin haber comparado **ningún** par
+  catálogo↔manifiesto, THEN the system SHALL salir con una clase **NO conforme** —**`CONFIG(3)` por
+  defecto**, y otra clase no conforme cuando ésta **atribuya mejor la causa**: `INALCANZABLE(2)` si
+  ningún manifiesto contestó, `UNRESOLVED(6)` si ninguno resolvió su clave de unión— y **SHALL NOT**
+  salir **jamás** con clase conforme.
   > Un chequeo que sólo verifica una AUSENCIA pasa igual cuando no ejecutó nada. Este AC lo cierra.
+  >
+  > **Texto original del F1**, conservado a propósito: *"…THEN the system SHALL salir con clase
+  > **CONFIG** y SHALL NOT salir con clase conforme."*
+  >
+  > **Por qué se amendó, y quién lo midió** — `qa-validation.md` §8.2. El AC tiene **dos** cláusulas
+  > y sólo la primera quedó **más fuerte que la implementación**:
+  >
+  > - **(ii) "jamás conforme" se cumple SIEMPRE**, y está **medido, no supuesto**: **0 violaciones
+  >   sobre las 8.748 combinaciones** que el QA barrió, con **control positivo** que probó que el
+  >   barrido puede dar rojo (`qa-validation.md` §5). Ésa es la garantía por la que este AC existe.
+  > - **(i) "clase CONFIG" NO es literal**: con `comparados === 0` el chequeo puede salir
+  >   `UNRESOLVED(6)` (escenarios D y E, ejecutados) o `INALCANZABLE(2)` (manifiesto caído).
+  >
+  > Y el desvío es **una mejora de atribución, no un incumplimiento**: la cláusula (i) **choca de
+  > frente con AC-8**. `CONFIG` afirma por contrato que *acusa al INSTRUMENTO* y *no implica a
+  > producción*, así que con la escalera literal *"los cinco manifiestos están caídos"* se reportaba
+  > como *"yo no estoy en condiciones de preguntar"* — **mala atribución**, que es justo lo que las
+  > siete clases existen para evitar. El contrato del F1 no pudo verlo porque **el conflicto sólo
+  > aparece con un único elegible**: con más de uno basta que uno compare.
+  >
+  > ⛔ **El original NO se borra**: que un AC afirme de más **es el hallazgo**, no una errata — en la
+  > HU que existe justamente para sacar prosa que afirma de más. Ver `done-report.md` §10.
 
 ### El universo y la clave de unión
 

@@ -382,7 +382,7 @@ export interface UpdateAgentInput {
    * la respetaba en las tres queries que alimentan discovery
    * (`services/agent.ts` `listAsAgents` / `getBySlugAsAgent` / `listPublisherAnchors`),
    * pero NO había ningún productor: `publish` la escribe `true`
-   * (`services/agent.ts:399`) y ningún camino la podía volver a `false`. Era un
+   * (`services/agent.ts:481`) y ningún camino la podía volver a `false`. Era un
    * control cableado del lado que lee y sin nadie del lado que escribe: un agente
    * self-published nacía activo y la única baja posible era DESTRUCTIVA
    * (`DELETE /agents/:slug`), que además de borrarlo pierde su `created_at` (ancla

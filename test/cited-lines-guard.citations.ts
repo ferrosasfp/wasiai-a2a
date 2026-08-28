@@ -226,9 +226,9 @@ export const CITED_LINES: readonly CitedLine[] = [
   },
   {
     from: 'src/types/index.ts',
-    cite: 'services/agent.ts:399',
+    cite: 'services/agent.ts:481',
     target: 'src/services/agent.ts',
-    line: 399,
+    line: 481,
     mustContain: ['Defense-in-depth (CD-1)', 're-validar la URL'],
     symbolPath: ['publishedAgentService', 'publish'],
   },
@@ -613,20 +613,23 @@ export const CITED_LINES: readonly CitedLine[] = [
   },
   {
     from: 'src/routes/agents.ownership.test.ts',
-    cite: 'src/services/agent.ts:808',
+    cite: 'src/services/agent.ts:890',
     target: 'src/services/agent.ts',
-    line: 808,
-    // `if (existing.owner_ref !== ownerRef)` aparece DOS veces (`:633` y `:808`).
+    line: 890,
+    // `if (existing.owner_ref !== ownerRef)` aparece DOS veces (`:715` y `:890`).
     // Lo que las separa es el método contenedor: `update` vs `delete`. Otro caso
     // donde el camino de símbolos es lo que hace la unicidad satisfacible.
+    // ⚠️ Los dos números de arriba son PROSA y ningún guardián los mira: eran `:633`
+    // y `:808`, correctos hasta que esta misma HU desplazó la región DOS veces. Se re-derivan
+    // abriendo la línea, nunca sumándole el delta de una pasada anterior.
     mustContain: ['if (existing.owner_ref !== ownerRef)'],
     symbolPath: ['publishedAgentService', 'delete'],
   },
   {
     from: 'src/routes/agents.ownership.test.ts',
-    cite: 'src/services/agent.ts:822',
+    cite: 'src/services/agent.ts:904',
     target: 'src/services/agent.ts',
-    line: 822,
+    line: 904,
     // `.eq('owner_ref', ownerRef)` aparece CINCO veces en el archivo; dentro de
     // `delete` una sola.
     mustContain: [".eq('owner_ref', ownerRef)"],

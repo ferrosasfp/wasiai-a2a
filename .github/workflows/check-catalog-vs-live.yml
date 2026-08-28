@@ -1,0 +1,271 @@
+name: check-catalog-vs-live
+
+# El vigilante del catálogo (WKH-370). DOS preguntas distintas, DOS jobs.
+#
+#   deriva      — lo que el catálogo publica de un agente vs lo que ese agente
+#                 publica de sí mismo en su manifiesto vivo. Datos PÚBLICOS,
+#                 CERO secretos, CERO gasto: sólo GET.
+#   completitud — la fila del catálogo está MAL NACIDA (le falta un campo propio).
+#                 Necesita el listado autenticado del owner.
+#
+# ⚠️ POR QUÉ NO HAY `needs:` ENTRE LOS DOS, que es la decisión de diseño entera:
+# una fila mal nacida se ve IGUAL que una sana desde el catálogo. Las dos filas
+# self-published sin billetera de payout tenían deriva CERO — el chequeo de deriva
+# jamás las habría cazado. Deriva y completitud no se implican, así que:
+#   · un `needs:` haría que un fallo de una APAGUE la otra;
+#   · los títulos de aviso son DISTINTOS, o el verde de una CERRARÍA el aviso de la
+#     otra, que es la misma trampa un nivel adentro.
+# Los dos jobs corren siempre, en paralelo, y cada uno abre y cierra SU issue.
+#
+# ⚠️ Costo: 0 USDC. El único método HTTP del chequeo es GET, y el inventario
+# congelado de rutas que cobran no tiene ningún GET.
+#
+# ── Secretos y variables ──────────────────────────────────────────────────────
+# `A2A_CATALOG_OWNER_KEY` — agent key del owner de las filas self-published. Se
+# documenta ACÁ y no en `.env.example` a propósito: ahí viven las envs del
+# SERVICIO, no las de un script de CI, y el equivalente de la sonda del camino del
+# dinero tampoco está (sólo su metadata no-secreta). Ausente ⇒ el job sale CONFIG
+# (exit 3) NOMBRÁNDOLA, y RECHAZADA (401/403) sale por la MISMA clase y también la
+# nombra: una credencial revocada y una ausente son el mismo hecho —"no estoy en
+# condiciones de preguntar"— y reportar la revocada como caída de producción manda al
+# humano a mirar el deploy en vez de rotar el secreto. El job `deriva` corre igual: la
+# falta del secreto no puede convertirse en un verde ni en un rojo de producción.
+# `CHECK_MODE` — `deriva` | `completitud`. Ausente o no reconocido ⇒ CONFIG(3).
+# No hay default que corra "algo": un typo mediría otra cosa en silencio.
+#
+# ── TD-370-KEY-SOLO-LECTURA ───────────────────────────────────────────────────
+# NO EXISTE una agent key de sólo lectura. `GET /agents`, `PATCH /agents/:slug` y
+# `DELETE /agents/:slug` pasan EXACTAMENTE por el mismo `requireA2AKey()`, así que
+# este secreto tiene poder de BORRADO sobre las filas de ese owner, aunque el
+# chequeo sólo haga GET. Mitigaciones vigentes, y son las cinco: (1) el secreto se
+# nombra UNA sola vez, en el step de un solo job; (2) el job no corre en
+# `pull_request` —GitHub le niega el secret a un PR desde un FORK pero se lo
+# entrega ENTERO a un PR de una rama de este mismo repo—; (3) el fuente del
+# chequeo no contiene ningún verbo que mute y hay un test que lo afirma sobre el
+# código, no sobre la prosa; (4) la línea emitida nunca lleva el valor de una
+# credencial ni de una billetera, y el repo es PÚBLICO; (5) esta deuda está escrita
+# acá, en el cableado, y no en un backlog aparte. La cierra una key de sólo
+# lectura del lado del gateway; hasta entonces el radio es el de arriba.
+
+on:
+  schedule:
+    # Diaria, y en un minuto NO redondo: el planificador de GitHub encola
+    # masivamente en el minuto 0. Distinta de las dos cadencias que ya existen en
+    # el repo para no competir por runner.
+    - cron: '23 6 * * *'
+  # Acotado a los archivos del chequeo mismo. El job `completitud` NO corre acá.
+  pull_request:
+    paths:
+      - 'scripts/check-catalog-vs-live.mjs'
+      - 'test/check-catalog-vs-live.test.mjs'
+      - '.github/workflows/check-catalog-vs-live.yml'
+  workflow_dispatch:
+
+# `issues: write` para los avisos. Declarar el bloque RESTRINGE al listado, así que
+# `contents: read` tiene que estar o el checkout se queda sin permiso.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  deriva:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # En `pull_request` es INFORMATIVO: ni un blip de red ni un rojo real pueden
+      # trabar un PR. En `schedule` y `workflow_dispatch` es duro.
+      # La corrida se captura para que el aviso pueda pegar la LÍNEA DE CLASE, que
+      # es la única que atribuye la causa. Nunca el log entero: traería el eco de
+      # `npm` y lo que cualquier paso previo haya escrito.
+      - name: Comparar el catalogo contra los manifiestos vivos
+        id: chequeo
+        run: |
+          set +e
+          npm run check:catalog:deriva 2>&1 | tee "$RUNNER_TEMP/check.log"
+          codigo=${PIPESTATUS[0]}
+          linea=$(grep -aE '^(CONFORME|INALCANZABLE|CONFIG|DERIVA|INCOMPLETA|UNRESOLVED): ' "$RUNNER_TEMP/check.log" | tail -n 1)
+          {
+            echo 'clase<<CHECK_EOF'
+            echo "${linea:-(el chequeo no llegó a emitir su línea de clase)}"
+            echo 'CHECK_EOF'
+          } >> "$GITHUB_OUTPUT"
+          exit "$codigo"
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        env:
+          CHECK_MODE: deriva
+
+      # AVISO, sólo en la corrida por RELOJ: `workflow_dispatch` lo mira quien lo
+      # disparó y `pull_request` es informativo por diseño. La del reloj es la única
+      # que puede ponerse roja sin que nadie se entere.
+      # ⚠️ `failure()` es verdadero si falló CUALQUIER paso anterior, `npm ci`
+      # incluido. Por eso el texto NO afirma la causa: pega la línea de clase, que
+      # sí la atribuye. La línea viaja por `env:`, nunca interpolada en el `run:`.
+      - name: Abrir issue si la deriva por reloj falla
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITULO: 'check-catalog deriva: el catalogo se separo de los agentes vivos'
+          LINEA: ${{ steps.chequeo.outputs.clase }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          clase=${LINEA:-(el chequeo no llegó a emitir su línea de clase: puede haber fallado un paso anterior)}
+          cuerpo=$(printf '%s\n' \
+            "La corrida **por reloj** de \`check-catalog-vs-live\` (mitad **deriva**) falló." \
+            "" \
+            "- Corrida: $RUN_URL" \
+            "- Commit: \`$GITHUB_SHA\`" \
+            "- Línea de clase del chequeo:" \
+            "" \
+            "  \`\`\`" \
+            "  $clase" \
+            "  \`\`\`" \
+            "" \
+            "Qué NO dice este aviso: cuál fue la causa del JOB, ni nada sobre la COMPLETITUD" \
+            "de las filas — ésa es la otra mitad, tiene su propio job y su propio issue, y un" \
+            "verde acá no la implica. Quien atribuye es la línea de arriba: exit 2 el otro lado" \
+            "no contestó, 3 el chequeo no está en condiciones de afirmar nada, 4 el catálogo se" \
+            "separó del manifiesto, 6 no se pudo verificar de qué agente es el manifiesto." \
+            "**Un exit 3 NO implica a producción.**" \
+            "" \
+            "Este issue se cierra solo en la próxima corrida por reloj que pase en verde.")
+          # Dedup por título exacto. Sin `--label` a propósito: `gh issue create --label`
+          # falla si la etiqueta no existe, y eso convierte el aviso en un segundo fallo
+          # silencioso. ⚠️ Bajo `set -e`, un `x=$(gh issue list ...)` suelto mata el step
+          # si la API falla, con el job YA rojo y nadie mirando: por eso va dentro de un `if !`.
+          if ! existente=$(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[0].number // empty'); then
+            echo "::error::no se pudo consultar los issues abiertos; se intenta crear el aviso igual"
+            existente=''
+          fi
+          if [ -n "$existente" ]; then
+            gh issue comment "$existente" --body "$cuerpo"
+          else
+            gh issue create --title "$TITULO" --body "$cuerpo"
+          fi
+
+      # La contracara, y no es un adorno: un issue que queda abierto para siempre es
+      # el control que la gente aprende a ignorar.
+      # ⚠️ El título es IDÉNTICO al de arriba, o el cierre nunca encuentra el issue.
+      - name: Cerrar el issue de deriva si el reloj volvio al verde
+        if: success() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITULO: 'check-catalog deriva: el catalogo se separo de los agentes vivos'
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Acá el fallo de la consulta NO se escala a rojo: poner rojo el job del
+          # cierre dispararía el aviso de un problema que no es de producción.
+          if ! existente=$(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[0].number // empty'); then
+            echo "::warning::no se pudo consultar los issues abiertos; el cierre queda para la próxima corrida verde"
+            exit 0
+          fi
+          if [ -n "$existente" ]; then
+            gh issue close "$existente" --comment "La corrida por reloj volvió a pasar: $RUN_URL"
+          fi
+
+  completitud:
+    # ⚠️ GitHub le niega el secret a los PRs desde un FORK y se lo entrega ENTERO a
+    # un PR de una rama de ESTE mismo repo. Como no existe una agent key de sólo
+    # lectura (TD-370-KEY-SOLO-LECTURA), una credencial con poder de borrado no
+    # viaja a cada push de cada PR: este job no corre ahí.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Sin el secreto esto NO sale verde ni rojo de producción: sale CONFIG (exit
+      # 3) nombrando la variable que falta. "No pude preguntar" no es "está bien".
+      - name: Buscar filas mal nacidas en el catalogo
+        id: chequeo
+        run: |
+          set +e
+          npm run check:catalog:completitud 2>&1 | tee "$RUNNER_TEMP/check.log"
+          codigo=${PIPESTATUS[0]}
+          linea=$(grep -aE '^(CONFORME|INALCANZABLE|CONFIG|DERIVA|INCOMPLETA|UNRESOLVED): ' "$RUNNER_TEMP/check.log" | tail -n 1)
+          {
+            echo 'clase<<CHECK_EOF'
+            echo "${linea:-(el chequeo no llegó a emitir su línea de clase)}"
+            echo 'CHECK_EOF'
+          } >> "$GITHUB_OUTPUT"
+          exit "$codigo"
+        env:
+          CHECK_MODE: completitud
+          A2A_CATALOG_OWNER_KEY: ${{ secrets.A2A_CATALOG_OWNER_KEY }}
+
+      - name: Abrir issue si la completitud por reloj falla
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITULO: 'check-catalog completitud: hay filas mal nacidas en el catalogo'
+          LINEA: ${{ steps.chequeo.outputs.clase }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          clase=${LINEA:-(el chequeo no llegó a emitir su línea de clase: puede haber fallado un paso anterior)}
+          cuerpo=$(printf '%s\n' \
+            "La corrida **por reloj** de \`check-catalog-vs-live\` (mitad **completitud**) falló." \
+            "" \
+            "- Corrida: $RUN_URL" \
+            "- Commit: \`$GITHUB_SHA\`" \
+            "- Línea de clase del chequeo:" \
+            "" \
+            "  \`\`\`" \
+            "  $clase" \
+            "  \`\`\`" \
+            "" \
+            "Qué NO dice este aviso: que las filas DIFIERAN de su manifiesto. Una fila mal" \
+            "nacida puede coincidir con su manifiesto en todo y estar rota igual — por eso" \
+            "esta mitad tiene su propio job y su propio issue. Exit 5 hay filas incompletas," \
+            "3 el chequeo no está en condiciones de afirmar nada (por ejemplo: falta el" \
+            "secreto, la credencial fue RECHAZADA con 401/403 y hay que rotarla, o no se" \
+            "pudo medir alguna fila), 2 el otro lado no contestó." \
+            "**Un exit 3 NO implica a producción.**" \
+            "" \
+            "Este issue se cierra solo en la próxima corrida por reloj que pase en verde.")
+          if ! existente=$(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[0].number // empty'); then
+            echo "::error::no se pudo consultar los issues abiertos; se intenta crear el aviso igual"
+            existente=''
+          fi
+          if [ -n "$existente" ]; then
+            gh issue comment "$existente" --body "$cuerpo"
+          else
+            gh issue create --title "$TITULO" --body "$cuerpo"
+          fi
+
+      - name: Cerrar el issue de completitud si el reloj volvio al verde
+        if: success() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITULO: 'check-catalog completitud: hay filas mal nacidas en el catalogo'
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! existente=$(gh issue list --state open --search "\"$TITULO\" in:title" --json number --jq '.[0].number // empty'); then
+            echo "::warning::no se pudo consultar los issues abiertos; el cierre queda para la próxima corrida verde"
+            exit 0
+          fi
+          if [ -n "$existente" ]; then
+            gh issue close "$existente" --comment "La corrida por reloj volvió a pasar: $RUN_URL"
+          fi
