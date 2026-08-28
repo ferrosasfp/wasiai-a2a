@@ -333,6 +333,17 @@ describe('WKH-370 · completitud: la fila mal nacida (AC-2, AC-3)', () => {
     const r = evaluarCompletitud(fila({ metadata: {} }), registro());
     expect(r.estado).toBe('incompleta');
     expect(r.faltantes).toContain('metadata.inputSchema');
+    // ⚠️ AUSENTE y BORRADO son dos entradas distintas, y la segunda NO es teórica:
+    // `PATCH /agents/:slug` con `{"inputSchema": null}` llega crudo a
+    // `publishedAgentService.update`, cuya guarda es `!== undefined` — y `null` la
+    // pasa, así que `metadata.inputSchema: null` queda PERSISTIDO y `mapRowToAgent`
+    // lo publica tal cual en `/discover`. Sin esta línea, quitarle `|| schema ===
+    // null` a `evaluarCompletitud` deja la suite entera en verde y un agente al que
+    // le BORRARON el schema sale `completa` ⇒ CONFORME(0): el mismo falso verde que
+    // T-C2 mata por el lado del payout, sobre la cláusula hermana.
+    const borrado = evaluarCompletitud(fila({ metadata: { inputSchema: null } }), registro());
+    expect(borrado.estado).toBe('incompleta');
+    expect(borrado.faltantes).toContain('metadata.inputSchema');
     expect(classify(obsBase({ modo: 'completitud', credencialPresente: true, incompletas: 1 })).exit)
       .toBe(CLASES.INCOMPLETA);
   });

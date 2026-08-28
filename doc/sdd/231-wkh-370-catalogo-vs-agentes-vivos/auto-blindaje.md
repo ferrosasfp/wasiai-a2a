@@ -470,3 +470,69 @@ npm test                            → Test Files 314 passed | 6 skipped (320)
 Entrada del fix-pack: `520 · 314/320 · 6345/6364`. **+5 casos, CERO archivos nuevos** (T-C6, T-E5,
 T-E6, T-E7 en la suite del chequeo; T-S6 en la del servicio) ⇒ los conteos de archivo de los README
 **no se tocan**, y el guardián que los verifica corrió en verde dentro de ese `npm test`.
+
+---
+
+# FIX-PACK · iteración 2 (re-AR **APROBADO**, cierre de un solo MENOR) — 2026-08-27
+
+## [2026-08-27] MNR2-1 — La cláusula hermana del BLQ-1: `null` se persiste, y nadie lo miraba
+
+- **Error**: en `evaluarCompletitud`, quitarle `|| schema === null` a
+  `if (schema === undefined || schema === null)` dejaba la suite del chequeo en **36 passed,
+  exit 0**. Con ese mutante, un agente al que le **borraron** el `inputSchema` sale `completa` ⇒
+  **CONFORME(0)**: exactamente el falso verde que T-C2 mata por el lado del payout.
+- **Causa raíz**: **ausente y borrado se leían como un solo caso**, y sólo el primero tenía
+  fixture. `T-C3` pasaba `metadata: {}` (`undefined`) y `T-C4` pasaba el `metadata` completo;
+  **ningún test construía `inputSchema: null`**. Es la misma familia del `BLQ-1` de la iteración 1
+  —una rama sin ningún input que la ejercite— sobre la cláusula de al lado.
+  ⚠️ Y **no es una rama defensiva**: el camino real de la API la alcanza. `PATCH /agents/:slug`
+  con `{"inputSchema": null}` pasa el body crudo a `publishedAgentService.update`, cuya guarda es
+  `if (updates.inputSchema !== undefined) meta.inputSchema = updates.inputSchema;` — y
+  **`null !== undefined`**, así que `metadata.inputSchema: null` queda persistido; `mapRowToAgent`
+  emite `metadata` entero y `/discover` lo publica tal cual. Verificado leyendo las dos funciones,
+  no de memoria. (La distinción está escrita en el propio `agent.ts`, para `payment`: *"tres
+  estados, no dos: ausente no llega hasta acá; `null` borra la key"*. Para `inputSchema` el código
+  hace lo mismo y el chequeo no lo probaba.)
+- **Fix**: ⛔ **la lógica de hoy es correcta y NO se tocó** — `scripts/check-catalog-vs-live.mjs`
+  quedó byte a byte idéntico a `f797298` (md5 `9f61370d…` antes y después de mutar y restaurar).
+  Lo que faltaba era el test: un segundo caso dentro de `T-C3` con
+  `fila({ metadata: { inputSchema: null } })` que afirma `incompleta` y `metadata.inputSchema` en
+  `faltantes`. **Sin `it` nuevo**: los conteos de tests de los README no se mueven.
+- **🔴 El rojo, medido aplicando el mutante y con su motivo, no sólo su color**:
+  ```
+  × T-C3: metadata vacío (sin inputSchema) → INCOMPLETA aunque no haya nada que comparar
+  AssertionError: expected 'completa' to be 'incompleta' // Object.is equality
+    Expected: "incompleta"   Received: "completa"
+  ❯ test/check-catalog-vs-live.test.mjs:345:28   (la línea del caso `null`)
+  Tests  1 failed | 35 passed (36)               exit 1
+  ```
+  Antes de mutar, control positivo: **36 passed, exit 0**. Restaurado por `cp` desde un backup en
+  subdirectorio propio del scratchpad (⛔ nunca `git checkout --`, que borra lo que se está
+  midiendo), y confirmado por md5 + `git diff --stat` vacío sobre el script.
+- **Aplicar en**: cuando una guarda enumera **dos** formas de "no hay dato" (`undefined` y `null`),
+  hacen falta **dos** fixtures — un solo caso deja viva la mitad que no se construyó. Y antes de
+  archivar un mutante como "equivalente", **buscá el verbo de la API que produce ese valor**: acá
+  la diferencia entre defensivo y explotable era un `PATCH` con un `null` en el body.
+
+## Los otros cuatro menores del re-AR: por qué NO se tocaron
+
+| # | Motivo de no tocarlo |
+|---|---|
+| `MNR2-2`, `MNR2-3` | **Mutantes equivalentes / defensivos puros**: sus ramas no son alcanzables por el camino real, y ya están documentados. Escribirles un test sería fabricar cobertura sobre input inconstruible. |
+| `MNR2-4` | Las 5 citas podridas de `_INDEX-row.md` se cierran **en DONE**, al final — es exactamente la lección de W3.3/W4.3: el arreglo de citas por desplazamiento es **lo último** que se toca, o se hace dos veces. **No es de esta iteración.** |
+| `MNR2-5` | **Pre-existente** y fuera del Scope IN de la HU ⇒ backlog. |
+
+### El gate de la iteración 2, corrido completo y en orden, con el árbol staged
+
+```
+git add -A
+npx tsc -p tsconfig.json --noEmit   → exit 0
+npm run lint                        → Checked 520 files. No fixes applied.   exit 0
+npm test                            → Test Files 314 passed | 6 skipped (320)
+                                       Tests    6350 passed | 19 skipped (6369)   exit 0
+```
+Entrada de la iteración 2: `520 · 314/320 · 6350/6369`. **Salida: idéntica.** Y eso es lo esperado
+y lo que se verificó **antes** de decidir no tocar los README: el caso nuevo vive **dentro** de un
+`it` existente, así que no hay test nuevo que contar. ⇒ ningún conteo de los README se movió, y el
+único archivo de `src/` o `scripts/` en el diff es **ninguno**: el fix-pack toca `test/` y este
+mismo documento.
