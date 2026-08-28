@@ -14,8 +14,8 @@
  * devuelven `state.row` sin importar qué columna ni qué valor se filtró.
  *
  * `T-PUB-08` y `T-PUB-09` pasan por el **pre-chequeo en JS** de
- * `src/services/agent.ts:808`, no por el filtro de la consulta. Verificado por
- * mutación: borrando `src/services/agent.ts:822` (el `.eq('owner_ref', …)` del
+ * `src/services/agent.ts:886`, no por el filtro de la consulta. Verificado por
+ * mutación: borrando `src/services/agent.ts:900` (el `.eq('owner_ref', …)` del
  * DELETE) este archivo queda **VERDE, 9/9**.
  *
  * El aislamiento por filtro de `publishedAgentService` se prueba en

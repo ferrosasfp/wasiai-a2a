@@ -65,6 +65,43 @@ interface AgentRow {
 }
 
 /**
+ * WKH-370 — la fila TAL COMO LA LEE el mapper del shape del DUEÑO, que necesita
+ * saber si hay billetera de cobro para poder decir si la fila está completa.
+ *
+ * ⚠️ POR QUÉ ES UN TIPO NUEVO Y NO UNA COLUMNA MÁS EN `AgentRow`. La decisión de
+ * WKH-143 fue "NO ampliar esta interfaz", y su motivo está escrito entre
+ * paréntesis en el propio SDD de aquella HU: *alimenta mappers públicos*.
+ * `AgentRow` es el tipo del parámetro de `mapRowToAgent`, que es el mapper del
+ * catálogo ANÓNIMO. Ampliarlo haría que la columna exista, para el compilador,
+ * dentro del mapper público — y la única barrera que quedaría sería que a nadie se
+ * le ocurra escribirla en el objeto de retorno. Dejando `AgentRow` intacto, esa
+ * barrera sigue siendo el TIPO: `mapRowToAgent` recibe una fila donde la columna
+ * NO EXISTE, así que un futuro `row.payout_wallet` ahí adentro no compila. El
+ * motivo de la decisión de WKH-143 sigue cubierto donde importa, y sólo el shape
+ * del dueño ve la columna.
+ *
+ * ⚠️ Y POR QUÉ NO SE LEE CON `getSplitContextRow`, que ya selecciona exactamente
+ * estas columnas. Porque ese lector va por slug y `mapRowToRecord` es un mapper
+ * SÍNCRONO al que `listMine` le pasa N filas de una sola query. Cablearlo ahí
+ * convertiría el listado del dueño en una query por agente, que es el patrón
+ * anti-N+1 que `listPublisherAnchors` existe para no repetir, y volvería asíncrono
+ * a un mapper puro y a sus tres llamadores. Se paga más y se protege menos.
+ *
+ * La columna viene sin costo en las cuatro lecturas y en las dos escrituras: todas
+ * traen la fila entera. Se exige en el TIPO, y no como opcional, para que un lector
+ * angosto futuro que alimente este mapper tenga que decir en voz alta que le está
+ * pasando algo que no seleccionó.
+ *
+ * ⚠️ Y eso es TODO lo que el tipo compra, que es menos de lo que parece: los cuatro
+ * llamadores entran por un cast, así que en tiempo de ejecución acá puede llegar una
+ * fila SIN la columna. El mapper lo contempla y devuelve `false`; no se apoya en el
+ * tipo para no reventar. La distinción entre "no la tiene" y "no la pude medir" no
+ * vive en este booleano: vive del lado del chequeo, que trata un registro sin el
+ * campo como dato faltante y jamás como fila sana.
+ */
+type OwnedAgentRow = AgentRow & { payout_wallet: string | null };
+
+/**
  * Registro publicado — shape de respuesta de `publish`/`update`/`listMine`.
  * NO es el `Agent` de discovery (ese lo emite `mapRowToAgent`).
  */
@@ -86,6 +123,26 @@ export interface PublishedAgentRecord {
    * produce `readPaymentSpec` y trae además `resolvedChain`/`network`.
    */
   payment?: AgentPaymentSpecInput;
+  /**
+   * WKH-370 — ¿la fila tiene billetera de cobro? **Un booleano DERIVADO, nunca el
+   * valor.** Una fila sin billetera se ve exactamente igual que una sana desde el
+   * catálogo público, así que la única forma de detectarla desde afuera es que el
+   * shape del dueño lo diga.
+   *
+   * Quién lo lee: el chequeo de completitud de `scripts/check-catalog-vs-live.mjs`,
+   * a través de la ruta `GET /agents`, que ya devuelve lo que produce este mapper y
+   * que filtra por el `owner_ref` del caller antes de mapear.
+   *
+   * Por qué no viola la regla de no publicar la billetera: lo que viaja es
+   * presencia o ausencia, no el valor, y viaja SÓLO por la ruta autenticada y
+   * acotada al dueño. El mapper del catálogo anónimo no lo emite, y hay un control
+   * negativo en la suite que lo afirma sobre el objeto que ese mapper produce.
+   *
+   * Siempre presente: una fila sin billetera devuelve `false`, nunca `undefined`.
+   * "No lo pude medir" y "no la tiene" son cosas distintas, y esa distinción la
+   * hace el chequeo, no este campo.
+   */
+  hasPayoutWallet: boolean;
   createdAt: string;
 }
 
@@ -171,7 +228,7 @@ function mapRowToAgent(row: AgentRow): Agent {
 }
 
 /** Row → registro publicado (respuesta de publish/update/listMine). */
-function mapRowToRecord(row: AgentRow): PublishedAgentRecord {
+function mapRowToRecord(row: OwnedAgentRow): PublishedAgentRecord {
   const meta = readMetadataObject(row.metadata);
   const inputSchema = readSchema(meta, 'inputSchema');
   const outputSchema = readSchema(meta, 'outputSchema');
@@ -185,6 +242,19 @@ function mapRowToRecord(row: AgentRow): PublishedAgentRecord {
     priceUsdc: parsePriceSafe(row.price_usdc),
     enabled: row.enabled,
     discoverable: meta.discoverable === true,
+    // WKH-370: va DENTRO del literal y no en un `if`, porque es siempre presente.
+    // Una cadena de espacios NO es una billetera: con `!!` la fila con
+    // `'   '` contaría como completa, que es exactamente la fila mal nacida que
+    // este booleano existe para delatar.
+    // ⚠️ Se pregunta por el TIPO y no por `!== null`, y no es un detalle de estilo:
+    // los llamadores entran por un cast, así que en tiempo de EJECUCIÓN puede
+    // llegar una fila a la que nadie le seleccionó la columna, y ahí el valor es
+    // `undefined`, no `null`. Comparando contra `null` esa fila pasaba el filtro y
+    // reventaba en el `trim`. Un mapper que tira una excepción convierte una lectura
+    // en un error del servicio; devolver `false` lo deja ruidoso del lado del
+    // chequeo, que es donde tiene que doler.
+    hasPayoutWallet:
+      typeof row.payout_wallet === 'string' && row.payout_wallet.trim() !== '',
     createdAt: row.created_at,
   };
   if (inputSchema !== undefined) record.inputSchema = inputSchema;
@@ -359,9 +429,17 @@ export const publishedAgentService = {
    * WKH-143 (DT-4/CD-5) — lee SOLO las columnas de ownership/payout de un agente
    * self-published, para resolver su leg de creator en los splits. Query espejo
    * de `getRow` pero seleccionando EXCLUSIVAMENTE `owner_ref, payout_wallet,
-   * referrer_ref` — esas columnas JAMÁS entran a `AgentRow` ni a un shape público
-   * (`mapRowToAgent`/`mapRowToRecord`), preservando CD-5. Uso server-side
-   * exclusivo desde `resolveAgentSplitContext`.
+   * referrer_ref`. Uso server-side exclusivo desde `resolveAgentSplitContext`.
+   *
+   * ⚠️ WKH-370 CORRIGIÓ ESTE PÁRRAFO, que decía que esas columnas "jamás entran a
+   * `AgentRow` ni a un shape público". La primera mitad sigue siendo cierta:
+   * `AgentRow` no las tipa, y por eso `mapRowToAgent` —el mapper del catálogo
+   * ANÓNIMO— no puede verlas. La segunda mitad ya no lo sería si se dejaba escrita
+   * así: `mapRowToRecord` recibe `OwnedAgentRow` y LEE `payout_wallet`. Lo que NO
+   * cambió, y es lo que la regla protege, es que el VALOR no sale a ningún lado.
+   * Lo que viaja al shape del dueño es un booleano de presencia, por una ruta
+   * autenticada y acotada a su propio `owner_ref`. `referrer_ref` sigue sin entrar
+   * a ningún tipo fuera de esta función.
    */
   async getSplitContextRow(slug: string): Promise<{
     ownerRef: string;
@@ -495,7 +573,7 @@ export const publishedAgentService = {
       });
     }
 
-    return mapRowToRecord(data as unknown as AgentRow);
+    return mapRowToRecord(data as unknown as OwnedAgentRow);
   },
 
   /**
@@ -604,7 +682,7 @@ export const publishedAgentService = {
 
     if (error) throw new Error(`Failed to list own agents: ${error.message}`);
 
-    return (data as unknown as AgentRow[]).map(mapRowToRecord);
+    return (data as unknown as OwnedAgentRow[]).map(mapRowToRecord);
   },
 
   /**
@@ -788,7 +866,7 @@ export const publishedAgentService = {
       });
     }
 
-    return mapRowToRecord(data as unknown as AgentRow);
+    return mapRowToRecord(data as unknown as OwnedAgentRow);
   },
 
   /**

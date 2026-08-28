@@ -14,7 +14,9 @@
     "test:coverage": "vitest run --coverage",
     "smoke:downstream": "node scripts/smoke-downstream-x402.mjs",
     "migrate:preflight": "node scripts/migrate-preflight.mjs",
-    "probe:money-path": "node scripts/probe-money-path.mjs"
+    "probe:money-path": "node scripts/probe-money-path.mjs",
+    "check:catalog:deriva": "node scripts/check-catalog-vs-live.mjs",
+    "check:catalog:completitud": "node scripts/check-catalog-vs-live.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.106.0",

@@ -139,6 +139,12 @@ const RECORD_RESPONSE = {
   priceUsdc: 0.02,
   enabled: true,
   discoverable: false,
+  // WKH-370: el shape del dueño ahora declara si la fila tiene billetera de cobro,
+  // y el campo es OBLIGATORIO a propósito — con un opcional, "no la tiene" y "el
+  // campo no viajó" volverían a ser la misma cosa. Este fixture es un doble del
+  // service, así que sólo tiene que satisfacer el tipo; lo que el booleano vale de
+  // verdad lo miden los tests del mapper real.
+  hasPayoutWallet: false,
   createdAt: new Date().toISOString(),
 };
 

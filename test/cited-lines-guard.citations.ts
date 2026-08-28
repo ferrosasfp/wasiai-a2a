@@ -226,9 +226,9 @@ export const CITED_LINES: readonly CitedLine[] = [
   },
   {
     from: 'src/types/index.ts',
-    cite: 'services/agent.ts:399',
+    cite: 'services/agent.ts:477',
     target: 'src/services/agent.ts',
-    line: 399,
+    line: 477,
     mustContain: ['Defense-in-depth (CD-1)', 're-validar la URL'],
     symbolPath: ['publishedAgentService', 'publish'],
   },
@@ -613,9 +613,9 @@ export const CITED_LINES: readonly CitedLine[] = [
   },
   {
     from: 'src/routes/agents.ownership.test.ts',
-    cite: 'src/services/agent.ts:808',
+    cite: 'src/services/agent.ts:886',
     target: 'src/services/agent.ts',
-    line: 808,
+    line: 886,
     // `if (existing.owner_ref !== ownerRef)` aparece DOS veces (`:633` y `:808`).
     // Lo que las separa es el método contenedor: `update` vs `delete`. Otro caso
     // donde el camino de símbolos es lo que hace la unicidad satisfacible.
@@ -624,9 +624,9 @@ export const CITED_LINES: readonly CitedLine[] = [
   },
   {
     from: 'src/routes/agents.ownership.test.ts',
-    cite: 'src/services/agent.ts:822',
+    cite: 'src/services/agent.ts:900',
     target: 'src/services/agent.ts',
-    line: 822,
+    line: 900,
     // `.eq('owner_ref', ownerRef)` aparece CINCO veces en el archivo; dentro de
     // `delete` una sola.
     mustContain: [".eq('owner_ref', ownerRef)"],

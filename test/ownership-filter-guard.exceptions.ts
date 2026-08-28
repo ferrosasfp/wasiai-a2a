@@ -161,28 +161,28 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
   // ── catalogo-publico (9) ────────────────────────────────────────────────
   {
     file: 'src/services/agent.ts',
-    line: 372,
+    line: 450,
     table: 'a2a_agents',
     verb: 'select',
     category: 'catalogo-publico',
     reason:
       'getSplitContextRow(slug) busca al dueño de un agente de un TERCERO para resolver su pata ' +
       'de creator en los splits: `owner_ref` es la columna que se LEE, no por la que se filtra. ' +
-      'El resultado es server-side exclusivo y nunca entra a un shape público (docblock :359-364).',
+      'El resultado es server-side exclusivo y nunca entra a un shape público (docblock :428-443).',
   },
   {
     file: 'src/services/agent.ts',
-    line: 507,
+    line: 585,
     table: 'a2a_agents',
     verb: 'select',
     category: 'catalogo-publico',
     reason:
       'listAsAgents es la vista pública descubrible, acotada por `enabled = true`. Su docblock ' +
-      ':503 lo dice: "NO filtra por owner — es la vista pública descubrible".',
+      ':581 lo dice: "NO filtra por owner — es la vista pública descubrible".',
   },
   {
     file: 'src/services/agent.ts',
-    line: 547,
+    line: 625,
     table: 'a2a_agents',
     verb: 'select',
     category: 'catalogo-publico',
@@ -192,7 +192,7 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
   },
   {
     file: 'src/services/agent.ts',
-    line: 580,
+    line: 658,
     table: 'a2a_agents',
     verb: 'select',
     category: 'catalogo-publico',
@@ -497,14 +497,14 @@ export const OWNERSHIP_FILTER_EXCEPTIONS: OwnershipFilterException[] = [
   // ── chequeo-en-js (3) ───────────────────────────────────────────────────
   {
     file: 'src/services/agent.ts',
-    line: 347,
+    line: 417,
     table: 'a2a_agents',
     verb: 'select',
     category: 'chequeo-en-js',
     reason:
       'getRow(slug) es un pre-fetch deliberadamente SIN filtro, para poder distinguir "no existe" ' +
-      'de "no es tuyo". El dueño se compara en JS en :633 (update) y :808 (delete), que lanzan ' +
-      'OwnershipMismatchError. En :447 se usa como pre-check de colisión de slug, donde no hay ' +
+      'de "no es tuyo". El dueño se compara en JS en :697 (update) y :872 (delete), que lanzan ' +
+      'OwnershipMismatchError. En :525 se usa como pre-check de colisión de slug, donde no hay ' +
       'dueño que comparar. El filtro de la ESCRITURA que viene después sí existe y lo prueba ' +
       'src/services/agent.ownership.test.ts (AG-02).',
   },
