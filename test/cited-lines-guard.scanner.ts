@@ -73,6 +73,24 @@ import ts from 'typescript';
 /** Las cuatro formas sintácticas en que este repo escribe una cita. */
 export type CiteForm = 'P1' | 'P2' | 'P3' | 'P4';
 
+/**
+ * Las cuatro clases en que se puede caer un `:N` SUELTO (P3/P4).
+ *
+ * Vive acá, y no en el archivo de la muestra ni en el del guardián, para que el
+ * que ETIQUETA A MANO y el que CLASIFICA hablen exactamente el mismo
+ * vocabulario. Dos uniones homónimas declaradas en dos archivos coinciden el
+ * día que se escriben y divergen en la próxima corrección de borde.
+ *
+ *  · `CITA`        — apunta a una línea de un archivo del repo.
+ *  · `RUIDO`       — no es una cita: puerto, chain id, timestamp, valor de un
+ *                    campo de un objeto escrito en la prosa.
+ *  · `DATO`        — es el VALOR de un campo `cite:` / `quote:` de un registro,
+ *                    o sea la cita de OTRO archivo transcripta como dato.
+ *  · `INDECIDIBLE` — el contexto no alcanza para decidir a QUÉ archivo apunta.
+ *                    Es una respuesta legítima y es el bug del issue #178.
+ */
+export type BareLabel = 'CITA' | 'RUIDO' | 'DATO' | 'INDECIDIBLE';
+
 /** Una cita `archivo:línea` encontrada en el texto de un archivo. */
 export interface FoundCite {
   /** Ruta tal como se la pasaron a `scanSource`. */
