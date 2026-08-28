@@ -1,0 +1,53 @@
+// TYPECHECK DE LOS GUARDIANES — el agujero que este archivo cierra, medido.
+//
+// 🔴 `tsconfig.json` declara `"include": ["src/**/*"]` y `npm run lint` corre
+// `biome check src/`. O sea que los DOS sub-gates de tipos y estilo del repo
+// son ESTRUCTURALMENTE CIEGOS a `test/`: los archivos de los guardianes no los
+// mira ninguno de los dos. El único control que corre sobre ellos es `vitest`,
+// que TRANSPILA sin typechequear.
+//
+// Medido el 2026-08-28 con un control positivo, y por eso esto no es una
+// sospecha: inyectando `const x: BareLabel = 'NO_EXISTE';` en
+// `test/cited-lines-guard.scanner.ts`,
+//
+//     node ./node_modules/typescript/bin/tsc -p tsconfig.json      --noEmit  →  exit 0
+//     node ./node_modules/typescript/bin/tsc -p tsconfig.guards.json --noEmit  →  exit 2
+//                                          error TS2322 en la línea inyectada
+//
+// ⚠️ Y CORRELO CON EL BINARIO DIRECTO. Bajo el hook de este entorno, `npx tsc`
+// imprime «TypeScript compilation completed» y TAPA el exit code — hasta para
+// `--version`. Un gate leído por su salida en vez de por su código sale verde
+// siempre.
+//
+// ── POR QUÉ SÓLO LOS CINCO ARCHIVOS DEL GUARDIÁN Y NO TODO `test/` ─────────
+// Porque está medido y el resultado es un número, no una impresión: con
+// `"include": ["test/**/*.ts"]` el repo da **12 errores en 3 archivos**
+// (`migrate-preflight.test.ts`, `smoke-downstream-x402.method.test.ts`,
+// `verify-rls-enabled.test.ts`), casi todos `exactOptionalPropertyTypes` y
+// `noUncheckedIndexedAccess`. Arreglarlos es deuda de OTROS archivos y otra HU
+// (`TD-371-TYPECHECK-TEST`); ampliar el `include` sin arreglarlos dejaría este
+// config en rojo permanente, que es la forma más rápida de que alguien lo
+// borre. Se amplía cuando esos 12 se cierren, y no antes.
+//
+// Quién lo corre: `G-C19` en `test/cited-lines-guard.test.ts`, en cada
+// `npm test`. ⛔ No se agrega a `tsconfig.json` ni a `npm run lint`: este
+// archivo es ADITIVO, y tocar el gate del repo es una decisión de otra HU.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // `tsconfig.json` fija `rootDir: ./src`, que con archivos de `test/` da
+    // TS6059 antes de mirar un solo tipo. Acá la raíz es el repo.
+    "rootDir": ".",
+    "declaration": false,
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": [
+    "test/cited-lines-guard.test.ts",
+    "test/cited-lines-guard.scanner.ts",
+    "test/cited-lines-guard.sample.ts",
+    "test/cited-lines-guard.citations.ts",
+    "test/cited-lines-guard.exceptions.ts"
+  ]
+}

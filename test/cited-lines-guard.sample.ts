@@ -64,9 +64,16 @@
  * **Estratificado por FORMA (P3 / P4), n = 60 + 60.** La forma la produce
  * `scanSource` desde el 2026-08-19 y **no participa de ninguna regla de la
  * cascada**, así que estratificar por ella no contamina la medición. ⛔ Nunca
- * por la etiqueta predicha. El motivo de estratificar es de potencia y está
- * medido: las citas son ~38 % de P3 y ~1,4 % de P4, así que un sorteo simple de
- * 120 traería ~2 citas de P4 y no diría nada del falso negativo.
+ * por la etiqueta predicha. El motivo de estratificar es de potencia: si las
+ * citas fueran ~38 % de P3 y ~1,4 % de P4 —la ESTIMACIÓN ex ante del Story
+ * File, escrita antes de sortear—, un sorteo simple de 120 traería ~2 citas de
+ * P4 y no diría nada del falso negativo. El razonamiento se sostiene y la
+ * decisión también.
+ * ⚠️ PERO EL 38 % NO ES UNA MEDICIÓN, y este renglón lo daba por tal. Medido
+ * después, sobre el marco SIN los auto-referentes: las citas son **57 de 60 =
+ * 95 %** de P3 y **2 de 60 = 3,3 %** de P4. La causa está medida: casi todo el
+ * ruido P3 del repo vive justamente en los archivos del guardián, que están
+ * excluidos. Ver §7.2 del censo.
  *
  * Qué afirma cada estrato, y nada más:
  *   · **P3 → PRECISIÓN.** Es donde se concentran los positivos.

@@ -34,9 +34,18 @@ incidencias: es lo que protege a la próxima HU del mismo error.
   equivocada para RESOLVER uno que nadie decidió.
 - **Fix**: el path exacto gana — `if (tracked.has(raw)) return [raw];` antes del filtro de sufijo.
 - **🔴 Y lo que el fix reveló, que vale más que el fix**: arreglarlo **bajó** el recall contra el
-  oráculo de **17/19 a 12/19**. El defecto estaba *compensando* una limitación de D6: cinco entradas
-  resolvían bien porque el segundo archivo del párrafo se tragaba en silencio. **Estaban bien por la
-  razón equivocada, y el 17/19 previo era falso.**
+  oráculo. El defecto estaba *compensando* una limitación de D6: había entradas que resolvían bien
+  porque el segundo archivo del párrafo se tragaba en silencio. **Estaban bien por la razón
+  equivocada.**
+- **⚠️ CORRECCIÓN DEL FIX-PACK 1 — el «17/19 → 12/19» NO REPRODUCE.** Los dos números son de un
+  estado intermedio del árbol que ya no existe (D5 todavía estaba encendida). Re-medido con el
+  mutante «revertir `if (tracked.has(raw)) return [raw];`» sobre el árbol entregado:
+  **con el arreglo `CITA=6 TP=6 INVENTADOS=0`; sin el arreglo `CITA=6 TP=5 INVENTADOS=1`**
+  (`src/lib/operator-address.ts` `` `:1-16` `` → resuelve `src/routes/agents.ts` en vez de
+  `src/adapters/registry.ts`). ⇒ **La dirección se sostiene y es más fuerte que el número: revertir
+  el arreglo no recupera recall, FABRICA un destino inventado.** La lección de abajo queda entera;
+  la cifra que la ilustraba, no. **Y ése es el punto: una lección verdadera puede venir con un
+  número falso, y el número se propaga solo.**
 - **Aplicar en**: toda vez que una métrica **empeore** al arreglar un bug. La reacción correcta no es
   revertir: es preguntar **qué otro defecto estaba compensando**. Y: la misma pregunta con dos usos
   (verificar vs resolver) no admite la misma respuesta — sólo uno de los dos puede darse el lujo de
@@ -139,3 +148,150 @@ incidencias: es lo que protege a la próxima HU del mismo error.
   **antes** de correr la suite, y aborta si no está. Abortó, y por eso no reporté un falso verde.
 - **Aplicar en**: todo barrido de mutación. **Un mutante que no se aplicó y una suite verde son
   indistinguibles de un control que funciona.** El marcador explícito es más barato que la duda.
+
+---
+
+## FIX-PACK 1 (2026-08-28) — AR y CR, los dos RECHAZADO
+
+> Los seis bloqueantes son **de prosa y de números publicados**. Ninguno de runtime. En una HU cuyo
+> entregable ES la honestidad de la medición, eso es lo que bloquea.
+
+### [2026-08-28 17:10] FP1 — Publiqué un número medido ANTES del cambio que lo invalidó, en el MISMO commit
+
+- **Error**: `censo.md` publicaba «Recall 12/19 (63 %)» en cinco sitios. El medido es **6/19 (32 %)**.
+  El mismo defecto en §10.2 («12 de las 19 pasan a tener testigo»: son 6).
+- **Causa raíz**: el 12 es el recall **con D5 encendida**, y **D5 se degradó en el mismo commit que
+  introdujo el censo**. Medí, cambié la cascada, y publiqué la medición de antes. Verificado mutando
+  D5 para que vuelva a emitir `CITA`: da exactamente 12.
+- **Fix**: re-derivado en la corrida y re-publicado en los 5 sitios + `auto-blindaje.md`, diciendo en
+  la misma frase que el 12 era el número con D5 activa y por qué envejeció.
+- **Aplicar en**: **todo número medido antes de un cambio de comportamiento del mismo commit.** El
+  antídoto no es acordarse: es que el número tenga un testigo que lo RE-DERIVE en la corrida que lo
+  publica. Los números de §7.2 tenían `G-C17b` y salieron exactos en las dos re-derivaciones
+  independientes; los que fallaron son exactamente los seis que no tenían testigo. **La regla que
+  sale de acá: si un número del documento no tiene una función que lo recalcule, va con fecha y con
+  la palabra «foto», o no va.**
+
+### [2026-08-28 17:20] FP1 — Publiqué TRES falsos positivos y sólo UNO existe
+
+- **Error**: §7.4 declaraba `FP-1`, `FP-2` y `FP-3`. Re-derivados, `FP-2` y `FP-3` dan
+  `INDECIDIBLE [D6]` e `INDECIDIBLE [RESIDUO]`, **y la muestra los etiqueta `INDECIDIBLE` a mano** ⇒
+  son ACIERTOS. La afirmación estaba además copiada en dos docblocks del código entregado y era la
+  justificación escrita de dos de los cinco cambios de `src/`.
+- **Causa raíz**: **describí el modo de falla que el código PODRÍA producir y lo escribí como si lo
+  hubiera producido.** El modo es real (un `:N` cross-repo con un solo archivo local en el párrafo
+  resolvería al local), pero los dos sitios que elegí como ejemplo nombran DOS archivos locales, así
+  que D6 dispara antes que D3a. La descripción corresponde a una definición de párrafo más angosta
+  que la que el código implementa. Y AC-1 pedía ≥3 FP, o sea que **había una presión numérica hacia
+  el error**.
+- **Fix**: barrido completo del perímetro buscando el modo — **13 tokens con un repo ajeno en el
+  párrafo, 0 con veredicto `CITA`, sobre 1152**. Publicado como **modo previsto sin instancia
+  medida**, y declarado que **AC-1 no se cumple con FPs medidos: hay 1**. Las dos ediciones de `src/`
+  se mantienen con su motivo verdadero (el destino no lo puede verificar nadie desde este índice),
+  que es distinto del que decía.
+- **Aplicar en**: cada vez que un AC pide **N ejemplos**. La pregunta de control:
+  *¿este ejemplo lo corrí, o lo deduje de cómo creo que funciona el código?* Un ejemplo deducido y un
+  ejemplo medido se escriben igual. **Y cuando el número no alcanza, se declara que no alcanza —
+  llegar a N inventando el que falta es la misma clase de defecto que un destino inventado.**
+
+### [2026-08-28 17:30] FP1 — Un «falso negativo» que era un acierto, porque la tabla no se re-derivó tras el fix
+
+- **Error**: `FN-1` de §7.5 describía `facilitator-settle.ts:583` `` `:338` `` como perdido por D7.
+  Re-derivado da `CITA [D3b] target=src/index.ts`, y el oráculo lo etiqueta igual ⇒ **true positive**.
+- **Causa raíz**: es **literalmente el sitio que el arreglo «el path exacto gana» recuperó**. Escribí
+  la tabla antes del arreglo y no la volví a correr después. Mismo mecanismo que el 12/19.
+- **Fix**: reemplazado por uno de los 45 reales, con el reparto por regla re-derivado
+  (D6 21 · D7 9 · D5 7 · RESIDUO 7 · D3a 1).
+- **Aplicar en**: **toda tabla de ejemplos es una medición, no una ilustración.** Después de tocar el
+  clasificador hay que re-correr los ejemplos, no sólo los agregados. Los agregados tenían testigo y
+  sobrevivieron; los ejemplos no lo tenían y se pudrieron.
+
+### [2026-08-28 17:40] FP1 — El mecanismo anti-cherry-pick era código muerto, y el AR lo falsificó
+
+- **Error**: `sampleFrame`, `drawReservedSample`, `xorshift32`, `seedFrom`, `SAMPLE_SEED` y
+  `STRATUM_N` estaban exportados, documentados y **sin un solo llamador**. El AR cambió una etiqueta
+  de `CITA` a `RUIDO` y ajustó el tuple publicado de `fn:44` a `fn:43`: **20 tests verdes**. Un falso
+  negativo desapareció del registro y ningún control se enteró.
+- **Causa raíz**: escribí la maquinaria del sorteo para PRODUCIR la muestra, y una vez producida la
+  dejé de invocar. La propiedad «nadie elige qué se etiqueta» quedó garantizada por el orden de los
+  commits, que es prosa que hay que auditar a mano. **Un artefacto sin llamador no es una defensa.**
+- **Fix**: `G-C17d` (~40 líneas con funciones que ya existían) re-deriva el marco desde
+  `SAMPLE_BASE_COMMIT` con un solo `git cat-file --batch` (611 blobs, ~350 ms) y compara los 120
+  `siteKey` contra `RESERVED_SAMPLE` en las dos direcciones.
+  **Mutante M1**: sustituir un sitio de la muestra por otro del marco
+  (`scripts/smoke-base-sepolia.mjs:21` → `scripts/doctor-dast.js:6`, mismo `cite`, misma forma, misma
+  etiqueta) ⇒ **rojo SÓLO en `G-C17d`**, con los dos `siteKey` al lado.
+  ⚠️ **El mutante OBVIO es un falso KILLED**: cambiar `file`+`line` sin cambiar `cite` produce un
+  sitio inexistente y muere también por `G-C17b` (`ausentes`), o sea que no prueba nada sobre el
+  control nuevo.
+- **Aplicar en**: **buscá los `export` sin llamador de tu propio entregable antes de entregarlo.** Si
+  una propiedad del AC descansa en una función, alguien la tiene que invocar en cada corrida. Y la
+  pregunta que lo detecta: *¿qué edición hace falsa esta propiedad, y qué se pone rojo?*
+
+### [2026-08-28 17:50] FP1 — Una definición más angosta que su regla: `DATO` acertaba 0 de 25
+
+- **Error**: `BareLabel` definía `DATO` como «el VALOR de un campo `cite:`/`quote:`, la cita de OTRO
+  archivo transcripta como dato». D2 dispara con «el carácter anterior al `:` es una comilla».
+  Censo de los 25: **los 25 son valores dentro de un literal JSON o de un string de shell, ninguno
+  es la cita de otro archivo.** Y de los 120 sitios etiquetados a mano hay **0 `DATO`**.
+- **Causa raíz**: escribí la definición pensando en el caso que me motivó la regla y la regla
+  cubriendo un superconjunto mucho más grande. **Y el scoring binario (`pred = label === 'CITA'`) lo
+  volvía invisible**: colapsa las otras tres clases, así que las 6 discrepancias de la muestra no
+  aparecían en ningún número publicado.
+- **Fix**: se ENSANCHÓ la definición a lo que la regla hace, con el solapamiento con `RUIDO` escrito,
+  y se publicó la **matriz 4×4** (§7.2). ⛔ No se angostó la regla: distinguir «literal de string» de
+  «campo `cite:`» exige mirar el nombre de la clave, o sea una heurística nueva. Y queda declarado
+  que **la precisión publicada es la de la clase `CITA` y sólo ésa**.
+- **Aplicar en**: toda unión de clases con una cascada de reglas. **Leé la definición y la regla una
+  al lado de la otra y preguntá cuál es más ancha.** Y: una métrica binaria sobre un contrato de N
+  clases **no mide N−1 de ellas** — si el contrato tiene 4 clases, la matriz es 4×4 o no hay medición.
+
+### [2026-08-28 18:00] FP1 — Una sección que se mide a sí misma excluyéndose, con dos instrumentos
+
+- **Error**: §12 publicaba «3249 inserciones, factor 1,56×». El total salía del `numstat` del
+  **commit anterior** (sin la propia §12 ni `auto-blindaje.md`) y las filas de un
+  `grep '^+[^+]'` **que no ve las líneas en blanco**, así que **la tabla no sumaba su propio total**.
+- **Causa raíz**: **una sección que mide el diff en el que vive no se puede medir antes de
+  escribirse**, y yo la medí antes y no la volví a medir. Encima con dos instrumentos distintos para
+  el total y para las filas.
+- **Fix**: re-medido **después de todas las ediciones**, con **un solo instrumento**
+  (`git diff --numstat`) para el total y para cada fila. El veredicto de la regla 10 no cambia.
+- **Aplicar en**: toda métrica autorreferente (líneas del diff, tokens del propio archivo, artefactos
+  que mencionan una palabra que el artefacto contiene — el «5 de 1085» de §3 es el mismo bug). **Se
+  mide en la última pasada, y con un instrumento único. Dos instrumentos para el total y las partes
+  es una tabla que no cierra y nadie suma.**
+
+### [2026-08-28 18:10] FP1 — El gate del repo no mira una sola línea de lo que entregué
+
+- **Error**: publiqué `tsc 0 · lint 520` como evidencia de la HU. `tsconfig.json` incluye
+  `["src/**/*"]` y `npm run lint` corre `biome check src/`: de las ~3400 líneas nuevas, **todas en
+  `test/` y `doc/`**, los dos sub-gates miran **cero**.
+- **Causa raíz**: **leí el verde del gate como si hablara de mi entregable.** El verde era verdadero;
+  el sujeto de la frase, no. Es la versión de tipos del «correr las partes de un gate no es correr el
+  gate»: acá el gate corrió entero y aun así no tocó el trabajo.
+- **Fix**: `tsconfig.guards.json` (aditivo, no toca `tsconfig.json` ni `lint`) + **`G-C19`**, que lo
+  corre en cada `npm test` con el **binario directo** (`node ./node_modules/typescript/bin/tsc`,
+  porque bajo el hook `npx tsc` tapa el exit code). **Mutante M4**: `const x: BareLabel =
+  'NO_EXISTE';` ⇒ `tsc -p tsconfig.json` **exit 0**, `G-C19` **rojo con TS2322**. Declarado
+  `TD-371-TYPECHECK-TEST` con su número: `test/**/*.ts` completo da **12 errores en 3 archivos**.
+- **Aplicar en**: **antes de citar un gate como evidencia, verificá que su `include` alcance lo que
+  escribiste.** Un gate verde sobre un conjunto que no te contiene es indistinguible de un gate verde
+  que te aprueba.
+
+### [2026-08-28 18:20] FP1 — Elegí el piso nuevo a ojo, y un mutante lo tumbó en la primera pasada
+
+- **Error**: al arreglar el «piso clavado sobre el valor medido» puse **4** (medición 6, «margen 2»),
+  razonando que *una edición de prosa mueve el número de a uno*. **Escribí «está medido» sin haberlo
+  medido.**
+- **Causa raíz**: el clasificador decide **por PÁRRAFO**, no por token. Los 6 aciertos salen de **4
+  párrafos** (1 · **2** · **2** · 1), así que una sola mención de paso en el párrafo equivocado
+  cuesta **2**. Medido con un mutante: agregando `src/services/budget.ts` al párrafo de
+  `src/lib/operator-address.ts`, el recall cae **de 6 a 4** — o sea que el piso 4 volvía a tener
+  margen CERO, el mismo defecto que estaba arreglando, un paso más abajo.
+- **Fix**: piso **2**, derivado del reparto por párrafos (aguanta perder los dos más grandes), con la
+  medición y el mutante escritos al lado en `G-C17` y en §7.3.
+- **Aplicar en**: **todo umbral nuevo se elige midiendo el tamaño del salto más chico que el sistema
+  puede dar, no el de la unidad en que se cuenta.** Y la trampa que casi paso de largo: al corregir
+  un «número sin medición» es facilísimo poner OTRO número sin medición, porque el que corrige se
+  siente del lado bueno. La frase «está medido» es una afirmación falsable: si la escribís, tenés que
+  poder pegar la corrida.

@@ -163,28 +163,40 @@
  *     mismo — eso es el punto 3. No se resuelve con un índice posicional a
  *     propósito: un `nth` es un número de posición, o sea la misma clase de dato
  *     frágil que este guardián existe para no volver a guardar.
- * 14. 🎯 LOS 4 ARCHIVOS DE ESTE GUARDIÁN. No están en `CORTE_A_PATHS`, y son los
- *     citadores más densos que este commit agregó al repo: medido con
- *     `scanSource` sobre ellos mismos, **261 tokens** (`test` 76 · `citations`
- *     101 · `exceptions` 46 · `scanner` 38) contra 57 en TODO el Corte A. O sea
- *     que el guardián más que cuadruplicó la población de citas del repo en
- *     archivos que él mismo no mira. (Foto del 2026-08-25, RE-DERIVADA cuatro
- *     veces —243 antes del fix-pack del re-AR, 247 después, 260 después del
- *     fix-pack de prosa del CR, 261 tras el fix-pack 3 de WKH-335— con `scanSource`.
- *     Que este número se mueva cada vez que alguien escribe una línea de prosa
- *     acá es exactamente lo que el ítem denuncia, y las cuatro fotos lo prueban.)
+ * 14. 🎯 LOS 5 ARCHIVOS DE ESTE GUARDIÁN. No están en `CORTE_A_PATHS`, y son los
+ *     citadores más densos del repo: medido con `scanSource` sobre ellos
+ *     mismos, **761 tokens** (`sample` 356 · `exceptions` 121 · `citations` 119
+ *     · `test` 103 · `scanner` 62) contra 57 en TODO el Corte A. O sea que el
+ *     guardián tiene TRECE VECES más citas que el universo que vigila, en
+ *     archivos que él mismo no mira.
+ *     🔴 **Y ESTE ÍTEM ES EL QUE MEJOR SE DENUNCIA A SÍ MISMO: envejeció EN LA
+ *     HU QUE LO ESCRIBIÓ.** Decía «LOS 4 ARCHIVOS … 261 tokens», y WKH-371
+ *     agregó el quinto (`cited-lines-guard.sample.ts`, 356 tokens, las 120
+ *     etiquetas de la muestra) sin que nada lo avisara: 261 → 761, 2,9×. El
+ *     número lo re-derivó el CR de esta HU, no un control. (Foto del
+ *     2026-08-28, la sexta —243 · 247 · 260 · 261 · y ahora 761—. Que se mueva
+ *     cada vez que alguien escribe prosa acá es exactamente lo que el ítem
+ *     denuncia; que haya hecho falta un revisor humano para notarlo, también.
+ *     ⚠️ Y ESTE MISMO PÁRRAFO LO MOVIÓ MIENTRAS SE ESCRIBÍA: la primera
+ *     derivación dio 752 y el desglose tenía 5 en el grupo del dotfile; al
+ *     reescribir el ítem se perdió un literal y ganaron 9 tokens de prosa
+ *     nueva, así que la segunda derivación dio 761 con 4. Los números de acá
+ *     son los de la ÚLTIMA pasada, corrida después de la última edición.)
  *     **Se decidió declararlo y NO incluirlos, y la razón es medida, no de
- *     esfuerzo** — el desglose de los 261:
- *       · **89** son literalmente el valor del campo `cite` de una entrada de
- *         `CITED_LINES`. Ésos YA tienen testigo, y mejor que el de acá: `G-C5`
- *         verifica esa misma cita contra el archivo apuntado y `G-C7` se pone
- *         rojo si el token desaparece de su citador.
- *       · **102** son `:N` sueltos (P3/P4) sin archivo: números de línea citados
- *         dentro de la prosa que explica el algoritmo.
- *       · **29** nombran archivos que el ÍNDICE DE GIT no tiene, y son TRES
- *         grupos, no dos. (Re-derivado el 2026-08-19 — la versión anterior
- *         decía «21 fixtures» y «5 son `.nexus/project-context.md:6`», y las
- *         dos estaban mal contadas: CR `MNR-cr-5`.)
+ *     esfuerzo** — el desglose de los 761, re-derivado el 2026-08-28 con la
+ *     regla escrita al lado de cada categoría:
+ *       · **589** son `:N` sueltos (P3/P4) sin archivo: números de línea
+ *         citados dentro de la prosa que explica el algoritmo, más los `cite:`
+ *         sueltos de las 120 entradas de la muestra. (Regla: `!citeNamesFile`.)
+ *       · **49** son literalmente el valor del campo `cite` de una de las 31
+ *         entradas de `CITED_LINES` que nombran archivo. Ésos YA tienen
+ *         testigo, y mejor que el de acá: `G-C5` verifica esa misma cita contra
+ *         el archivo apuntado y `G-C7` se pone rojo si el token desaparece de
+ *         su citador. (Regla: el token está en el conjunto de los `cite`
+ *         declarados. ⚠️ El «89» anterior salía de otra regla, que nadie
+ *         escribió; éste trae la suya.)
+ *       · **32** nombran archivos que el ÍNDICE DE GIT no tiene, y son CUATRO
+ *         grupos:
  *           — **16** son fixtures en memoria de `G-C2`/`G-C3`
  *             (`./splash.tsx:245` ×5, `foo.ts:42` ×3, `a.ts:1` ×2, `b.ts:2` ×2,
  *             `../../lib/fixture.ts:3` ×2, `./no/existe.ts:1` ×2): ésos no
@@ -193,18 +205,23 @@
  *             puerto de la URL de calibración. La propia HU lo declara ruido
  *             legítimo CON path (ver el barrido de `G-C11`), así que llamarlo
  *             «un archivo que no existe ni puede existir» era generalizar.
- *           — **5** nombran `.nexus/project-context.md`, y son DOS tokens
- *             distintos: 4 × `:6` + 1 × `:6-12`. Ese archivo SÍ existe en disco
+ *           — **4** nombran `.nexus/project-context.md`, y son DOS tokens
+ *             distintos: 3 × `:6` + 1 × `:6-12`. Ese archivo SÍ existe en disco
  *             y NO está trackeado, así que es —literalmente— el ejemplo de la
  *             segunda salida de emergencia que el candado 2️⃣ declara y no
  *             cierra (`TD-316-CITAS-PROJECT-CONTEXT`).
+ *           — **4** nombran `wasiai-remittance-agents/src/manifest/registry.ts`
+ *             (`:76` ×2, `:77`, `:275`). Son de OTRO repo, y los agregó
+ *             WKH-371 al arreglar dos citas sueltas que resolvían al archivo
+ *             equivocado: el arreglo cambia un destino inventado por un path
+ *             que este índice no puede verificar (`TD-371-PORTABILIDAD`).
  *         Declararlos a todos exigiría una excusa escrita por cada fixture, o
  *         sea llenar el archivo de excusas de ruido para poder verificar otra
  *         cosa.
- *       · **41** nombran un archivo trackeado; de ésos, 9 son el token
+ *       · **91** nombran un archivo trackeado; de ésos, 9 son el token
  *         HISTÓRICO `.gitignore:172` —el bug que esta HU arregló, citado como
  *         ejemplo de lo que estaba mal—, que por construcción ya no describe esa
- *         línea. Meter los 4 archivos al corte convertiría cada mención del bug
+ *         línea. Meter los 5 archivos al corte convertiría cada mención del bug
  *         en una cita rota.
  *     El residuo real —las citas de estos 4 archivos que sí afirman algo sobre
  *     otro archivo— **se verificó A MANO, una por una, y ninguna es falsa**: las
@@ -244,23 +261,27 @@
  *         `mustContain`, y sólo para las citas DECLARADAS en `CITED_LINES`.
  *       · **LOS DESTINOS CROSS-REPO.** Un contexto
  *         `wasiai-remittance-agents/…/registry.ts:76` apunta afuera del índice
- *         de git de este repo. Si el párrafo nombra además algún archivo de
- *         acá, se devuelve ÉSE: es un falso positivo medido, contado en
- *         `doc/sdd/232-…/censo.md` y no escondido.
+ *         de git de este repo. Si el párrafo nombrara además UN SOLO archivo de
+ *         acá, se devolvería ÉSE. ⚠️ **Es un modo PREVISTO y con 0 instancias
+ *         medidas**: barridos los 1152 tokens del universo al commit base, los
+ *         13 que nombran un repo ajeno en su párrafo salen `RUIDO` (6), `DATO`
+ *         (3) o `INDECIDIBLE` (4), y ninguno `CITA`. Decir «es un falso
+ *         positivo medido» —como decía este renglón— era publicar un modo
+ *         hipotético como medición, que es el defecto que esta HU persigue.
  *       · **LA AUTO-CITA**, que es la forma PRINCIPAL en que este repo escribe
  *         una cita suelta y sigue sin resolverse. La regla D5 se degradó a
  *         `INDECIDIBLE` porque su censo completo —`D5_CENSUS`, 36 sitios
- *         abiertos a mano— midió 17 destinos equivocados. Queda
- *         `TD-371-AUTOCITA`.
+ *         abiertos a mano— midió **17 de 36 que NO son auto-citas** (13
+ *         apuntan a otro archivo y 4 no son citas). Queda `TD-371-AUTOCITA`.
  *       · **EL PÁRRAFO CORTADO POR UNA LÍNEA ` *` VACÍA.** El contexto que
  *         decide suele estar del otro lado de un separador de docblock. Es la
  *         causa medida de varios de los `INDECIDIBLE` de arriba.
  *
- * Naming: G-C1..G-C18.
+ * Naming: G-C1..G-C19 (con `G-C17b`, `G-C17c` y `G-C17d`).
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -296,7 +317,12 @@ import {
 import {
   RESERVED_SAMPLE,
   SAMPLE_BASE_COMMIT,
+  SAMPLE_SEED,
   SELF_REFERENTIAL,
+  STRATUM_N,
+  drawReservedSample,
+  oracleKey,
+  sampleFrame,
   siteKey,
 } from './cited-lines-guard.sample.js';
 
@@ -1494,7 +1520,7 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // Control de armado de este mismo test: si `cabecera` viniera vacía o del
     // archivo equivocado, los `includes` de arriba pasarían por casualidad o
     // fallarían todos juntos. Esto lo ancla al archivo correcto.
-    expect(cabecera.includes('Naming: G-C1..G-C18')).toBe(true);
+    expect(cabecera.includes('Naming: G-C1..G-C19')).toBe(true);
   });
 
   // ══════════════════════════════════════════════════════════════
@@ -1842,9 +1868,22 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // es aceptable ahí —verifica un `target` que un humano ya decidió— e
     // inaceptable acá, donde no hay nadie que lo haya decidido.
     //
-    // Input que lo pone en rojo: sustituir `resolveContextTarget` por
-    // `citeTargetIfTracked` en D3b. Resuelve un target arbitrario y este test
-    // dice cuál salió.
+    // Input que lo pone en rojo, y es un SITIO QUE EXISTE: dentro de `add()`,
+    // en `scanContext` (`test/cited-lines-guard.scanner.ts`), sustituir la
+    // llamada a `mentionCandidates` por `citeTargetIfTracked`. Ése es el ÚNICO
+    // punto de resolución de la cascada.
+    // ⚠️ La versión anterior de este comentario decía «sustituir
+    // `resolveContextTarget` por `citeTargetIfTracked` en D3b», y eso NO ES UN
+    // SITIO DEL CÓDIGO: `classifyBareCite` llama a `scanContext` directo y
+    // nunca a `resolveContextTarget`. Un input rojo que nombra una sustitución
+    // inexistente no se puede correr, o sea que no es falsable.
+    // Corrido el mutante real, `G-C15` muere con su motivo propio:
+    //   AssertionError: se esperaba INDECIDIBLE por AMBIGUOUS y se obtuvo CITA
+    //   con target `src/uno/homonimo.ts`: D3b: el párrafo nombra un solo
+    //   archivo trackeado, sin número de línea: `src/uno/homonimo.ts`.
+    // (El mismo mutante también mata `G-C17`, `G-C17b` y `G-C18`, lo cual es
+    // esperable —toca la resolución entera— y por eso el mensaje de arriba, que
+    // nombra el homónimo del fixture, es lo que prueba que el rojo es de ACÁ.)
     const candidatos = toyByBase.get('homonimo.ts') ?? [];
     // ⛔ El assert es `> 1`, NUNCA un dígito: clavar el número de homónimos es un
     // candado que se pudre solo el día que alguien agrega otro archivo con ese
@@ -1883,7 +1922,7 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     ).toBeNull();
   });
 
-  it('G-C16: los OCHO archivos auto-referentes están fuera del universo, y este control no se lee a sí mismo', () => {
+  it('G-C16: los OCHO auto-referentes están DECLARADOS y son disjuntos del Corte A, y este control no se lee a sí mismo', () => {
     // 🔴 SON OCHO, NO SIETE. Los 7 de `DT-11` son los dos guardianes cuyos `:N`
     // sueltos son el REGISTRO de citas ajenas. El octavo es
     // `test/cited-lines-guard.sample.ts`, que contiene el `target` que el
@@ -1892,11 +1931,34 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     //
     // Input que lo pone en rojo: meter `test/cited-lines-guard.citations.ts` al
     // universo. El token se resuelve leyendo su propio campo `target:`.
+    //
+    // ⚠️ QUÉ ASSERTA ESTE CONTROL, DICHO SIN AFIRMAR DE MÁS. Los tres `expect`
+    // de abajo verifican PERTENENCIA A UNA LISTA (`SELF_REFERENTIAL`), no que
+    // el clasificador no mire esos archivos: quien arma el universo es el
+    // llamador, y este `it` no lo ejecuta. Decir «están fuera del universo» —
+    // como decía el título de este control— es afirmar más de lo que se mide.
+    // Lo que sí se agrega debajo es la única consecuencia estructural que se
+    // puede verificar acá: la DISJUNCIÓN con el Corte A.
     expect(SELF_REFERENTIAL.length).toBe(8);
     expect(new Set(SELF_REFERENTIAL).size).toBe(SELF_REFERENTIAL.length);
     for (const f of SELF_REFERENTIAL) {
       expect(TRACKED_SET.has(f), `archivo auto-referente que no existe: ${f}`).toBe(true);
     }
+
+    // 🔴 `CORTE_A_PATHS ∩ SELF_REFERENTIAL = ∅`, y hasta hoy no la verificaba
+    // NADIE. La ataja de rebote `G-C4` —un archivo auto-referente dentro del
+    // corte llenaría el barrido de citas no declaradas—, pero de rebote y con
+    // otro mensaje. Un archivo en las dos listas es una contradicción del
+    // contrato: el corte dice «esto se vigila», la otra lista dice «esto
+    // contiene la respuesta».
+    // Input que lo pone en rojo: agregar cualquiera de los 8 a `CORTE_A_PATHS`.
+    const enLasDos = CORTE_A_PATHS.filter((p) => SELF_REFERENTIAL.includes(p));
+    expect(
+      enLasDos,
+      'Un archivo declarado a la vez en `CORTE_A_PATHS` y en `SELF_REFERENTIAL`.\n' +
+        'Las dos declaraciones se contradicen: el corte lo vigila y la otra lista dice\n' +
+        'que contiene el `target` que el clasificador tendría que producir.\n',
+    ).toEqual([]);
     for (const f of [
       'test/cited-lines-guard.citations.ts',
       'test/cited-lines-guard.exceptions.ts',
@@ -1972,12 +2034,35 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // ⚠️ PISO, no igualdad. Un test que exigiera «exactamente N» se pone rojo el
     // día que alguien escriba una cita nueva, y ese rojo no señala nada falso:
     // es la fricción que termina con alguien borrando el guardián.
+    //
+    // 🔴 EL PISO ES 2 Y LA MEDICIÓN ES 6, Y ESA DISTANCIA ESTÁ MEDIDA, no
+    // elegida a ojo. Hasta el fix-pack 1 el piso era 6 —EXACTAMENTE el valor
+    // medido—, con este mismo comentario al lado prometiendo margen. Margen
+    // cero: una sola cita que dejara de resolver ponía el gate rojo sin que
+    // nada estuviera mal. Es el candado que se pudre solo, con la etiqueta de
+    // que no se pudre.
+    //
+    // Cómo se eligió el 2, y por qué NO es 4 —que fue el primer intento—:
+    //   · los 6 aciertos salen de **4 párrafos**, no de 6: `types/index.ts` 1 ·
+    //     `operator-address.ts` **2** · `payment-guards-…` **2** · `CLAUDE.md` 1.
+    //   · el clasificador decide POR PÁRRAFO, así que UNA edición de prosa
+    //     legítima cuesta hasta **2**, no 1. Medido con un mutante: agregando
+    //     `src/services/budget.ts` al párrafo de `operator-address.ts` —una
+    //     mención de paso, de las que cualquier HU escribe— el número cae de
+    //     **6 a 4** de una sola vez. Con piso 4 el margen volvía a ser cero.
+    //   · dos ediciones así cuestan 4 ⇒ el piso tiene que aguantar 6 − 4 = 2.
+    // Y sigue siendo un control real: el modo de falla que importa —que el
+    // clasificador deje de resolver— lleva el número a 0 ó 1.
+    // ⛔ El piso NO se sube para que un número publicado dé. Y el invariante
+    // DURO de este `it` no es éste: es el `toEqual([])` de arriba.
     expect(
       aciertos,
       `El recall del clasificador sobre el oráculo cayó a ${aciertos}/${bare.length}, por\n` +
-        'debajo del piso publicado en `doc/sdd/232-…/censo.md`. Si el clasificador cambió\n' +
-        'a propósito, se re-mide y se re-publica el censo; si no, algo se rompió.\n',
-    ).toBeGreaterThanOrEqual(6);
+        'debajo del piso 2. La medición publicada en `doc/sdd/232-…/censo.md` §7.3 es 6/19,\n' +
+        'repartida en 4 párrafos; el piso aguanta perder los dos más grandes.\n' +
+        'Si el clasificador cambió a propósito, se re-mide y se re-publica el censo; si\n' +
+        'no, algo se rompió.\n',
+    ).toBeGreaterThanOrEqual(2);
 
     // Y el otro lado: las 4 ocurrencias que un humano declaró RUIDO a mano en
     // `SCANNER_FALSE_POSITIVES` no pueden salir CITA.
@@ -1992,6 +2077,84 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
         ).not.toBe('CITA');
       }
     }
+  });
+
+  it('G-C17d: el SORTEO tiene testigo — el marco se re-deriva y los 120 sitios son los que salieron', () => {
+    // 🔴 EL AGUJERO QUE ESTE CONTROL CIERRA, y lo falsificó el AR de esta HU:
+    // `sampleFrame`, `drawReservedSample`, `xorshift32`, `seedFrom`,
+    // `SAMPLE_SEED` y `STRATUM_N` estaban EXPORTADOS, DOCUMENTADOS Y SIN UN
+    // SOLO LLAMADOR. O sea que el mecanismo anti-cherry-pick de AC-2 —lo que
+    // garantiza que «nadie elige qué se etiqueta»— era código muerto, y toda la
+    // propiedad descansaba en el orden de los commits, que es prosa auditable a
+    // mano y no un guardián.
+    //
+    // La falsificación, ejecutada por el AR en dos ediciones y un commit:
+    // cambiar la etiqueta de un sitio de `CITA` a `RUIDO` y ajustar el tuple
+    // publicado de `fn:44` a `fn:43`. Resultado: 20 tests VERDES. Un falso
+    // negativo desapareció del registro y ningún control se enteró.
+    //
+    // Lo que este `it` agrega es lo único que esa maniobra no puede sobrevivir:
+    // los 120 `siteKey` de `RESERVED_SAMPLE` tienen que ser EXACTAMENTE los que
+    // el sorteo produce sobre el marco re-derivado del commit base. Cambiar una
+    // ETIQUETA sigue pasando por acá —este control mira los SITIOS, no las
+    // etiquetas, y eso va dicho para no afirmar de más—, pero SUSTITUIR un
+    // sitio por otro, que es como se saca de la muestra un caso incómodo, se
+    // pone rojo con los dos `siteKey` al lado.
+    //
+    // Input que lo pone en rojo: reemplazar un sitio de `RESERVED_SAMPLE` por
+    // otro del marco. Verificado con el mutante M1 del fix-pack 1.
+    const paths = execFileSync(
+      'git',
+      ['ls-tree', '-r', '-z', '--name-only', SAMPLE_BASE_COMMIT, '--', 'src', 'test', 'scripts'],
+      { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+    )
+      .split('\0')
+      .filter(Boolean);
+
+    // Un solo proceso para los 611 blobs: `git show` por archivo tarda ~30× más
+    // y este control tiene que costar poco para que nadie lo borre por lento.
+    const batch = execFileSync('git', ['cat-file', '--batch'], {
+      cwd: REPO_ROOT,
+      input: `${paths.map((p) => `${SAMPLE_BASE_COMMIT}:${p}`).join('\n')}\n`,
+      maxBuffer: 512 * 1024 * 1024,
+    });
+    const sources = new Map<string, string>();
+    let off = 0;
+    for (const p of paths) {
+      // Cabecera `<oid> SP <type> SP <size> LF`, después el contenido y un LF.
+      const nl = batch.indexOf(0x0a, off);
+      const size = Number(batch.toString('utf8', off, nl).split(' ')[2]);
+      sources.set(p, batch.toString('utf8', nl + 1, nl + 1 + size));
+      off = nl + 1 + size + 1;
+    }
+    expect(sources.size, 'el perímetro del marco cambió de tamaño').toBe(paths.length);
+
+    // El oráculo preexistente sale del marco: medirse dos veces contra las
+    // mismas ocurrencias no agrega información. Es la resta del `1152 → 1130`.
+    const oracleKeys = new Set<string>();
+    for (const c of CITED_LINES) {
+      if (!citeNamesFile(c.cite)) oracleKeys.add(oracleKey(c.from, c.cite));
+    }
+    for (const f of SCANNER_FALSE_POSITIVES) oracleKeys.add(oracleKey(f.from, f.cite));
+
+    const frame = sampleFrame(sources, oracleKeys);
+    // ⛔ PISOS, no igualdades: el marco es una foto del commit base y su tamaño
+    // exacto se publica en el censo (§7.1: 1130 = P3 130 + P4 1000). Lo que sí
+    // es estructural es que cada estrato tenga con qué llenar los 60.
+    expect(frame.filter((s) => s.form === 'P3').length).toBeGreaterThanOrEqual(STRATUM_N);
+    expect(frame.filter((s) => s.form === 'P4').length).toBeGreaterThanOrEqual(STRATUM_N);
+
+    const sorteados = drawReservedSample(frame, SAMPLE_SEED).map(siteKey);
+    const declarados = RESERVED_SAMPLE.map(siteKey);
+    const sobran = declarados.filter((k) => !sorteados.includes(k));
+    const faltan = sorteados.filter((k) => !declarados.includes(k));
+    expect(
+      { sobran, faltan },
+      'Los sitios de `RESERVED_SAMPLE` dejaron de ser los que el sorteo produce sobre el\n' +
+        'marco derivado del commit base. Alguien eligió a mano qué se etiqueta, que es\n' +
+        'exactamente lo que AC-2 prohíbe — o el marco cambió, y entonces se re-sortea y se\n' +
+        're-etiqueta, no se ajusta la lista.\n',
+    ).toEqual({ sobran: [], faltan: [] });
   });
 
   it('G-C17b: la MUESTRA RESERVADA — los números se re-derivan, no se leen del censo', () => {
@@ -2083,7 +2246,6 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // Input que lo pone en rojo: volver a emitir `CITA` desde D5 — la lista de
     // sitios sigue igual pero el clasificador deja de decir `INDECIDIBLE`.
     const sitios = new Map<string, string>();
-    for (const c of CORTE_A_PATHS) void c;
     for (const e of D5_CENSUS) {
       const k = `${e.file} :: ${e.line} :: ${e.cite}`;
       expect(sitios.has(k), `entrada duplicada en el censo de D5: ${k}`).toBe(false);
@@ -2107,12 +2269,23 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
 
     // Y la consecuencia mecánica: mientras el censo esté por encima del umbral,
     // NINGÚN sitio de D5 puede salir `CITA`.
-    for (const e of D5_CENSUS.slice(0, 6)) {
-      const texto = execFileSync('git', ['show', `${SAMPLE_BASE_COMMIT}:${e.file}`], {
-        cwd: REPO_ROOT,
-        encoding: 'utf8',
-        maxBuffer: 64 * 1024 * 1024,
-      });
+    //
+    // 🔴 «NINGUNO» SON LOS 36, NO LOS 6 PRIMEROS. Hasta el fix-pack 1 este
+    // bucle corría sobre `D5_CENSUS.slice(0, 6)` con la palabra «NINGÚN»
+    // escrita al lado: la afirmación cubría 6 veces menos de lo que decía, y
+    // los 30 sitios de la cola no los miraba nadie. Los fuentes se leen una
+    // sola vez por archivo, así que los 36 cuestan lo mismo que los 6.
+    const d5src = new Map<string, string>();
+    for (const e of D5_CENSUS) {
+      let texto = d5src.get(e.file);
+      if (texto === undefined) {
+        texto = execFileSync('git', ['show', `${SAMPLE_BASE_COMMIT}:${e.file}`], {
+          cwd: REPO_ROOT,
+          encoding: 'utf8',
+          maxBuffer: 64 * 1024 * 1024,
+        });
+        d5src.set(e.file, texto);
+      }
       const hit = scanSource(texto, e.file).find((h) => h.line === e.line && h.cite === e.cite);
       expect(hit, `sitio del censo de D5 ausente al commit base: ${e.file}:${e.line}`).toBeDefined();
       const v = classifyBareCite(hit as FoundCite, texto, TRACKED_SET, BY_BASENAME);
@@ -2204,11 +2377,63 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // 19 llegan a tener testigo mecánico depende de cómo esté escrita la prosa
     // de cada citador, y eso cambia con cada HU que toque uno de esos archivos.
     // Clavar el número sería un candado que se pudre solo.
+    //
+    // 🔴 PISO 2, MEDICIÓN 6 — el mismo cambio, el mismo motivo y la misma
+    // medición que en `G-C17`: el piso anterior (6) estaba clavado sobre el
+    // valor medido, o sea con margen CERO, prometiendo margen en el comentario
+    // de al lado. Los 6 salen de 4 párrafos y una sola edición de prosa cuesta
+    // hasta 2 (medido: 6 → 4 con una mención de paso). Ver `G-C17`.
     expect(
       conTestigo,
       `Sólo ${conTestigo} de las ${bare.length} entradas P3/P4 tienen testigo mecánico, por debajo\n` +
-        'del piso publicado en `doc/sdd/232-wkh-371-discriminador-de-citas-sueltas/censo.md`.\n' +
+        'del piso 2. La medición publicada en `doc/sdd/232-wkh-371-…/censo.md` §10.2 es 6\n' +
+        'de 19, repartida en 4 párrafos.\n' +
         'El resto sigue dependiendo del `targetReason` escrito a mano, que es prosa.\n',
-    ).toBeGreaterThanOrEqual(6);
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it('G-C19: los archivos de este guardián PASAN por un typecheck — el gate del repo no los mira', () => {
+    // 🔴 EL AGUJERO, MEDIDO Y CONFIRMADO POR DOS REVISORES: `tsconfig.json`
+    // declara `"include": ["src/**/*"]` y `npm run lint` corre `biome check
+    // src/`. Los dos sub-gates de tipos y de estilo del repo son
+    // ESTRUCTURALMENTE CIEGOS a `test/`: de las líneas de este guardián,
+    // `tsc` typechequea CERO. El único control que corría sobre ellas era
+    // `vitest`, que transpila sin typechequear — o sea que `tsc 0 · lint 520`
+    // es un resultado verdadero que NO habla de este archivo.
+    //
+    // Control positivo, corrido antes de escribir este `it`: inyectando
+    // `const x: BareLabel = 'NO_EXISTE';` en el escáner,
+    //   tsc -p tsconfig.json      --noEmit  → exit 0   (ciego)
+    //   tsc -p tsconfig.guards.json --noEmit → exit 2   error TS2322
+    //
+    // ⚠️ SE CORRE EL BINARIO DIRECTO, NO `npx tsc`. Bajo el hook de este
+    // entorno `npx tsc` imprime «TypeScript compilation completed» y TAPA el
+    // exit code, hasta para `--version`. Un gate leído por su salida en vez de
+    // por su código sale verde siempre.
+    //
+    // Input que lo pone en rojo: cualquier error de tipos en uno de los 5
+    // archivos del `include` de `tsconfig.guards.json`.
+    const tsc = join(REPO_ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
+    expect(existsSync(tsc), `no está el compilador en ${tsc}`).toBe(true);
+
+    let salida = '';
+    let code = 0;
+    try {
+      salida = execFileSync(process.execPath, [tsc, '-p', 'tsconfig.guards.json', '--noEmit'], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        maxBuffer: 16 * 1024 * 1024,
+      });
+    } catch (e) {
+      const err = e as { status?: number; stdout?: string; stderr?: string };
+      code = err.status ?? 1;
+      salida = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    expect(
+      { code, salida },
+      'Los archivos de este guardián no typechequean bajo el `strict` del propio repo.\n' +
+        '⚠️ Y esto NO lo dice `npm run lint` ni `tsc -p tsconfig.json`: ninguno de los dos\n' +
+        'mira `test/`. Ver el docblock de `tsconfig.guards.json`.\n',
+    ).toEqual({ code: 0, salida: '' });
   });
 });

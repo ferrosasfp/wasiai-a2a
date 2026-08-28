@@ -84,10 +84,40 @@ export type CiteForm = 'P1' | 'P2' | 'P3' | 'P4';
  *  · `CITA`        — apunta a una línea de un archivo del repo.
  *  · `RUIDO`       — no es una cita: puerto, chain id, timestamp, valor de un
  *                    campo de un objeto escrito en la prosa.
- *  · `DATO`        — es el VALOR de un campo `cite:` / `quote:` de un registro,
- *                    o sea la cita de OTRO archivo transcripta como dato.
+ *  · `DATO`        — el token está DENTRO DE UN LITERAL de string, o sea que no
+ *                    es una afirmación del texto sino contenido citado. Es
+ *                    exactamente lo que decide D2 —el carácter anterior al `:`
+ *                    es `'` o `"`— y nada más que eso.
  *  · `INDECIDIBLE` — el contexto no alcanza para decidir a QUÉ archivo apunta.
  *                    Es una respuesta legítima y es el bug del issue #178.
+ *
+ * 🔴 LA DEFINICIÓN DE `DATO` SE ENSANCHÓ POR UN CENSO, no por comodidad. Decía
+ * *«el VALOR de un campo `cite:` / `quote:` de un registro, o sea la cita de
+ * OTRO archivo transcripta como dato»*, y eso es MÁS ANGOSTO que lo que D2
+ * implementa. Censo completo de los 25 sitios que D2 clasifica en el perímetro
+ * (`src`+`test`+`scripts` sin los 8 auto-referentes), abiertos uno por uno:
+ * **los 25 son valores dentro de un literal JSON o de un string de shell**
+ * (`'{"a":2,"z":1}'`, `'{"selfHostCount":1,…}'`, `-d '{"goal":"test",…}'`).
+ * **Ninguno es la cita de otro archivo.** La definición vieja acertaba 0 de 25.
+ *
+ * ⚠️ CONSECUENCIA, Y VA ESCRITA PORQUE CAMBIA LO QUE SE PUEDE AFIRMAR: así
+ * definida, `DATO` SOLAPA con `RUIDO`. Un `:1` dentro de `'{"a":1}'` es las dos
+ * cosas —no es una cita, y está dentro de un literal—, y la cascada devuelve
+ * `DATO` sólo porque D2 evalúa antes que nadie. En la muestra reservada de 120
+ * sitios etiquetados a mano hay **0 `DATO`**: los 4 sitios donde D2 dispara
+ * están etiquetados `RUIDO`, y el humano no se equivocó. Las dos etiquetas son
+ * defendibles sobre el mismo token.
+ *
+ * ⛔ POR ESO LA PRECISIÓN PUBLICADA ES LA DE LA CLASE `CITA`, Y SÓLO ESA. El
+ * scoring de `G-C17b` es binario (`pred = label === 'CITA'`), así que colapsa
+ * las otras tres clases y **no mide** si `RUIDO`, `DATO` e `INDECIDIBLE` están
+ * bien repartidas entre sí. La matriz 4×4 completa —que sí muestra las 6
+ * discrepancias que el binario esconde— está publicada en
+ * `doc/sdd/232-wkh-371-discriminador-de-citas-sueltas/censo.md`, §7.2.
+ * ⛔ NO se angostó la REGLA para que coincidiera con la definición vieja:
+ * distinguir «literal de string» de «campo `cite:` de un registro» exige mirar
+ * el nombre de la clave, o sea una heurística nueva sobre el texto — la misma
+ * clase de invención que esta cascada existe para no hacer.
  */
 export type BareLabel = 'CITA' | 'RUIDO' | 'DATO' | 'INDECIDIBLE';
 
@@ -571,20 +601,30 @@ export interface BareVerdict {
 /**
  * LA CASCADA. Clasifica un `:N` SUELTO (P3/P4) en una de cuatro clases.
  *
- * Orden de evaluación, y el orden importa:
+ * Orden de evaluación, y el orden importa. Es el del CÓDIGO de más abajo,
+ * re-leído renglón por renglón (el docblock anterior decía otro y era falso):
  *   D1  el carácter anterior al `:` es alfanumérico o `_`  ⇒ RUIDO
  *   D2  el carácter anterior es `'` o `"`                  ⇒ DATO
- *   D6/D7  el párrafo nombra más de un archivo, o sólo nombres ambiguos
- *                                                          ⇒ INDECIDIBLE
+ *   D6  el párrafo nombra MÁS DE UN archivo trackeado      ⇒ INDECIDIBLE
  *   D3a el párrafo nombra EXACTAMENTE UN archivo, con `:N` ⇒ CITA
  *   D3b ídem, nombrado sin `:N`                            ⇒ CITA
+ *   D7  el ÚNICO contexto son nombres homónimos            ⇒ INDECIDIBLE
  *   D5  el párrafo no nombra ninguno y el `:N` cae dentro del propio archivo
  *                                                          ⇒ CITA (auto-cita)
  *   RESIDUO                                                ⇒ INDECIDIBLE
  *
- * 🔴 D6/D7 VAN ANTES QUE D3: la ambigüedad gana. Al revés, un párrafo que
- * nombra tres archivos devolvería el primero que el escáner encuentre, que es
- * `candidates[0]` con otro disfraz.
+ * 🔴 D6 VA ANTES QUE D3: la ambigüedad de VARIOS archivos gana. Al revés, un
+ * párrafo que nombra tres archivos devolvería el primero que el escáner
+ * encuentre, que es `candidates[0]` con otro disfraz.
+ *
+ * 🔴 D7 VA DESPUÉS QUE D3, Y NO ES UN DESCUIDO: si el párrafo trae un contexto
+ * NO ambiguo, ése gana, y el homónimo suelto no lo bloquea. La versión gruesa
+ * —cualquier nombre ambiguo en el párrafo ⇒ `INDECIDIBLE`— está medida y baja
+ * el recall a la mitad, porque casi todo párrafo largo menciona de paso algún
+ * `index.ts`. Por eso D7 sólo decide cuando la ambigüedad es lo ÚNICO que hay.
+ * ⚠️ Repro de la diferencia, que es lo que hace falsable este párrafo: un
+ * contexto mixto (`` `homonimo.ts` `` + `src/adapters/chain-resolver.ts`) sale
+ * `CITA D3b`, no `INDECIDIBLE D7`. Es lo que canda `G-C15`.
  *
  * 🔴 D5 ESTÁ DEGRADADA A `INDECIDIBLE`, Y ÉSA ES LA MEDICIÓN MÁS CARA DE ESTA
  * HU. La regla entró con una hipótesis fuerte y con un umbral de rechazo
@@ -592,8 +632,14 @@ export interface BareVerdict {
  * degrada»—, justamente para que ningún resultado se pudiera narrar como éxito.
  *
  * Lo que se midió es un CENSO, no un muestreo: los 36 sitios del perímetro que
- * llegan a D5, abiertos uno por uno. **19 apuntan al propio archivo y 17
- * apuntan a otro.** 47 % de destinos equivocados contra un techo de 21 %.
+ * llegan a D5, abiertos uno por uno. **19 apuntan al propio archivo (`AUTO`),
+ * 13 apuntan a OTRO archivo y 4 no son citas (`RUIDO`)** ⇒ **17 de 36 NO son
+ * auto-citas**, que es lo que D5 afirmaría de los 36. 47 % de destinos
+ * equivocados contra un techo de 21 %.
+ * ⚠️ «17 apuntan a otro» —como decía este renglón— es falso: apuntan a otro 13.
+ * Los 4 de `RUIDO` no apuntan a ningún lado, y por eso cuentan igual como
+ * error de D5: emitir `CITA` sobre un token que no es una cita es inventar un
+ * destino, no perder uno.
  *
  * ⚠️ El umbral admite dos lecturas y las dos van escritas, porque elegir la
  * cómoda en silencio sería el defecto que esta HU persigue:
@@ -634,9 +680,21 @@ export interface BareVerdict {
  *
  *  (i)   EL DESTINO CROSS-REPO. Un `:77` cuyo contexto es
  *        `wasiai-remittance-agents/src/manifest/registry.ts:76` apunta a un
- *        archivo que no está en el índice de ESTE repo. Si el párrafo nombra
- *        además algún archivo de acá, D3a devuelve ÉSE: es un falso positivo, y
- *        está contado en el censo de la HU, no escondido.
+ *        archivo que no está en el índice de ESTE repo. Si el párrafo nombrara
+ *        además UN SOLO archivo de acá, D3a devolvería ÉSE, o sea que afirmaría
+ *        un destino local para una cita que apunta afuera.
+ *        🔴 **ES UN MODO PREVISTO, NO UNA MEDICIÓN, y la diferencia importa:
+ *        el barrido completo del perímetro devuelve 0 INSTANCIAS.** Medido
+ *        sobre los 1152 tokens sueltos del universo al commit base, buscando
+ *        los que tienen un repo ajeno nombrado en su párrafo: **13 tokens, y
+ *        NINGUNO con veredicto `CITA`** (6 `RUIDO` D1, 3 `DATO` D2, 2
+ *        `INDECIDIBLE` D6, 2 `INDECIDIBLE` RESIDUO). Los dos sitios de
+ *        `src/lib/capability-risk.ts` que el censo de la HU publicó como
+ *        `FP-2`/`FP-3` salen `INDECIDIBLE`, y la muestra reservada los etiqueta
+ *        `INDECIDIBLE` a mano ⇒ **son aciertos**. Lo que los protege es que sus
+ *        párrafos nombran DOS archivos locales, no uno.
+ *        ⇒ El modo se declara porque un párrafo con un solo archivo local lo
+ *        produciría, no porque se haya observado. Ver §7.4 del censo.
  *  (ii)  EL VALOR SEMÁNTICO. Esta cascada dice a qué ARCHIVO apunta el token.
  *        Que la línea diga lo que la prosa afirma lo verifica `G-C5` con su
  *        `mustContain`; que la prosa sea verdadera no lo verifica nadie.
