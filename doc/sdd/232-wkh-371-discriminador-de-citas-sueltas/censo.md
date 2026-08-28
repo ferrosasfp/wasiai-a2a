@@ -472,3 +472,64 @@ número de líneas). Control positivo verde antes (`6358 passed`) y después (`6
 restauración por `cp` desde backup, `sha256` idéntico
 (`637b52a54127e87b75f02fbe3d2b0d85e109ee0f3130afb4c20aa0486cecd798`) y `/usr/bin/diff` sin
 diferencias.
+
+---
+
+## 11 · Las correcciones (commit aparte), y su PROCEDENCIA
+
+⛔ Van en un commit distinto del instrumento (CD-2 / AC-9). Mezclar deuda vieja y arreglo nuevo en
+el mismo commit hace imposible saber cuál era cuál, y **atribuirle al trabajo de hoy un daño
+preexistente apaga la búsqueda de la causa real**.
+
+**Cinco tokens convertidos, 100 % comentario, sin re-envolver ningún párrafo y sin cambiar el número
+de líneas de ningún archivo.** Son exactamente los tres falsos positivos de §7.4 más la única
+contradicción numérica que el censo encontró.
+
+### Procedencia, derivada del árbol base y no de la memoria
+
+```
+git show 19405ba:<archivo> | sed -n '<N>p'
+```
+
+Los cinco sitios salen **byte-idénticos** al commit base ⇒ **los cinco son deuda PREEXISTENTE**.
+Ninguno lo produjo el trabajo de esta HU.
+
+### Qué se cambió y por qué
+
+| Sitio | Antes | Después | Opción | Justificación |
+|---|---|---|---|---|
+| `src/lib/capability-risk.ts:85` | `` `:77` ``, `` `:71-75` `` | path cross-repo completo | **A** | El destino está en `wasiai-remittance-agents`, que aporta **0** archivos al índice de este repo. Sueltos, el clasificador los resolvía a `doc/sdd/_INDEX.md` —que el mismo párrafo nombra de paso— o sea **afirmaba un destino local para una cita que apunta afuera** |
+| `src/lib/capability-risk.ts:100` | `` `:300` `` | ídem | **A** | Idéntico |
+| `src/services/spend-policy.ownership.test.ts:10` | `` `:190` ``, `spend-policy.ts:163` | `src/services/spend-policy.ts:163` y `:190` completos | **A** | `spend-policy.ts` tiene **2** candidatos (`src/routes/auth/` y `src/services/`). El párrafo nombraba el path completo de la RUTA y el del SERVICIO sólo por basename, así que el token resolvía al archivo equivocado |
+| `src/services/fee-settle-broadcast-evidence.hu201.test.ts:355` | `(:316)` | `` (`fee-split.ts:316`) `` | **A** | `settleFeeSplits` vive en `fee-split.ts`; sueltos, los dos tokens se leían como auto-citas al archivo de test |
+| `src/services/fee-settle-broadcast-evidence.hu201.test.ts:356` | `` de :335 `` | `` de `fee-split.ts:336` `` | **A** + corrección | 🔴 **El número estaba mal.** Abierto el destino (CD-6): `fee-split.ts:336` es `const priorTx = chargeable.find(…)`; `:335` es el `if (inProgress)`. Y el propio `fee-split.ts:494` escribe `:336` para la misma cosa ⇒ **dos archivos declaraban números distintos del mismo sitio, y nada los cruzaba** |
+
+⛔ **No se aplicó la opción (C)** —borrarle el número a la oración— en ningún sitio: en los cinco, la
+oración **usa** el número.
+
+### El efecto, re-derivado sobre el árbol vivo (AC-7, CD-10)
+
+| Archivo | Sueltos antes | Sueltos después | Falsos positivos después |
+|---|---|---|---|
+| `src/lib/capability-risk.ts` | 3 | **1** (una auto-cita correcta, `INDECIDIBLE`) | **0** |
+| `src/services/spend-policy.ownership.test.ts` | 14 | **13** (todos `INDECIDIBLE`) | **0** |
+| `src/services/fee-settle-broadcast-evidence.hu201.test.ts` | 2 | **0** | **0** |
+
+**Los tres falsos positivos medidos en §7.4 ya no existen en el árbol vivo.**
+
+> ⚠️ **Y los números de §7 NO cambian, a propósito.** La muestra reservada se mide contra el
+> **commit base** (`G-C17b` lee los fuentes con `git show`), así que `13/14` y `13/57` siguen
+> describiendo el árbol sobre el que se sorteó. Es lo que hace que ese control no sea un candado que
+> se pudre solo — y también lo que impide «mejorar» la precisión publicada arreglando justo los
+> sitios que la muestra mira. Los arreglos mejoran el ÁRBOL; la MEDICIÓN queda como fue.
+
+### Lo que NO se tocó
+
+- ⛔ `doc/` fuera de `doc/sdd/232-*`: **12785 tokens sueltos, medidos y no re-anclados.** Son
+  registro histórico (§3).
+- ⛔ Los 8 archivos auto-referentes: `TD-224-CITAS-DEL-PROPIO-GUARDIAN` **se declara con su número
+  (195), no se cierra**.
+- ⛔ Los 136 `INDECIDIBLE` restantes del perímetro. Son silencio declarado, no afirmaciones falsas:
+  arreglarlos es otra HU, y el criterio para priorizarla está en `TD-371-AUTOCITA` (§8).
+- ⛔ Ninguna línea de código ejecutable. El diff de `src/` es **100 % comentario**, verificado línea
+  por línea con `git diff -U0`.
