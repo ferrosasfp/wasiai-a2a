@@ -397,3 +397,78 @@ D5 aportaba **2 aciertos y 5 destinos inventados**. Un destino inventado es peor
 **Si un número de acá y su función discrepan, el que tiene razón es la función.** `G-C17b` está
 escrito exactamente para que esa discrepancia sea un rojo y no un silencio: si alguien cambia una
 etiqueta de la muestra y no re-publica este documento, el gate lo dice con los dos números al lado.
+
+---
+
+## 10 · El cruce mecánico que HOY NO EXISTÍA (`G-C18`)
+
+### 10.1 · La vacuidad, demostrada ANTES de arreglarla
+
+`citeMatchesTarget` abre con `if (raw === null) return true`, y `citePathOf` devuelve `null` para
+**todo** token P3/P4. Medido sobre el árbol, antes de escribir una línea del control:
+
+```
+citeMatchesTarget('src/lib/operator-address.ts', '`:95`', 'src/no/existe/ninguno.ts')  -> true
+citeMatchesTarget('src/lib/operator-address.ts', '`:95`', 'CLAUDE.md')                 -> true
+citeMatchesTarget('src/lib/operator-address.ts', '`:95`', 'package.json')              -> true
+citePathOf('`:95`') -> null      citePathOf(':634') -> null
+
+entradas de CITED_LINES cuyo token NO nombra archivo: 19
+para las 19, citeMatchesTarget(from, cite, 'CUALQUIER/COSA.ts') === true : true
+```
+
+⇒ **`E-CITE_TARGET_MISMATCH` no podía dispararse jamás para ninguna de las 19.**
+
+> ⚠️ Eso **no** quiere decir que esas entradas no tuvieran ningún testigo, y decirlo al revés sería
+> afirmar de más: `G-C5` ya cruza `mustContain` contra `target:line` y `G-C6` cruza `symbolPath`. Lo
+> que faltaba es lo que `G-C18` agrega: cruzar el token contra **el contexto en que está escrito**.
+
+### 10.2 · Lo que el control compra, re-derivado
+
+**12 de las 19** entradas P3/P4 pasan a tener testigo mecánico, y **las 12 coinciden** con lo que el
+humano declaró ⇒ el control **nace verde por MEDICIÓN, no por construcción**. Las otras 7 salen
+`INDECIDIBLE` y siguen rigiendo por su `targetReason` escrito a mano, como hasta hoy.
+**Costo: cero declaraciones nuevas.** No se amplió `CORTE_A_PATHS` (sigue en 14) ni `CITED_LINES`.
+
+> El Story File preveía 16 de 19. Son 12, y la causa es la degradación de D5 (§8): las 4 que
+> faltan son auto-citas que D5 resolvía y que ahora salen `INDECIDIBLE`.
+
+`G-C18` asserta un **PISO de 6**, no una igualdad, por la misma razón que `G-C17`: cuántas llegan a
+tener testigo depende de cómo esté escrita la prosa de cada citador, y eso cambia con cada HU.
+
+### 10.3 · El mutante — y el que habría sido un FALSO KILLED
+
+⛔ **El mutante obvio no sirve.** Cambiarle el `target` a una entrada P3/P4 pone el gate rojo hoy,
+pero por `G-C5`. Se verificó corriéndolo: mutar `line: 634` → `line: 640` en la entrada de
+`compose.ts` da
+
+```
+× G-C5: el ancla citada sigue ahí, es única, y el archivo citado es el correcto
+  src/services/compose.ts :: :634
+      E-LINE_MOVED · se corrió el archivo: tu ancla está ahora en
+      `src/services/compose.ts:634` y la cita dice `:640`.
+```
+
+…y **`G-C18` queda VERDE**. Ese mutante muere sin ejercitar el control nuevo: quien lo usara
+concluiría que `G-C18` funciona cuando podría estar vacuo.
+
+**El mutante correcto muta el PÁRRAFO DEL CITADOR**, dejando `target`, `line`, `mustContain` y
+`symbolPath` intactos. En `src/services/compose.ts:750`, `middleware` → `chain-resolver.ts` (un
+basename con **exactamente 1** candidato en el índice — con `agent.ts`, `registry.ts` o `compose.ts`,
+que tienen 2, el resultado sería `AMBIGUOUS` y **no habría rojo**):
+
+```
+× G-C18: el cruce mecánico de los `:N` SUELTOS contra el `target` declarado
+E-BARE_TARGET_MISMATCH  src/services/compose.ts:751 :634
+    target declarado a mano : src/services/compose.ts
+    destino del contexto    : src/adapters/chain-resolver.ts
+    D3b: el párrafo nombra un solo archivo trackeado, sin número de línea:
+         `src/adapters/chain-resolver.ts`.
+```
+
+**Y `G-C4`, `G-C5`, `G-C6` y `G-C7` quedaron VERDES**, que es lo que prueba que el rojo es del
+control nuevo y no de un vecino. `tsc` y `lint` exit 0 (es un comentario, no cambia el formato ni el
+número de líneas). Control positivo verde antes (`6358 passed`) y después (`6358 passed`);
+restauración por `cp` desde backup, `sha256` idéntico
+(`637b52a54127e87b75f02fbe3d2b0d85e109ee0f3130afb4c20aa0486cecd798`) y `/usr/bin/diff` sin
+diferencias.

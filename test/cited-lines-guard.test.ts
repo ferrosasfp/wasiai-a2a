@@ -256,7 +256,7 @@
  *         decide suele estar del otro lado de un separador de docblock. Es la
  *         causa medida de varios de los `INDECIDIBLE` de arriba.
  *
- * Naming: G-C1..G-C17.
+ * Naming: G-C1..G-C18.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -1494,7 +1494,7 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // Control de armado de este mismo test: si `cabecera` viniera vacía o del
     // archivo equivocado, los `includes` de arriba pasarían por casualidad o
     // fallarían todos juntos. Esto lo ancla al archivo correcto.
-    expect(cabecera.includes('Naming: G-C1..G-C17')).toBe(true);
+    expect(cabecera.includes('Naming: G-C1..G-C18')).toBe(true);
   });
 
   // ══════════════════════════════════════════════════════════════
@@ -2122,5 +2122,93 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
         `${e.file}:${e.line} volvió a salir CITA desde D5, con el censo todavía en rojo`,
       ).toBe('INDECIDIBLE');
     }
+  });
+
+  it('G-C18: el cruce mecánico de los `:N` SUELTOS contra el `target` declarado (E-BARE_TARGET_MISMATCH)', () => {
+    // 🔴 EL AGUJERO QUE ESTE CONTROL CIERRA, y estaba a la vista:
+    //
+    //   citeMatchesTarget(fromFile, token, target)  →  if (raw === null) return true;
+    //
+    // `citePathOf` devuelve `null` para TODO token P3/P4 —no nombran archivo—,
+    // así que ese `return true` contesta que SÍ sin mirar nada. Medido antes de
+    // escribir este control, sobre las 19 entradas P3/P4 del registro:
+    //
+    //   citeMatchesTarget('src/lib/operator-address.ts', '`:95`', 'CLAUDE.md')            → true
+    //   citeMatchesTarget('src/lib/operator-address.ts', '`:95`', 'src/no/existe.ts')     → true
+    //   las 19, contra un target inventado                                               → true
+    //
+    // O sea: `E-CITE_TARGET_MISMATCH` NO PODÍA DISPARARSE JAMÁS para ninguna de
+    // ellas, y sus `target` dependían enteramente de la prosa del `targetReason`.
+    //
+    // ⚠️ ESO NO QUIERE DECIR QUE ESAS ENTRADAS NO TUVIERAN NINGÚN TESTIGO, y
+    // decirlo al revés sería afirmar de más: `G-C5` ya cruza `mustContain`
+    // contra `target:line` (`E-TARGET_MISSING`, `E-LINE_OUT_OF_RANGE`,
+    // `E-WRONG_FILE`, `E-ANCHOR_GONE`, `E-LINE_MOVED`) y `G-C6` cruza
+    // `symbolPath`. Lo que faltaba es lo que ESTE control agrega: cruzar el
+    // token contra el CONTEXTO en que está escrito, o sea preguntar si el
+    // párrafo sostiene el destino que el humano declaró.
+    //
+    // COSTO: CERO declaraciones nuevas. No se amplía `CORTE_A_PATHS` ni
+    // `CITED_LINES`: el control se monta sobre lo que ya está declarado.
+    //
+    // Input que lo pone en rojo: cambiar el PÁRRAFO de un citador para que
+    // nombre un archivo distinto del `target` declarado. Ver el mutante en las
+    // notas de la HU — y ojo con el mutante OBVIO (cambiarle el `target` a la
+    // entrada), que se pone rojo hoy por `G-C5`/`E-ANCHOR_GONE` y por lo tanto
+    // NO prueba nada sobre este control.
+    const bare = CITED_LINES.filter((c) => !citeNamesFile(c.cite));
+    expect(bare.length, 'el registro se quedó sin entradas P3/P4').toBeGreaterThanOrEqual(19);
+
+    // El control POSITIVO del propio control: la vacuidad que motiva todo esto
+    // sigue siendo real, así que este `it` no está midiendo algo ya cubierto.
+    for (const c of bare.slice(0, 3)) {
+      expect(
+        citeMatchesTarget(c.from, c.cite, 'src/no/existe/en/ningun/lado.ts'),
+        `\`citeMatchesTarget\` dejó de ser vacuo para ${c.cite}. Si alguien la arregló, este\n` +
+          'control puede ser redundante — pero hay que MEDIRLO antes de borrarlo.\n',
+      ).toBe(true);
+    }
+
+    const hallazgos: string[] = [];
+    let conTestigo = 0;
+    for (const c of bare) {
+      const src = readTracked(c.from);
+      const hit = scanSource(src, c.from).find(
+        (h) => h.cite === c.cite && (h.form === 'P3' || h.form === 'P4'),
+      );
+      if (hit === undefined) continue;
+      const v = classifyBareCite(hit, src, TRACKED_SET, BY_BASENAME);
+      // `INDECIDIBLE` NO es un hallazgo: significa que el contexto no alcanza y
+      // que sigue rigiendo el `targetReason` escrito a mano, como hasta hoy.
+      if (v.label !== 'CITA') continue;
+      conTestigo += 1;
+      if (v.target !== c.target) {
+        hallazgos.push(
+          `E-BARE_TARGET_MISMATCH  ${c.from}:${hit.line} ${c.cite}\n` +
+            `    target declarado a mano : ${c.target}\n` +
+            `    destino del contexto    : ${v.target}\n` +
+            `    ${v.why}`,
+        );
+      }
+    }
+
+    expect(
+      hallazgos,
+      'El PÁRRAFO en que está escrita una cita suelta apunta a un archivo distinto del que\n' +
+        'la entrada declara. Una de las dos cosas está mal, y ninguna de las dos la ve\n' +
+        '`citeMatchesTarget`, que para estos tokens devuelve `true` sin mirar.\n\n' +
+        `${hallazgos.join('\n')}\n`,
+    ).toEqual([]);
+
+    // ⚠️ PISO, no igualdad, y por la misma razón que en `G-C17`: cuántas de las
+    // 19 llegan a tener testigo mecánico depende de cómo esté escrita la prosa
+    // de cada citador, y eso cambia con cada HU que toque uno de esos archivos.
+    // Clavar el número sería un candado que se pudre solo.
+    expect(
+      conTestigo,
+      `Sólo ${conTestigo} de las ${bare.length} entradas P3/P4 tienen testigo mecánico, por debajo\n` +
+        'del piso publicado en `doc/sdd/232-wkh-371-discriminador-de-citas-sueltas/censo.md`.\n' +
+        'El resto sigue dependiendo del `targetReason` escrito a mano, que es prosa.\n',
+    ).toBeGreaterThanOrEqual(6);
   });
 });
