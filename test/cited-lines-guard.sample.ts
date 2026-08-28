@@ -34,6 +34,13 @@
  * independencia es de la MUESTRA y del MOMENTO, no de la mente del que
  * etiqueta.**
  *
+ * ⚠️ Y «verificables» quiere decir POR UN GUARDIÁN, no por un humano que compare
+ * commits a mano. Las dos mitades tienen el suyo, y son distintos:
+ *   · qué SITIOS se etiquetan → `G-C17d` re-corre el sorteo sobre el marco.
+ *   · qué ETIQUETA lleva cada uno → `G-C17e` las compara contra el blob de
+ *     `SAMPLE_BLIND_COMMIT`. Sin él, cambiar un `label` y ajustar el tuple
+ *     publicado deja el gate entero en verde; está medido en el censo.
+ *
  * ── EL MARCO, CON SU PERÍMETRO Y SU PATRÓN (CD-1) ──────────────────────────
  *
  * Perímetro: los archivos de `src/`, `test/` y `scripts/` que estaban en el
@@ -97,6 +104,21 @@ export const SAMPLE_SEED = 'WKH-371';
  * excepciones que la HU agrega.
  */
 export const SAMPLE_BASE_COMMIT = '19405baf7f173033c4ef81dc8380238f1cda73ba';
+
+/**
+ * EL COMMIT CIEGO: aquel en el que se escribieron las 120 etiquetas de
+ * `RESERVED_SAMPLE`, con `classifyBareCite` todavía inexistente en el árbol.
+ *
+ * No es lo mismo que `SAMPLE_BASE_COMMIT`. Aquél dice de qué árbol salió el
+ * MARCO (qué se pudo sortear); éste dice desde cuándo las ETIQUETAS están
+ * congeladas, y es contra él que `G-C17e` compara — porque una etiqueta que se
+ * puede ajustar después de ver la salida del clasificador no mide nada.
+ *
+ * Moverlo hacia adelante descongela la muestra. Si alguna vez hay que hacerlo
+ * (re-sorteo, marco nuevo), se re-etiqueta entero en un commit propio y el
+ * motivo se escribe acá.
+ */
+export const SAMPLE_BLIND_COMMIT = '5c9f383ff4c62317c429a35cd78ed8165dd25829';
 
 /** El tamaño de cada estrato. */
 export const STRATUM_N = 60;

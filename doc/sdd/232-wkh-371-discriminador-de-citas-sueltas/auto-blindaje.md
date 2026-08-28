@@ -295,3 +295,80 @@ incidencias: es lo que protege a la próxima HU del mismo error.
   un «número sin medición» es facilísimo poner OTRO número sin medición, porque el que corrige se
   siente del lado bueno. La frase «está medido» es una afirmación falsable: si la escribís, tenés que
   poder pegar la corrida.
+
+### [2026-08-28 22:10] FP2 — Declaré «cerrado» un candado que dos ediciones abrían con el gate en verde
+
+- **Error**: §7.1 afirmaba que AC-2 «queda cerrado» en sus dos mitades —muestra y momento— cuando la
+  segunda no tenía guardián. El re-AR lo falsificó con dos ataques de dos ediciones cada uno: (A)
+  pasar un `label` de `CITA` a `RUIDO` borrando su `target` y bajar en uno el falso negativo
+  publicado; (B) mover el `target` del único FP medido hasta lo que el clasificador contesta y
+  ajustar el tuple, con lo que **la precisión publicada saltaba a 14 de 14**. Los dos: `tsc`, `tsc`
+  de guards, `lint` y los ~6360 tests **en verde**.
+- **Causa raíz**: `G-C17d` guarda los SITIOS y lo dice con precisión en su docblock; yo leí esa
+  precisión como si cubriera también las ETIQUETAS. **Un control honesto sobre lo que cubre no vuelve
+  verdadera la frase del documento que lo cita.** Y `G-C17b` no ayuda: compara la derivación contra
+  un literal que el mismo atacante edita.
+- **Fix**: `G-C17e` — las líneas de campo (`file`, `line`, `cite`, `form`, `nth`, `label`, `target`)
+  de la muestra se congelan contra el blob de `SAMPLE_BLIND_COMMIT` (el commit ciego) derivándolas de
+  `git diff`, con control positivo del instrumento (120 `label:` encontrados) para que no dé verde
+  por vacío. **Los dos ataques reproducidos: 22 verdes y 1 rojo cada uno, y el rojo es `G-C17e` en
+  los dos** — ningún falso KILLED.
+- **Aplicar en**: **una propiedad se declara cerrada por el guardián que la mata, no por el que está
+  al lado.** Antes de escribir «queda cerrado», escribí la edición de dos líneas que lo violaría y
+  corré el gate: si queda verde, la frase es falsa.
+
+### [2026-08-28 22:20] FP2 — Un número con su perímetro y SIN su patrón admite cuatro lecturas
+
+- **Error**: el «13 tokens con un repo ajeno en el párrafo» publicaba su perímetro (1152, commit
+  base) pero no qué contaba como «ajeno». Reproduce exacto, y aun así el re-AR tuvo que **adivinarlo
+  probando cuatro definiciones**. La lectura natural del docblock —el único repo que nombraba— da
+  **4**.
+- **Causa raíz**: al escribirlo, la definición estaba en mi cabeza y en el script que se tiró a la
+  basura; CD-1 pide las dos cosas, y yo verifiqué que el número REPRODUCE sin verificar que sea
+  DERIVABLE. Son distintas: reproduce el que ya sabe el patrón.
+- **Fix**: los cinco nombres escritos como patrón (`wasiai-remittance-agents`, `wasiai-v2`,
+  `wasiai-facilitator`, `wasiai-agentkey`, `chaski-v3`, como substring del párrafo) en el docblock de
+  `classifyBareCite`, en el del guardián y en §7.4, con las cuatro definiciones y sus cuatro números
+  re-derivados sobre el mismo perímetro: **4 · 6 · 13 · 6**.
+- **Aplicar en**: **la prueba de que un número tiene su patrón no es re-correrlo: es que otro lo
+  re-derive leyendo sólo lo publicado.** Si hay que preguntar, falta el patrón.
+
+### [2026-08-28 22:30] FP2 — Decisión correcta, motivo falso: «no los hay» contra un censo de 17
+
+- **Error**: AC-1 pide ≥3 falsos positivos citados; se declaró incumplido con **1** —lo cual está
+  bien y no cambia— pero el motivo escrito era *«no hay tres errores que citar porque no los hay»*.
+  El SDD §8.6 había designado OTRO instrumento para cazarlos («el censo COMPLETO de la clase más
+  riesgosa, no por muestreo») y ese censo entregó **17 de 36 equivocados**, con testigo mecánico.
+- **Causa raíz**: escribí el motivo mirando el instrumento que tenía a mano (la muestra reservada) en
+  vez del que el SDD designó. Un motivo que afirma una AUSENCIA es la clase de frase que hay que
+  cruzar con el instrumento designado antes de escribirla.
+- **Fix**: motivo reescrito —«después de degradar D5, no quedan tres en el clasificador que se
+  entrega»— con la cita de §8.6, el `D5_CENSUS` al lado, y **los dos caminos en una tabla para que el
+  AC lo resuelva QA**, que es quien decide alcance.
+- **Aplicar en**: **cuando una decisión es correcta, el motivo se revisa igual.** Un motivo falso
+  debajo de una decisión buena sobrevive a todas las revisiones, porque nadie discute el veredicto.
+
+### [2026-08-28 23:05] FP2 — Tres guards que dependen de historia que el CI no clona
+
+- **Error**: `G-C17b`, `G-C17d` y `G-C17e` leen commits fijos (`SAMPLE_BASE_COMMIT` y
+  `SAMPLE_BLIND_COMMIT`) con `git ls-tree` / `git show` / `git diff`. `.github/workflows/ci.yml` no
+  declaraba `fetch-depth`, y `actions/checkout` documenta **default 1** («only a single commit is
+  fetched»). En un clon `--depth 1` real de esta rama, `19405ba` y `5c9f383` **NO EXISTEN**: el
+  clon trae **1 commit** y el comando exacto de `G-C17e` sale `fatal: bad object 5c9f383…` (exit
+  128); el de `G-C17d`, `fatal: not a tree object`. **Los tres guards habrían reventado en el primer
+  push, y no por una aserción: por un error de git.**
+- **Causa raíz**: escribí guards que consultan el REPOSITORIO dando por sentado el árbol que tengo en
+  disco. Local siempre hay historia completa; el CI clona lo mínimo. Y el verde de `main` no dice
+  nada, porque **ningún test de `main` clava un SHA**: el modo de falla nace con el primer guard que
+  mira historia y no existe antes.
+- **Fix**: `fetch-depth: 0` **EXPLÍCITO en los DOS `actions/checkout@v7`** (`build-test` y
+  `coverage`, que corre la misma suite), con el motivo escrito en el propio `ci.yml` nombrando a los
+  tres guards. Explícito aunque el default fuera el correcto: **el default de una acción de terceros
+  no es una precondición verificada.** Arreglar un solo checkout habría dejado un verde parcial, que
+  se lee peor que el rojo.
+- **Aplicar en**: **todo control que consulte historia de git —`git show <sha>`, `git diff <sha>`,
+  `git ls-tree <sha>`, `git log`— es una precondición de INFRAESTRUCTURA, no sólo de código.** La
+  pregunta, antes de escribirlo: *¿qué le llega al runner?* Y el corolario general: **un gate verde
+  en un entorno no dice nada de otro entorno cuyo INPUT es distinto** — acá el input es cuánta
+  historia hay, y ningún test del repo lo verificaba.
+

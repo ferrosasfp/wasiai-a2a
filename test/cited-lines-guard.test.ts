@@ -268,6 +268,12 @@
  *         (3) o `INDECIDIBLE` (4), y ninguno `CITA`. Decir «es un falso
  *         positivo medido» —como decía este renglón— era publicar un modo
  *         hipotético como medición, que es el defecto que esta HU persigue.
+ *         ⚠️ «Repo ajeno» son estos CINCO y no otros, buscados como substring
+ *         del párrafo (el patrón es parte del número, CD-1):
+ *         `wasiai-remittance-agents`, `wasiai-v2`, `wasiai-facilitator`,
+ *         `wasiai-agentkey`, `chaski-v3`. Con sólo el primero el número es
+ *         **4**, no 13. El detalle de las cuatro definiciones y sus cuatro
+ *         números está en el docblock de `classifyBareCite`.
  *       · **LA AUTO-CITA**, que es la forma PRINCIPAL en que este repo escribe
  *         una cita suelta y sigue sin resolverse. La regla D5 se degradó a
  *         `INDECIDIBLE` porque su censo completo —`D5_CENSUS`, 36 sitios
@@ -277,7 +283,7 @@
  *         decide suele estar del otro lado de un separador de docblock. Es la
  *         causa medida de varios de los `INDECIDIBLE` de arriba.
  *
- * Naming: G-C1..G-C19 (con `G-C17b`, `G-C17c` y `G-C17d`).
+ * Naming: G-C1..G-C19 (con `G-C17b`, `G-C17c`, `G-C17d` y `G-C17e`).
  */
 
 import { execFileSync } from 'node:child_process';
@@ -317,6 +323,7 @@ import {
 import {
   RESERVED_SAMPLE,
   SAMPLE_BASE_COMMIT,
+  SAMPLE_BLIND_COMMIT,
   SAMPLE_SEED,
   SELF_REFERENTIAL,
   STRATUM_N,
@@ -2155,6 +2162,86 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
         'exactamente lo que AC-2 prohíbe — o el marco cambió, y entonces se re-sortea y se\n' +
         're-etiqueta, no se ajusta la lista.\n',
     ).toEqual({ sobran: [], faltan: [] });
+  });
+
+  it('G-C17e: las ETIQUETAS de la muestra son las del commit CIEGO, sin una sola movida', () => {
+    // 🔴 EL AGUJERO QUE ESTE CONTROL CIERRA, y lo falsificó el re-AR de esta HU
+    // con DOS ataques, cada uno de dos ediciones, y los dos dejaron el gate
+    // ENTERO en verde (los dos `tsc`, `lint` y la suite completa):
+    //   · Ataque A — el `label` de un sitio pasa de `CITA` a `RUIDO`, se borra su
+    //     `target`, y el falso negativo publicado baja en uno. Un error del
+    //     clasificador desaparece del registro sin dejar rastro.
+    //   · Ataque B, el grave — el `target` declarado del único falso positivo
+    //     medido de la HU se mueve hasta lo que el clasificador contesta, y el
+    //     tuple publicado se ajusta. El FP se lava a acierto y la precisión
+    //     publicada salta a 14 de 14.
+    // `G-C17d` no los ve, y su docblock ya lo dice: mira los SITIOS, no las
+    // etiquetas. `G-C17b` tampoco, porque compara la derivación contra un
+    // literal que el atacante edita en la misma maniobra.
+    //
+    // Lo que este control agrega es lo único que esos dos ataques no pueden
+    // sobrevivir: las 120 etiquetas valen porque se escribieron cuando
+    // `classifyBareCite` no existía en el árbol, así que se CONGELAN contra ese
+    // commit —`SAMPLE_BLIND_COMMIT`— y cualquier línea de sitio o de etiqueta
+    // que se agregue, se borre o cambie sale roja con su texto al lado.
+    //
+    // ── QUÉ CUBRE, EXACTAMENTE ─────────────────────────────────────────────
+    // Las líneas de `test/cited-lines-guard.sample.ts` indentadas con CUATRO
+    // espacios cuyo campo es `file`, `line`, `cite`, `form`, `nth`, `label` o
+    // `target`: son los campos de las entradas de `RESERVED_SAMPLE` y en ese
+    // archivo no hay ninguna otra línea con esa indentación y esos nombres (los
+    // de la `interface` van con `readonly` y a dos espacios). Se derivan del
+    // `git diff` contra el commit ciego, no de las posiciones: reformatear un
+    // docblock o agregar una función no lo despierta.
+    //
+    // ── QUÉ **NO** CUBRE. Decirlo al revés sería afirmar de más ────────────
+    //   · El `reason`. Es la prosa de evidencia y se puede corregir sin tocar el
+    //     veredicto; un `reason` reescrito pasa por acá.
+    //   · La CORRECCIÓN de las etiquetas. Esto afirma que son LAS MISMAS, no que
+    //     estén bien. Una etiqueta equivocada desde el día uno lo sigue estando,
+    //     y es deliberado: un oráculo se conserva, no se mejora.
+    //   · Mover `SAMPLE_BLIND_COMMIT` hacia adelante, que descongela la muestra
+    //     entera. Ningún guardián puede decidir eso; queda como una línea
+    //     visible en el diff, que es donde tiene que estar el juicio humano.
+    //   · Todo lo demás del repo: mira un solo archivo.
+    const SAMPLE_FILE = 'test/cited-lines-guard.sample.ts';
+    const CAMPO_ORACULO = /^ {4}(?:file|line|cite|form|nth|label|target):/;
+
+    // Control positivo del INSTRUMENTO. Sin esto, un patrón que dejó de matchear
+    // —o un path equivocado— daría CERO líneas movidas y verde por vacío, que es
+    // el modo de falla clásico de un barrido que sólo verifica una ausencia.
+    const declaradas = readTracked(SAMPLE_FILE)
+      .split('\n')
+      .filter((l) => CAMPO_ORACULO.test(l) && l.startsWith('    label:')).length;
+    expect(
+      declaradas,
+      'El patrón de campos dejó de encontrar las etiquetas de `RESERVED_SAMPLE` en el\n' +
+        'archivo. Mientras eso pase, el control de abajo da verde sin mirar nada.\n',
+    ).toBe(RESERVED_SAMPLE.length);
+
+    const diff = execFileSync(
+      'git',
+      ['diff', '--no-color', '-U0', SAMPLE_BLIND_COMMIT, '--', SAMPLE_FILE],
+      { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+    );
+    const movidas = diff
+      .split('\n')
+      .filter((l) => (l.startsWith('+') || l.startsWith('-')) && !/^(\+\+\+|---) /.test(l))
+      .filter((l) => CAMPO_ORACULO.test(l.slice(1)));
+    expect(
+      movidas,
+      'Cambió una línea de SITIO o de ETIQUETA de `RESERVED_SAMPLE` respecto del commit\n' +
+        'ciego. Esas 120 etiquetas se escribieron ANTES de que `classifyBareCite`\n' +
+        'existiera y todo su valor está en eso: ajustarlas ahora —aunque sea «para\n' +
+        'corregirlas»— convierte cualquier error del clasificador en un acierto, y el\n' +
+        'resto del gate no se entera.\n' +
+        'Si una etiqueta está mal, NO se edita: se declara en el censo y se cuenta como\n' +
+        'error. Si la muestra tiene que cambiar, se re-sortea y se re-etiqueta entera en\n' +
+        'un commit propio, y recién ahí se mueve `SAMPLE_BLIND_COMMIT` con el motivo\n' +
+        'escrito al lado de la constante.\n' +
+        'Abajo, las líneas movidas: `-` es lo que decía el commit ciego, `+` lo que dice\n' +
+        'el árbol de hoy.\n',
+    ).toEqual([]);
   });
 
   it('G-C17b: la MUESTRA RESERVADA — los números se re-derivan, no se leen del censo', () => {

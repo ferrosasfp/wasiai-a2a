@@ -21,8 +21,26 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
+      # ⛔ NO SAQUES `fetch-depth: 0`, aunque el clon tarde más. Tres guards de
+      # `test/cited-lines-guard.test.ts` leen HISTORIA, no el árbol: `G-C17b` y
+      # `G-C17d` derivan el marco y el sorteo de la muestra reservada desde el
+      # commit base (`SAMPLE_BASE_COMMIT`), y `G-C17e` compara las 120 etiquetas
+      # contra el commit ciego (`SAMPLE_BLIND_COMMIT`) con un `git diff`. Con un
+      # clon somero esos SHA no existen y los tres mueren con `fatal: bad object`
+      # / `fatal: not a tree object` (exit 128), que ni siquiera se lee como un
+      # fallo de aserción.
+      # El valor va EXPLÍCITO a propósito: `actions/checkout` documenta
+      # `fetch-depth` con default 1 («only a single commit is fetched»), pero el
+      # default de una acción de terceros no es una precondición verificada y el
+      # gate del repo no puede depender de que no cambie.
+      # Medido en un clon `--depth 1` real de esta rama: trae 1 commit, y el
+      # comando exacto de `G-C17e` sale `fatal: bad object 5c9f383…`. Y el CI
+      # verde de `main` no lo delata: ningún test de `main` clava un SHA, así
+      # que esto no se veía hasta el push de la rama.
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # historia completa: ver el bloque de arriba
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -89,8 +107,16 @@ jobs:
     # INTEGRATION_TEST_DB_URL (absent here), so coverage reflects the unit
     # suite only and does not block on a live database.
     steps:
+      # ⛔ `fetch-depth: 0` acá TAMBIÉN, y por el mismo motivo que en `build-test`
+      # (ver el bloque largo de arriba): este job corre la MISMA suite con
+      # coverage, así que `G-C17b`, `G-C17d` y `G-C17e` se ejecutan acá igual y
+      # también necesitan `SAMPLE_BASE_COMMIT` y `SAMPLE_BLIND_COMMIT` en el
+      # clon. Arreglar un solo checkout es peor que no arreglar ninguno: deja un
+      # verde parcial y un rojo que se lee como un problema de coverage.
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # historia completa: ver `build-test`
 
       - name: Setup Node.js
         uses: actions/setup-node@v6

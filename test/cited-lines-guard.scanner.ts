@@ -693,6 +693,19 @@ export interface BareVerdict {
  *        `FP-2`/`FP-3` salen `INDECIDIBLE`, y la muestra reservada los etiqueta
  *        `INDECIDIBLE` a mano ⇒ **son aciertos**. Lo que los protege es que sus
  *        párrafos nombran DOS archivos locales, no uno.
+ *        ⚠️ **EL PATRÓN DE «REPO AJENO», sin el cual ese 13 es un número que
+ *        hay que adivinar** — CD-1: ningún número sin su perímetro Y su
+ *        patrón. Es: el párrafo que devuelve `paragraphOf` contiene, COMO
+ *        SUBSTRING, alguno de estos CINCO nombres del ecosistema,
+ *          /wasiai-remittance-agents|wasiai-v2|wasiai-facilitator|wasiai-agentkey|chaski-v3/
+ *        en cualquier forma, hostnames incluidos: uno de los 13 es un
+ *        `wasiai-facilitator-production.up.railway.app` de un
+ *        `scripts/smoke-downstream-x402.mjs`, que no tiene forma de path.
+ *        **Con otra definición el número es OTRO, y por eso el patrón es parte
+ *        del número**: sólo con `wasiai-remittance-agents` —el único repo que
+ *        este mismo docblock nombra— son **4**; agregando `chaski-v3`, **6**;
+ *        exigiendo la forma `<repo>/(src|test|scripts)/`, **6**. Las cuatro
+ *        definiciones re-derivadas sobre el mismo perímetro de 1152.
  *        ⇒ El modo se declara porque un párrafo con un solo archivo local lo
  *        produciría, no porque se haya observado. Ver §7.4 del censo.
  *  (ii)  EL VALOR SEMÁNTICO. Esta cascada dice a qué ARCHIVO apunta el token.

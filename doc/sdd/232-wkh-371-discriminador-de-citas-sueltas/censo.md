@@ -279,8 +279,30 @@ $ git show 5c9f383:test/cited-lines-guard.sample.ts | grep -c "    label: "
 > ⚠️ **Lo que este mecanismo NO garantiza**, y decirlo al revés sería prosa que afirma de más: quien
 > etiquetó conocía las reglas de la cascada, porque etiquetar exige saber qué es una cita. Eso es
 > inevitable. **La independencia es de la MUESTRA y del MOMENTO, no de la mente del que etiqueta.**
-> Lo que sí queda cerrado es lo que AC-2 prohíbe: que la muestra sea la misma de la que salieron las
-> reglas, y que las etiquetas se ajusten después de ver la salida.
+> Lo que sí queda cerrado son las dos cosas que AC-2 prohíbe, **cada una con su guardián**, porque
+> el orden de los commits por sí solo es prosa que hay que auditar a mano:
+> · que la muestra sea la misma de la que salieron las reglas → los SITIOS los re-sortea `G-C17d`;
+> · que las etiquetas se ajusten después de ver la salida → las ETIQUETAS las congela **`G-C17e`**
+>   contra el blob de `SAMPLE_BLIND_COMMIT`, campo por campo (`file`, `line`, `cite`, `form`, `nth`,
+>   `label`, `target`), derivándolo de un `git diff` contra ese commit.
+
+🔴 **Esta frase decía «queda cerrado» cuando NO lo estaba, y el re-AR lo demostró ejecutando dos
+ataques que dejaron el gate ENTERO en verde** (los dos `tsc`, `lint` y la suite completa):
+
+| | qué hacía, en dos ediciones | qué lograba |
+|---|---|---|
+| A | un `label` de `CITA` a `RUIDO` borrando su `target`, y el falso negativo publicado baja en uno | un error del clasificador desaparece del registro |
+| B | el `target` del único FP medido se mueve hasta lo que el clasificador contesta, y se ajusta el tuple | **el FP se lava a acierto y la precisión publicada salta a 14 de 14** |
+
+Los dos mueren hoy en `G-C17e`, y **sólo** en `G-C17e` — reproducidos los dos: 22 tests verdes y 1
+rojo en cada corrida, con las líneas movidas impresas (`-` el commit ciego, `+` el árbol de hoy).
+`G-C17d` no los veía y nunca prometió verlos: guarda los SITIOS, y su docblock lo dice.
+
+> ⚠️ Y lo que `G-C17e` **no** cubre, que va escrito en su propio docblock: el `reason` (prosa de
+> evidencia, se puede corregir sin tocar el veredicto); la **corrección** de las etiquetas —afirma
+> que son LAS MISMAS, no que estén bien—; y mover `SAMPLE_BLIND_COMMIT` hacia adelante, que
+> descongela la muestra entera y queda como una línea visible en el diff, que es donde tiene que
+> estar el juicio humano.
 
 **El marco**, derivado por `sampleFrame()` contra el commit base:
 
@@ -447,10 +469,37 @@ legítima, que es justamente lo que pudre los candados.
 |---|---|---|---|---|---|
 | FP-1 | `src/services/spend-policy.ownership.test.ts:10` `` `:190` `` | `src/services/spend-policy.ts` | `src/routes/auth/spend-policy.ts` | D3a | El párrafo nombra el path completo de la RUTA (`src/routes/auth/spend-policy.ts:79`) y el del SERVICIO sólo por basename homónimo. La máquina se queda con el que resuelve; el humano sabe cuál es cuál por el resto de la sección |
 
-**Y AC-1 pide ≥3 falsos positivos citados. Se cumple UNO. Se declara que no se cumple**, en vez de
-buscar dos más hasta llegar al número: un FP inventado para llegar a 3 es la misma clase de defecto
-que un destino inventado. El denominador dice por qué: sobre 120 sitios etiquetados, el clasificador
-emite `CITA` **15 veces** y se equivoca **1**; no hay tres errores que citar porque no los hay.
+**Y AC-1 pide ≥3 falsos positivos citados. Sobre la muestra reservada se cumple UNO, y se declara
+que no se cumple**, en vez de buscar dos más hasta llegar al número: un FP inventado para llegar a 3
+es la misma clase de defecto que un destino inventado. **Esa decisión no cambia.**
+
+⚠️ **Lo que cambia es el MOTIVO, porque el que estaba escrito acá —«no hay tres errores que citar
+porque no los hay»— es falso.** La muestra reservada no es el instrumento que el SDD designó para
+cazar falsos positivos. §8.6 designó otro: *«se cazan en el censo COMPLETO de la clase más riesgosa,
+no por muestreo. Los tokens que llegan a D5 son la clase donde un FP es más probable»*. **Y ese
+censo entregó 17:**
+
+```
+D5_CENSUS n=36 → AUTO 19 · OTRO 13 · RUIDO 4      equivocados = 17 (47 %)
+los 17, con sitio y motivo (> 40 chars); los 13 `OTRO`, además, con su `realTarget`
+testigo mecánico: G-C17c (verde)
+```
+
+Errores para citar había de sobra. **La frase correcta es: después de degradar D5 a `INDECIDIBLE`,
+no quedan tres en el clasificador QUE SE ENTREGA** — porque esos 17 dejaron de emitir `CITA` y
+pasaron a ser silencio. Sobre los 120 sitios etiquetados, el clasificador entregado emite `CITA`
+**15 veces** y se equivoca **1**.
+
+**Los dos caminos quedan a la vista. El AC lo resuelve QA, no este censo:**
+
+| lectura de AC-1 | instrumento | resultado |
+|---|---|---|
+| sobre el clasificador **que se entrega** | muestra reservada (§7.3), con D5 ya degradada | **1 FP citado ⇒ AC-1 NO se cumple** |
+| sobre la cascada **medida** — la que §8.6 tenía delante cuando designó el censo de la clase más riesgosa | `D5_CENSUS`: 36 sitios abiertos a mano, 17 equivocados | **17 FP citados con sitio y motivo ⇒ AC-1 se cumple con holgura** |
+
+⛔ Lo que este censo NO hace es elegir. La degradación de D5 es POSTERIOR a la medición, y si un
+falso positivo que el árbol entregado ya no puede emitir sigue contando para AC-1 es una decisión de
+alcance, no de medición.
 
 #### El modo cross-repo: **previsto, con 0 instancias medidas**
 
@@ -465,6 +514,26 @@ tokens con un repo ajeno nombrado en su párrafo : 13
 de ésos, con veredicto CITA                     : 0
     RUIDO [D1] 6 · DATO [D2] 3 · INDECIDIBLE [D6] 2 · INDECIDIBLE [RESIDUO] 2
 ```
+
+**El patrón de «repo ajeno», sin el cual ese 13 hay que adivinarlo** (CD-1: ningún número sin su
+perímetro Y su patrón). El párrafo que devuelve `paragraphOf` contiene, **como substring**, alguno
+de estos **cinco** nombres del ecosistema:
+
+```
+/wasiai-remittance-agents|wasiai-v2|wasiai-facilitator|wasiai-agentkey|chaski-v3/
+```
+
+Vale cualquier forma, **hostnames incluidos**: uno de los 13 es un
+`wasiai-facilitator-production.up.railway.app` dentro de `scripts/smoke-downstream-x402.mjs`, que no
+tiene forma de path. ⚠️ **Con otra definición el número es OTRO** — las cuatro re-derivadas sobre el
+mismo perímetro de 1152 al commit base:
+
+| definición de «ajeno» | tokens |
+|---|---|
+| sólo `wasiai-remittance-agents` (el único repo que el docblock nombraba) | 4 |
+| + `chaski-v3` | 6 |
+| **+ `wasiai-v2`, `wasiai-facilitator`, `wasiai-agentkey`** | **13** ← el publicado |
+| cualquier `<repo>/(src\|test\|scripts)/` ajeno | 6 |
 
 **0 de 1152.** Lo que protege a los dos sitios de `capability-risk.ts` es que sus párrafos nombran
 **dos** archivos locales, no uno: D6 dispara antes que D3a. ⇒ **Queda declarado como modo previsto
@@ -567,6 +636,7 @@ D5 aportaba **2 aciertos y 5 destinos inventados**. Un destino inventado es peor
 | 1152 (universo del clasificador) | `scanSource` + `SELF_REFERENTIAL` | ⚠️ **parcial**: `G-C16` asserta que los 8 están DECLARADOS y son disjuntos del Corte A, **no** re-deriva el 1152 |
 | 1130 (marco) = P3 130 + P4 1000 | `sampleFrame` contra el commit base | ⚠️ **piso**: `G-C17d` re-deriva el marco y verifica `>= 60` por estrato; el 1130 exacto es una foto |
 | los 120 sitios sorteados | `drawReservedSample(frame, 'WKH-371')` | ✅ **`G-C17d`** — re-corre el sorteo y compara los 120 `siteKey` contra `RESERVED_SAMPLE`, en las dos direcciones |
+| las 120 ETIQUETAS (`label`/`target`) y sus sitios | `git diff` contra `SAMPLE_BLIND_COMMIT` | ✅ **`G-C17e`** — cero líneas de campo movidas desde el commit ciego; ⚠️ no mira el `reason` ni si la etiqueta es CORRECTA |
 | 13/14, 13/57, 1/1, 1/60 | `classifyBareCite` sobre `RESERVED_SAMPLE` | ✅ **`G-C17b` los RE-DERIVA y los compara contra los publicados acá** |
 | la matriz 4×4 de §7.2 y el censo de los 25 `DATO` | `classifyBareCite` sobre `RESERVED_SAMPLE` y sobre el perímetro | ⛔ **ninguno** — el scoring de `G-C17b` es binario y colapsa las 3 clases no-`CITA` |
 | recall **6/19** sobre el oráculo | `classifyBareCite` sobre `CITED_LINES` | ⚠️ **piso 2**, no igualdad: `G-C17` se pone rojo si cae de 2, **no** si el 6 cambia a 5 ó 7 |
@@ -751,27 +821,30 @@ La última sólo cambió DÍGITOS —ninguna línea nueva— y por eso cerró. *
 cualquier métrica autorreferente: escribir, re-medir, y corregir sólo dígitos hasta que el número
 deje de moverse.** Si la corrección agrega una línea, no cerró.
 
+**Re-medida otra vez después del fix-pack 2**, con el mismo instrumento y el mismo procedimiento.
+
 **Presupuesto del Story File: ≤ 2080 líneas.**
 
 | Archivo | Presupuesto | Inserciones | Borrados | Factor | De las cuales |
 |---|---|---|---|---|---|
-| `test/cited-lines-guard.sample.ts` (nuevo) | ≤ 780 | **1450** | 0 | 1,86× | **1158 son DATOS a mano** — del `export const RESERVED_SAMPLE` a su `];` |
-| `test/cited-lines-guard.test.ts` | ≤ 280 | **782** | 28 | **2,79×** | 10 controles nuevos (`G-C13`…`G-C19`) + los ítems 14 y 15 de no-cobertura |
-| `test/cited-lines-guard.scanner.ts` | ≤ 200 | **470** | 0 | **2,35×** | la cascada + su docblock de medición |
+| `test/cited-lines-guard.sample.ts` (nuevo) | ≤ 780 | **1472** | 0 | 1,89× | **1158 son DATOS a mano** — del `export const RESERVED_SAMPLE` a su `];` |
+| `test/cited-lines-guard.test.ts` | ≤ 280 | **869** | 28 | **3,10×** | 11 controles nuevos (`G-C13`…`G-C19`, con `G-C17e`) + los ítems 14 y 15 de no-cobertura |
+| `test/cited-lines-guard.scanner.ts` | ≤ 200 | **483** | 0 | **2,42×** | la cascada + su docblock de medición |
 | `test/cited-lines-guard.exceptions.ts` | ≤ 120 | **323** | 0 | **2,69×** | **267 son DATOS a mano** — el `D5_CENSUS`, sus 36 sitios con veredicto y motivo |
-| `doc/sdd/232-…/censo.md` (nuevo) | ≤ 420 | **859** | 0 | 2,05× | — |
-| `doc/sdd/232-…/auto-blindaje.md` (nuevo) | — | **297** | 0 | — | 16 entradas, 7 de ellas del fix-pack 1 |
+| `doc/sdd/232-…/censo.md` (nuevo) | ≤ 420 | **940** | 0 | 2,24× | — |
+| `doc/sdd/232-…/auto-blindaje.md` (nuevo) | — | **374** | 0 | — | 20 entradas: 7 del fix-pack 1 y 4 del fix-pack 2 |
 | `tsconfig.guards.json` (nuevo) | — | **53** | 0 | — | §13; 39 de las 53 son el docblock que dice qué mide y qué no |
+| `.github/workflows/ci.yml` | — | **26** | 0 | — | `fetch-depth: 0` en los DOS checkouts + el motivo: sin historia completa, `G-C17b`/`G-C17d`/`G-C17e` mueren con `fatal: bad object` (medido en un clon `--depth 1`) |
 | `src/` (comentarios) | ≤ 120 | **5** | 5 | 0,04× | 100 % comentario |
-| **TOTAL del trabajo de la HU** | **≤ 2080** | **4239** | **33** | **🔴 2,04×** | |
+| **TOTAL del trabajo de la HU** | **≤ 2080** | **4545** | **33** | **🔴 2,19×** | |
 | + `ar-report.md` y `cr-report.md` (de los revisores) | — | 335 | 0 | — | |
-| **TOTAL de la rama** | | **4574** | **33** | 2,20× | |
+| **TOTAL de la rama** | | **4880** | **33** | 2,35× | |
 
 ### 🔴 El factor pasó el 2×, así que la regla 10 obliga: justificar por escrito o recortar
 
 **Se justifica, y el desglose dice exactamente dónde está el exceso.** El F3 original cerró en
 **1,81×** re-medido (publicaba 1,56×, con el instrumento equivocado); el fix-pack 1 agregó **931
-líneas** y lo empujó a **2,04×**. Las tres
+líneas** y lo empujó a **2,04×**; el fix-pack 2 agregó **306** y lo dejó en **2,19×**. Las cuatro
 piezas del exceso, con su tamaño:
 
 1. **Los datos etiquetados a mano: 1425 líneas** (1158 de la muestra + 267 del censo de D5).
@@ -789,6 +862,14 @@ piezas del exceso, con su tamaño:
    de config) y el resto es **la corrección de seis números publicados y la explicación de por qué
    estaban mal**. Esa proporción es incómoda y va escrita: **el fix-pack de una HU cuyos seis
    bloqueantes eran de prosa produce, necesariamente, casi toda prosa.**
+4. **El fix-pack 2: 306 líneas**, medidas como lo que CRECE el total contra el commit base (el mismo
+   instrumento de la tabla, y no el `numstat` contra el commit anterior, que cuenta como borrado cada
+   dígito que esta misma sección corrige). De ésas, **39 son ejecutable o config** — el `it` de
+   `G-C17e` con sus 37 líneas no-comentario, la import de `SAMPLE_BLIND_COMMIT`, y las **2** de
+   `fetch-depth: 0`. El resto son
+   tres cosas y ninguna es implementación: el docblock del control (qué cubre y qué **no**), el
+   patrón del 13 escrito en tres sitios, y el motivo de AC-1 reescrito con sus dos caminos. **La
+   proporción vuelve a ser incómoda por la misma razón, y se declara igual.**
 
 **La pregunta que decide** —*¿qué parte de esto seguiría existiendo si lo escribiera alguien que ya
 conoce esta librería?*— y su respuesta medida: **las 1425 líneas de datos, enteras**; los ~180 de
