@@ -533,3 +533,37 @@ oración **usa** el número.
   arreglarlos es otra HU, y el criterio para priorizarla está en `TD-371-AUTOCITA` (§8).
 - ⛔ Ninguna línea de código ejecutable. El diff de `src/` es **100 % comentario**, verificado línea
   por línea con `git diff -U0`.
+
+---
+
+## 12 · Escala del diff, contrastada contra el presupuesto (regla 10 de `CLAUDE.md`)
+
+**Presupuesto del Story File: ≤ 2080 líneas. Diff real: 3249 inserciones, 7 borrados. Factor 1,56×**,
+por debajo del 2× que obliga a justificar por escrito o recortar. Se justifica igual, porque el
+exceso silencioso es el hallazgo y el justificado es información.
+
+| Archivo | Presupuesto | Real | Factor | De las cuales |
+|---|---|---|---|---|
+| `test/cited-lines-guard.sample.ts` (nuevo) | ≤ 780 | **1421** | 1,8× | **1243 son DATOS a mano** (las 120 etiquetas) |
+| `test/cited-lines-guard.scanner.ts` | ≤ 200 | **391** | 2,0× | **166 ejecutables**, 225 docblock |
+| `test/cited-lines-guard.test.ts` | ≤ 280 | **502** | 1,8× | 8 controles nuevos + el ítem 15 de no-cobertura |
+| `test/cited-lines-guard.exceptions.ts` | ≤ 120 | **321** | 2,7× | **275 son DATOS a mano** (los 36 sitios del censo de D5) |
+| `doc/sdd/232-…/censo.md` (nuevo) | ≤ 420 | **535** | 1,3× | — |
+| `src/` (comentarios) | ≤ 120 | **5** | 0,04× | 100 % comentario |
+
+**La pregunta que decide** —*¿qué parte de esto seguiría existiendo si lo escribiera alguien que ya
+conoce esta librería?*— y su respuesta medida:
+
+- **Las ~1518 líneas de datos etiquetados a mano seguirían existiendo enteras** (1243 de la muestra +
+  275 del censo de D5). No son implementación: **son la medición**, y no hay forma de abreviarlas sin
+  destruir AC-2 y CD-19. Un clasificador sin ellas es exactamente el 100 % de precisión del F1.
+- **El código ejecutable nuevo del escáner son 166 líneas**, por debajo de las ~250 que el
+  presupuesto anticipaba.
+- **El sobrecosto real está en `exceptions.ts` (2,7×)**, y tiene una causa nombrable: el Story File
+  esperaba que D5 se verificara sobre 94 sitios y que la mayoría quedara implícita; el censo terminó
+  siendo la evidencia de la degradación, o sea que cada uno de los 36 sitios tuvo que quedar escrito
+  con su veredicto y su motivo. **Es el precio de que CD-19 sea auditable en vez de una afirmación.**
+- **El docblock del escáner (225 líneas) es el otro bloque grande**, y también es medición: la
+  degradación de D5 con sus dos lecturas del umbral, los dos defectos del propio instrumento, y la
+  lista de lo que la cascada NO decide. Borrarlo dejaría un clasificador que parece más seguro de lo
+  que es.
