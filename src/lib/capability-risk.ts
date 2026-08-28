@@ -82,7 +82,7 @@ export const DISBURSEMENT_CAPABILITIES: ReadonlySet<string> = new Set([
  *     bdwv (`doc/sdd/_INDEX.md:144`).
  *   · `kyc-hosted-redirect`, `legacy-single-shot-kyc` — el MISMO validador de
  *     KYC, declaradas en `wasiai-remittance-agents/src/manifest/registry.ts:76`
- *     y `:77`. Su docblock (`:71-75`) dice que son ADITIVAS a las cuatro de
+ *     y `wasiai-remittance-agents/src/manifest/registry.ts:77`. Su docblock (`wasiai-remittance-agents/src/manifest/registry.ts:71-75`) dice que son ADITIVAS a las cuatro de
  *     arriba y que declaran POR QUÉ CAMINO se hace el trabajo (rol vs camino),
  *     no un trabajo nuevo: una es el flujo hospedado donde el documento lo
  *     escanea la persona en la pantalla del proveedor, la otra es la marca del
@@ -97,7 +97,7 @@ export const DISBURSEMENT_CAPABILITIES: ReadonlySet<string> = new Set([
  *   · `kyc-session-create`, `kyc-decision-read` — WKH-366. Son del MISMO
  *     validador de KYC, partido en los dos pasos del dialecto compose y
  *     declaradas en `wasiai-remittance-agents/src/manifest/registry.ts:275` y
- *     `:300`. Vale palabra por palabra el argumento de las dos de arriba: de ese
+ *     `wasiai-remittance-agents/src/manifest/registry.ts:300`. Vale palabra por palabra el argumento de las dos de arriba: de ese
  *     agente ya está escrito acá que «autoriza o rechaza; no paga», y ninguna de
  *     las dos nombra un desembolso — una crea la pantalla hospedada donde la
  *     persona escanea su documento, la otra LEE el veredicto de esa sesión.

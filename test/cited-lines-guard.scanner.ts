@@ -73,12 +73,74 @@ import ts from 'typescript';
 /** Las cuatro formas sintácticas en que este repo escribe una cita. */
 export type CiteForm = 'P1' | 'P2' | 'P3' | 'P4';
 
+/**
+ * Las cuatro clases en que se puede caer un `:N` SUELTO (P3/P4).
+ *
+ * Vive acá, y no en el archivo de la muestra ni en el del guardián, para que el
+ * que ETIQUETA A MANO y el que CLASIFICA hablen exactamente el mismo
+ * vocabulario. Dos uniones homónimas declaradas en dos archivos coinciden el
+ * día que se escriben y divergen en la próxima corrección de borde.
+ *
+ *  · `CITA`        — apunta a una línea de un archivo del repo.
+ *  · `RUIDO`       — no es una cita: puerto, chain id, timestamp, valor de un
+ *                    campo de un objeto escrito en la prosa.
+ *  · `DATO`        — el token está DENTRO DE UN LITERAL de string, o sea que no
+ *                    es una afirmación del texto sino contenido citado. Es
+ *                    exactamente lo que decide D2 —el carácter anterior al `:`
+ *                    es `'` o `"`— y nada más que eso.
+ *  · `INDECIDIBLE` — el contexto no alcanza para decidir a QUÉ archivo apunta.
+ *                    Es una respuesta legítima y es el bug del issue #178.
+ *
+ * 🔴 LA DEFINICIÓN DE `DATO` SE ENSANCHÓ POR UN CENSO, no por comodidad. Decía
+ * *«el VALOR de un campo `cite:` / `quote:` de un registro, o sea la cita de
+ * OTRO archivo transcripta como dato»*, y eso es MÁS ANGOSTO que lo que D2
+ * implementa. Censo completo de los 25 sitios que D2 clasifica en el perímetro
+ * (`src`+`test`+`scripts` sin los 8 auto-referentes), abiertos uno por uno:
+ * **los 25 son valores dentro de un literal JSON o de un string de shell**
+ * (`'{"a":2,"z":1}'`, `'{"selfHostCount":1,…}'`, `-d '{"goal":"test",…}'`).
+ * **Ninguno es la cita de otro archivo.** La definición vieja acertaba 0 de 25.
+ *
+ * ⚠️ CONSECUENCIA, Y VA ESCRITA PORQUE CAMBIA LO QUE SE PUEDE AFIRMAR: así
+ * definida, `DATO` SOLAPA con `RUIDO`. Un `:1` dentro de `'{"a":1}'` es las dos
+ * cosas —no es una cita, y está dentro de un literal—, y la cascada devuelve
+ * `DATO` sólo porque D2 evalúa antes que nadie. En la muestra reservada de 120
+ * sitios etiquetados a mano hay **0 `DATO`**: los 4 sitios donde D2 dispara
+ * están etiquetados `RUIDO`, y el humano no se equivocó. Las dos etiquetas son
+ * defendibles sobre el mismo token.
+ *
+ * ⛔ POR ESO LA PRECISIÓN PUBLICADA ES LA DE LA CLASE `CITA`, Y SÓLO ESA. El
+ * scoring de `G-C17b` es binario (`pred = label === 'CITA'`), así que colapsa
+ * las otras tres clases y **no mide** si `RUIDO`, `DATO` e `INDECIDIBLE` están
+ * bien repartidas entre sí. La matriz 4×4 completa —que sí muestra las 6
+ * discrepancias que el binario esconde— está publicada en
+ * `doc/sdd/232-wkh-371-discriminador-de-citas-sueltas/censo.md`, §7.2.
+ * ⛔ NO se angostó la REGLA para que coincidiera con la definición vieja:
+ * distinguir «literal de string» de «campo `cite:` de un registro» exige mirar
+ * el nombre de la clave, o sea una heurística nueva sobre el texto — la misma
+ * clase de invención que esta cascada existe para no hacer.
+ */
+export type BareLabel = 'CITA' | 'RUIDO' | 'DATO' | 'INDECIDIBLE';
+
 /** Una cita `archivo:línea` encontrada en el texto de un archivo. */
 export interface FoundCite {
   /** Ruta tal como se la pasaron a `scanSource`. */
   readonly file: string;
   /** Línea 1-based del citador donde aparece el token. DERIVADA, no se guarda. */
   readonly line: number;
+  /**
+   * Columna 0-based del `:` dentro del FUENTE ENTERO (no dentro de la línea).
+   *
+   * 🔴 EXISTE POR UN DEFECTO MEDIDO, no por completitud. `classifyBareCite`
+   * ubicaba el token con `linea.indexOf(token)`, y eso devuelve la PRIMERA
+   * aparición del substring, no la del token. Medido en
+   * `src/lib/url-validator.ts:129`, cuya línea es
+   * `` `::1`, `0:0:0:0:0:0:0:1` — loopback ``: el token real es el `:1` final
+   * (carácter anterior `0` ⇒ RUIDO por D1), pero `indexOf(':1')` caía dentro de
+   * `` `::1` `` (carácter anterior `:`), la regla D1 no disparaba y el token
+   * terminaba clasificado como una CITA a la línea 1 de su propio archivo.
+   * Un token mal ubicado no da error: da una respuesta plausible.
+   */
+  readonly col: number;
   /** El token literal, tal como está escrito. P3 incluye sus backticks. */
   readonly cite: string;
   readonly form: CiteForm;
@@ -175,6 +237,7 @@ export function scanSource(src: string, file: string): FoundCite[] {
     found.push({
       file,
       line: lineOf(start),
+      col: start,
       cite: token,
       form: pathText.includes('/') ? 'P1' : 'P2',
       path: pathText,
@@ -196,6 +259,7 @@ export function scanSource(src: string, file: string): FoundCite[] {
     found.push({
       file,
       line: lineOf(start),
+      col: start,
       cite: backticked ? `\`${m[0]}\`` : m[0],
       form: backticked ? 'P3' : 'P4',
       num: Number(m[1]),
@@ -312,6 +376,425 @@ export function citeMatchesTarget(fromFile: string, token: string, target: strin
   }
   const base = target.slice(target.lastIndexOf('/') + 1);
   return base === raw;
+}
+
+// ── EL DISCRIMINADOR DE CITAS SUELTAS (P3/P4) ──────────────────────────────
+//
+// 🔴 EL AGUJERO QUE ESTAS TRES FUNCIONES EXISTEN PARA TAPAR, y está seis
+// funciones más arriba: `citeMatchesTarget` abre con `if (raw === null) return
+// true`, y `citePathOf` devuelve `null` para TODO token P3/P4. O sea que el
+// cruce mecánico entre un `:N` suelto y el `target` que un humano declaró a
+// mano devuelve `true` SIN MIRAR NADA. `E-CITE_TARGET_MISMATCH` no se puede
+// disparar jamás para esos tokens. Lo que sigue es lo que permite cruzarlos.
+//
+// ⛔ Y LO QUE ESTAS FUNCIONES NO PUEDEN HACER, POR CONTRATO: usar
+// `citeTargetIfTracked` como resolvedor. Su último renglón es
+// `if (!raw.includes('/')) return candidates[0] ?? null;` — con homónimos elige
+// el PRIMERO EN SILENCIO, y no es un borde raro: medido contra el índice de
+// git, el basename `sdd.md` tiene más de cien candidatos. Un resolvedor que
+// contesta «uno cualquiera de esos» es peor que uno que dice «no sé», porque su
+// respuesta pasa los controles. Por eso `resolveContextTarget` devuelve
+// `'AMBIGUOUS'` y NUNCA `string | null`: el tipo hace imposible confundir «no
+// hay contexto» con «hay demasiado».
+
+/** La naturaleza de una línea, para cortar el párrafo (DT-10). */
+type LineKind = 'blank' | 'deco' | 'comment' | 'code';
+
+/** Caracteres que forman una regla, una caja o un separador. */
+const DECO_ONLY = /^[\s*/─━—–\-=~_#·.]*$/;
+
+function lineKind(raw: string): LineKind {
+  const t = raw.trim();
+  if (t === '') return 'blank';
+  const isComment = t.startsWith('*') || t.startsWith('//') || t.startsWith('/*');
+  if (DECO_ONLY.test(t)) return 'deco';
+  return isComment ? 'comment' : 'code';
+}
+
+/**
+ * El PÁRRAFO que rodea a `line`: la corrida máxima de líneas contiguas de la
+ * misma naturaleza, cortada por (a) línea vacía, (b) línea de sólo decoración y
+ * (c) cambio de naturaleza entre «línea que es SÓLO comentario» y «línea con
+ * código».
+ *
+ * 🔴 EL PUNTO (c) NO ES COSMÉTICO, Y ESTÁ MEDIDO. Sin él, en un archivo como
+ * `cited-lines-guard.citations.ts` —una lista de literales de objeto SIN
+ * líneas en blanco entre entradas— el párrafo se derrama a través de varias
+ * entradas y arrastra los nombres de archivo de las entradas VECINAS. El
+ * síntoma no es un error: es un `INDECIDIBLE` por «el párrafo nombra 5
+ * archivos», o sea una respuesta plausible construida sobre contexto ajeno.
+ *
+ * ⚠️ Lo que (c) NO separa: el comentario al final de una línea de código. Esa
+ * línea es `code` entera, comentario incluido, así que un `// … (:397)` pegado
+ * a un `'insert:sin-filtro',` se agrupa con el código de alrededor y toma como
+ * contexto los archivos que nombren las otras líneas del literal. Es
+ * deliberado —ahí es exactamente donde suele estar el contexto— y es la misma
+ * dirección de falla que `stripComments` declara en su docblock.
+ */
+export function paragraphOf(src: string, line: number): string {
+  const lines = src.split('\n');
+  if (line < 1 || line > lines.length) return '';
+  const kind = lineKind(lines[line - 1] as string);
+  if (kind === 'blank' || kind === 'deco') return lines[line - 1] as string;
+  let from = line;
+  while (from > 1 && lineKind(lines[from - 2] as string) === kind) from -= 1;
+  let to = line;
+  while (to < lines.length && lineKind(lines[to] as string) === kind) to += 1;
+  return lines.slice(from - 1, to).join('\n');
+}
+
+/**
+ * Un path escrito en la prosa SIN `:N` detrás: `` `evidence.ts` ``,
+ * `src/services/compose.ts`, `../adapters/solana/chain.ts`.
+ *
+ * Es la MISMA gramática de path que `FILE_CITE_RE`, sin el `:(\d+)`. Se
+ * escribe una sola vez y se deriva de la otra sería mejor todavía, pero las
+ * dos son literales de regex y JS no compone regex sin `source`; lo que sí se
+ * hace es NO duplicar el criterio de resolución: `mentionCandidates` es la
+ * única resolución, y `citeTargetIfTracked` no se toca ni se llama.
+ */
+const FILE_NAME_RE = /(?:[A-Za-z0-9_.@-]+\/)*[A-Za-z0-9_@-]*(?:\.[A-Za-z0-9_-]+)+/g;
+
+/**
+ * TODOS los archivos trackeados que un path escrito en la prosa podría nombrar.
+ *
+ * 🔴 Devuelve la LISTA, no un elemento. Es la diferencia con
+ * `citeTargetIfTracked`, y es toda la corrección: dos candidatos son un dato
+ * («este contexto no alcanza»), y quedarse con el primero convierte ese dato en
+ * una afirmación falsa que después pasa todos los controles.
+ */
+export function mentionCandidates(
+  fromFile: string,
+  raw: string,
+  tracked: ReadonlySet<string>,
+  byBasename: ReadonlyMap<string, readonly string[]>,
+): readonly string[] {
+  if (raw.startsWith('./') || raw.startsWith('../')) {
+    const resolved = normalizeTarget(fromFile, raw);
+    return resolved !== null && tracked.has(resolved) ? [resolved] : [];
+  }
+  // 🔴 EL PATH EXACTO GANA, y este renglón es un defecto MEDIDO de la primera
+  // versión de esta función, no una optimización. Sin él, `src/index.ts` —un
+  // path completo desde la raíz del repo, que existe tal cual en el índice—
+  // devolvía DOS candidatos, porque `packages/agent-sdk/src/index.ts` también
+  // termina en `/src/index.ts`. El resultado era `AMBIGUOUS` sobre un nombre
+  // que no tiene nada de ambiguo, y tres citas reales del árbol se perdían por
+  // eso. Un path que está en el índice TAL CUAL no necesita desempate: el
+  // sufijo es una coincidencia, la igualdad no.
+  if (tracked.has(raw)) return [raw];
+  const base = raw.slice(raw.lastIndexOf('/') + 1);
+  const candidates = byBasename.get(base) ?? [];
+  if (!raw.includes('/')) return candidates;
+  // Sufijo alineado por SEGMENTO: `lib/payment-spec-reader.ts` ↔
+  // `src/lib/payment-spec-reader.ts`. Es el mismo criterio que
+  // `citeMatchesTarget` acepta como consistente, y por eso puede devolver
+  // varios: ahí es una VERIFICACIÓN contra un target ya declarado a mano, acá
+  // es una RESOLUCIÓN sin nadie que la haya decidido. La misma pregunta, dos
+  // usos, y sólo uno de los dos puede darse el lujo de quedarse con el primero.
+  return candidates.filter((f) => f.endsWith(`/${raw}`));
+}
+
+/** Lo que un párrafo nombra: lo que se pudo resolver, y lo que quedó ambiguo. */
+export interface ContextScan {
+  /** Targets distintos que se resolvieron a UN candidato. */
+  readonly targets: readonly string[];
+  /** Los paths escritos que dieron MÁS de un candidato (homónimos). */
+  readonly ambiguous: readonly string[];
+}
+
+/**
+ * Los archivos que un párrafo nombra, en UNA de las dos formas.
+ *
+ * `mode`:
+ *   · `'withLine'` — nombrados CON `:N` (`compose.ts:343`). Es D3a.
+ *   · `'bare'`     — nombrados SIN `:N` (`` `evidence.ts` ``). Es D3b.
+ *
+ * La forma `'withLine'` NO re-implementa el reconocimiento: llama a
+ * `scanSource` sobre el párrafo y se queda con los P1/P2. Un segundo criterio
+ * para la misma pregunta coincide el día que se escribe y diverge en el
+ * próximo borde; en este archivo ya pasó una vez, y está documentado en
+ * `citeNamesFile`.
+ */
+export function scanContext(
+  paragraph: string,
+  fromFile: string,
+  tracked: ReadonlySet<string>,
+  byBasename: ReadonlyMap<string, readonly string[]>,
+  mode: 'withLine' | 'bare',
+): ContextScan {
+  const targets: string[] = [];
+  const ambiguous: string[] = [];
+  const add = (raw: string): void => {
+    const cands = mentionCandidates(fromFile, raw, tracked, byBasename);
+    if (cands.length === 1) {
+      const t = cands[0] as string;
+      if (!targets.includes(t)) targets.push(t);
+    } else if (cands.length > 1) {
+      if (!ambiguous.includes(raw)) ambiguous.push(raw);
+    }
+  };
+
+  if (mode === 'withLine') {
+    for (const hit of scanSource(paragraph, fromFile)) {
+      if (hit.path !== undefined) add(hit.path);
+    }
+    return { targets, ambiguous };
+  }
+
+  FILE_NAME_RE.lastIndex = 0;
+  for (let m = FILE_NAME_RE.exec(paragraph); m !== null; m = FILE_NAME_RE.exec(paragraph)) {
+    const start = m.index;
+    const prev = start > 0 ? (paragraph[start - 1] as string) : '';
+    // No arrancar en medio de un identificador ni de un path más largo.
+    if (IDENT_CHAR.test(prev) || prev === '/') continue;
+    const end = start + m[0].length;
+    // Con `:N` detrás es la otra forma: la cubre `'withLine'`, y contarla acá
+    // la duplicaría.
+    if (paragraph[end] === ':' && /\d/.test(paragraph[end + 1] ?? '')) continue;
+    add(m[0]);
+  }
+  return { targets, ambiguous };
+}
+
+/**
+ * El destino que el CONTEXTO determina, o por qué no lo determina.
+ *
+ * ⛔ El tipo de retorno NO puede ser `string | null`. Ése es exactamente el
+ * defecto de `citeTargetIfTracked`: colapsa «no hay» y «hay varios» en el mismo
+ * valor, y el que llama no puede distinguirlos ni queriendo.
+ *
+ * `'AMBIGUOUS'` cubre las DOS formas de tener demasiado contexto: el párrafo
+ * nombra más de un archivo distinto (D6), o nombra un basename con más de un
+ * candidato en el índice (D7). Las dos terminan en `INDECIDIBLE`; el motivo
+ * que las separa lo escribe `classifyBareCite`.
+ *
+ * ⚠️ Y D7 sólo decide cuando la ambigüedad es el ÚNICO contexto. Está medido:
+ * la versión gruesa —todo párrafo que contenga ALGÚN nombre ambiguo se declara
+ * indecidible— baja el recall a la mitad, porque casi todo párrafo largo
+ * menciona de paso algún `index.ts` o algún `payment.ts`. Si hay un contexto no
+ * ambiguo, gana el no ambiguo.
+ */
+export function resolveContextTarget(
+  paragraph: string,
+  fromFile: string,
+  tracked: ReadonlySet<string>,
+  byBasename: ReadonlyMap<string, readonly string[]>,
+  mode: 'withLine' | 'bare',
+): { target: string } | 'AMBIGUOUS' | null {
+  const scan = scanContext(paragraph, fromFile, tracked, byBasename, mode);
+  if (scan.targets.length === 1) return { target: scan.targets[0] as string };
+  if (scan.targets.length > 1) return 'AMBIGUOUS';
+  return scan.ambiguous.length > 0 ? 'AMBIGUOUS' : null;
+}
+
+/** El veredicto del discriminador sobre UN token suelto. */
+export interface BareVerdict {
+  /** EXACTAMENTE una de las cuatro clases. */
+  readonly label: BareLabel;
+  /** Presente si y sólo si `label === 'CITA'`. */
+  readonly target?: string;
+  /** El motivo legible, con el nombre de la regla que decidió. */
+  readonly why: string;
+  readonly rule: 'D1' | 'D2' | 'D3a' | 'D3b' | 'D5' | 'D6' | 'D7' | 'RESIDUO';
+}
+
+/**
+ * LA CASCADA. Clasifica un `:N` SUELTO (P3/P4) en una de cuatro clases.
+ *
+ * Orden de evaluación, y el orden importa. Es el del CÓDIGO de más abajo,
+ * re-leído renglón por renglón (el docblock anterior decía otro y era falso):
+ *   D1  el carácter anterior al `:` es alfanumérico o `_`  ⇒ RUIDO
+ *   D2  el carácter anterior es `'` o `"`                  ⇒ DATO
+ *   D6  el párrafo nombra MÁS DE UN archivo trackeado      ⇒ INDECIDIBLE
+ *   D3a el párrafo nombra EXACTAMENTE UN archivo, con `:N` ⇒ CITA
+ *   D3b ídem, nombrado sin `:N`                            ⇒ CITA
+ *   D7  el ÚNICO contexto son nombres homónimos            ⇒ INDECIDIBLE
+ *   D5  el párrafo no nombra ninguno y el `:N` cae dentro del propio archivo
+ *                                                          ⇒ CITA (auto-cita)
+ *   RESIDUO                                                ⇒ INDECIDIBLE
+ *
+ * 🔴 D6 VA ANTES QUE D3: la ambigüedad de VARIOS archivos gana. Al revés, un
+ * párrafo que nombra tres archivos devolvería el primero que el escáner
+ * encuentre, que es `candidates[0]` con otro disfraz.
+ *
+ * 🔴 D7 VA DESPUÉS QUE D3, Y NO ES UN DESCUIDO: si el párrafo trae un contexto
+ * NO ambiguo, ése gana, y el homónimo suelto no lo bloquea. La versión gruesa
+ * —cualquier nombre ambiguo en el párrafo ⇒ `INDECIDIBLE`— está medida y baja
+ * el recall a la mitad, porque casi todo párrafo largo menciona de paso algún
+ * `index.ts`. Por eso D7 sólo decide cuando la ambigüedad es lo ÚNICO que hay.
+ * ⚠️ Repro de la diferencia, que es lo que hace falsable este párrafo: un
+ * contexto mixto (`` `homonimo.ts` `` + `src/adapters/chain-resolver.ts`) sale
+ * `CITA D3b`, no `INDECIDIBLE D7`. Es lo que canda `G-C15`.
+ *
+ * 🔴 D5 ESTÁ DEGRADADA A `INDECIDIBLE`, Y ÉSA ES LA MEDICIÓN MÁS CARA DE ESTA
+ * HU. La regla entró con una hipótesis fuerte y con un umbral de rechazo
+ * escrito ANTES de medir —«más de 20 destinos equivocados sobre 94 y D5 se
+ * degrada»—, justamente para que ningún resultado se pudiera narrar como éxito.
+ *
+ * Lo que se midió es un CENSO, no un muestreo: los 36 sitios del perímetro que
+ * llegan a D5, abiertos uno por uno. **19 apuntan al propio archivo (`AUTO`),
+ * 13 apuntan a OTRO archivo y 4 no son citas (`RUIDO`)** ⇒ **17 de 36 NO son
+ * auto-citas**, que es lo que D5 afirmaría de los 36. 47 % de destinos
+ * equivocados contra un techo de 21 %.
+ * ⚠️ «17 apuntan a otro» —como decía este renglón— es falso: apuntan a otro 13.
+ * Los 4 de `RUIDO` no apuntan a ningún lado, y por eso cuentan igual como
+ * error de D5: emitir `CITA` sobre un token que no es una cita es inventar un
+ * destino, no perder uno.
+ *
+ * ⚠️ El umbral admite dos lecturas y las dos van escritas, porque elegir la
+ * cómoda en silencio sería el defecto que esta HU persigue:
+ *   · ABSOLUTA («más de 20 FP»): 17 ≤ 20 ⇒ D5 PASA.
+ *   · COMO TASA («20 sobre 94» ⇒ ≤ 21 %): 17/36 = 47 % ⇒ D5 NO PASA.
+ * Manda la segunda: el «20» sólo tiene sentido contra el denominador para el
+ * que se escribió, y el denominador real salió 2,6 veces más chico. Un umbral
+ * absoluto sobre una población que encogió no es un umbral, es un regalo.
+ *
+ * Lo que la degradación cuesta y lo que compra, sobre la muestra reservada
+ * (estrato P3, etiquetado a mano ANTES de que esta función existiera):
+ *   · con D5:  precisión 15/21 = 71 %,  recall 15/57
+ *   · sin D5:  precisión 13/14 = 93 %,  recall 13/57
+ * O sea que D5 aportaba 2 aciertos y 5 destinos inventados. **Un destino
+ * inventado es peor que un `INDECIDIBLE`**: el `INDECIDIBLE` pide que alguien
+ * mire, y el destino inventado pasa los controles.
+ *
+ * 🔴 LO QUE SIGUE SIENDO VERDAD, Y NO LO REFUTA ESTA DEGRADACIÓN: la AUTO-CITA
+ * es la forma principal en que este repo escribe una cita suelta. Los 5 falsos
+ * negativos que el F1 encontró contra las entradas ya etiquetadas son 5 de 5
+ * auto-citas, y siguen sin resolverse. Lo que se midió acá no es que la
+ * auto-cita sea rara: es que «cae dentro del rango de líneas del propio
+ * archivo» NO ALCANZA para reconocerla — en un archivo de 2000 líneas, casi
+ * cualquier número cae adentro. La detección se conserva en el `why` (dice a
+ * qué archivo se PARECE) para que la próxima HU tenga de dónde partir; lo que
+ * no se conserva es la afirmación.
+ *
+ * ⛔ NINGUNA REGLA MIRA LOS BACKTICKS NI EL RANGO DEL NÚMERO, y las dos
+ * prohibiciones están refutadas por los dos lados, no supuestas:
+ *   · backticks: `test/cited-lines-guard.exceptions.ts` declara puertos
+ *     BACKTICKEADOS (`` `:8443` ``, `` `:443` ``, `` `:80` ``, `` `:0` ``) que
+ *     son ruido, y decenas de citas reales se escriben sin un solo backtick.
+ *   · rango: «los números chicos no son líneas» se come mañana una cita a la
+ *     línea 80. Es el mismo criterio que `scanSource` ya declara en su
+ *     docblock, y se respeta acá para no tener dos criterios distintos.
+ *
+ * ── LO QUE ESTA CASCADA NO DECIDE (medido, no arreglado) ───────────────────
+ *
+ *  (i)   EL DESTINO CROSS-REPO. Un `:77` cuyo contexto es
+ *        `wasiai-remittance-agents/src/manifest/registry.ts:76` apunta a un
+ *        archivo que no está en el índice de ESTE repo. Si el párrafo nombrara
+ *        además UN SOLO archivo de acá, D3a devolvería ÉSE, o sea que afirmaría
+ *        un destino local para una cita que apunta afuera.
+ *        🔴 **ES UN MODO PREVISTO, NO UNA MEDICIÓN, y la diferencia importa:
+ *        el barrido completo del perímetro devuelve 0 INSTANCIAS.** Medido
+ *        sobre los 1152 tokens sueltos del universo al commit base, buscando
+ *        los que tienen un repo ajeno nombrado en su párrafo: **13 tokens, y
+ *        NINGUNO con veredicto `CITA`** (6 `RUIDO` D1, 3 `DATO` D2, 2
+ *        `INDECIDIBLE` D6, 2 `INDECIDIBLE` RESIDUO). Los dos sitios de
+ *        `src/lib/capability-risk.ts` que el censo de la HU publicó como
+ *        `FP-2`/`FP-3` salen `INDECIDIBLE`, y la muestra reservada los etiqueta
+ *        `INDECIDIBLE` a mano ⇒ **son aciertos**. Lo que los protege es que sus
+ *        párrafos nombran DOS archivos locales, no uno.
+ *        ⚠️ **EL PATRÓN DE «REPO AJENO», sin el cual ese 13 es un número que
+ *        hay que adivinar** — CD-1: ningún número sin su perímetro Y su
+ *        patrón. Es: el párrafo que devuelve `paragraphOf` contiene, COMO
+ *        SUBSTRING, alguno de estos CINCO nombres del ecosistema,
+ *          /wasiai-remittance-agents|wasiai-v2|wasiai-facilitator|wasiai-agentkey|chaski-v3/
+ *        en cualquier forma, hostnames incluidos: uno de los 13 es un
+ *        `wasiai-facilitator-production.up.railway.app` de un
+ *        `scripts/smoke-downstream-x402.mjs`, que no tiene forma de path.
+ *        **Con otra definición el número es OTRO, y por eso el patrón es parte
+ *        del número**: sólo con `wasiai-remittance-agents` —el único repo que
+ *        este mismo docblock nombra— son **4**; agregando `chaski-v3`, **6**;
+ *        exigiendo la forma `<repo>/(src|test|scripts)/`, **6**. Las cuatro
+ *        definiciones re-derivadas sobre el mismo perímetro de 1152.
+ *        ⇒ El modo se declara porque un párrafo con un solo archivo local lo
+ *        produciría, no porque se haya observado. Ver §7.4 del censo.
+ *  (ii)  EL VALOR SEMÁNTICO. Esta cascada dice a qué ARCHIVO apunta el token.
+ *        Que la línea diga lo que la prosa afirma lo verifica `G-C5` con su
+ *        `mustContain`; que la prosa sea verdadera no lo verifica nadie.
+ *  (iii) LA LÍNEA PODRIDA. Un `:839` que apunta a un archivo correcto y a una
+ *        línea que se movió sale `CITA` igual, y está bien: el número lo cruza
+ *        el registro, no el clasificador.
+ *  (iv)  EL CITADOR AUTO-REFERENTE. Los 8 archivos de `SELF_REFERENTIAL`
+ *        contienen el `target` que esta función tendría que producir. La
+ *        exclusión NO vive acá —esta función es pura y no conoce esa lista—,
+ *        vive en quien arma el universo, y `G-C16` la verifica.
+ */
+export function classifyBareCite(
+  hit: FoundCite,
+  src: string,
+  tracked: ReadonlySet<string>,
+  byBasename: ReadonlyMap<string, readonly string[]>,
+): BareVerdict {
+  const lines = src.split('\n');
+  // ⛔ NO se busca el token con `indexOf` sobre la línea: `hit.col` es la
+  // posición REAL que devolvió el escáner. Ver el docblock de `FoundCite.col`
+  // para el caso medido en que las dos difieren y la diferencia decide la clase.
+  const prev = hit.col > 0 ? (src[hit.col - 1] as string) : '';
+
+  if (/[A-Za-z0-9_]/.test(prev)) {
+    return {
+      label: 'RUIDO',
+      rule: 'D1',
+      why: `D1: el carácter anterior al token es «${prev}», o sea que el \`:\` está pegado a un identificador o a un número (puerto, chain id, timestamp, valor de un campo).`,
+    };
+  }
+  if (prev === "'" || prev === '"') {
+    return {
+      label: 'DATO',
+      rule: 'D2',
+      why: `D2: el carácter anterior al token es una comilla (${prev}), o sea que el token es el VALOR de un campo de un registro y no una afirmación del texto.`,
+    };
+  }
+
+  const paragraph = paragraphOf(src, hit.line);
+  const withLine = scanContext(paragraph, hit.file, tracked, byBasename, 'withLine');
+  const bareCtx = scanContext(paragraph, hit.file, tracked, byBasename, 'bare');
+  const union: string[] = [...withLine.targets];
+  for (const t of bareCtx.targets) if (!union.includes(t)) union.push(t);
+
+  if (union.length > 1) {
+    return {
+      label: 'INDECIDIBLE',
+      rule: 'D6',
+      why: `D6: el párrafo nombra ${union.length} archivos trackeados distintos (${union.join(', ')}) y nada dice a cuál apunta este \`${hit.cite}\`.`,
+    };
+  }
+  if (union.length === 1) {
+    const target = union[0] as string;
+    const byLine = withLine.targets.includes(target);
+    return {
+      label: 'CITA',
+      target,
+      rule: byLine ? 'D3a' : 'D3b',
+      why: byLine
+        ? `D3a: el párrafo nombra un solo archivo trackeado, y lo nombra CON número de línea: \`${target}\`.`
+        : `D3b: el párrafo nombra un solo archivo trackeado, sin número de línea: \`${target}\`.`,
+    };
+  }
+
+  const ambiguous = [...withLine.ambiguous, ...bareCtx.ambiguous];
+  if (ambiguous.length > 0) {
+    return {
+      label: 'INDECIDIBLE',
+      rule: 'D7',
+      why: `D7: el único contexto del párrafo son nombres HOMÓNIMOS (${ambiguous.join(', ')}), con más de un candidato en el índice de git. Elegir el primero sería inventar el destino.`,
+    };
+  }
+
+  const last = Number(hit.endNum ?? hit.num);
+  if (hit.num >= 1 && last <= lines.length) {
+    return {
+      label: 'INDECIDIBLE',
+      rule: 'D5',
+      why: `D5 DEGRADADA: PARECE una auto-cita a \`${hit.file}\` —el párrafo no nombra ningún archivo trackeado y la línea ${hit.num} cae dentro del propio citador (${lines.length} líneas)—, pero NO se emite como CITA. Ver el docblock de \`classifyBareCite\`: el censo completo de los sitios que llegan acá midió que casi la mitad apunta a OTRO archivo.`,
+    };
+  }
+
+  return {
+    label: 'INDECIDIBLE',
+    rule: 'RESIDUO',
+    why: `RESIDUO: el párrafo no nombra ningún archivo trackeado y la línea ${hit.num}${hit.endNum === undefined ? '' : `-${hit.endNum}`} cae FUERA del propio citador (${lines.length} líneas), así que ni siquiera puede ser una auto-cita.`,
+  };
 }
 
 /**

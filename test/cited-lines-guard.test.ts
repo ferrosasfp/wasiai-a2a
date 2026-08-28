@@ -163,28 +163,40 @@
  *     mismo — eso es el punto 3. No se resuelve con un índice posicional a
  *     propósito: un `nth` es un número de posición, o sea la misma clase de dato
  *     frágil que este guardián existe para no volver a guardar.
- * 14. 🎯 LOS 4 ARCHIVOS DE ESTE GUARDIÁN. No están en `CORTE_A_PATHS`, y son los
- *     citadores más densos que este commit agregó al repo: medido con
- *     `scanSource` sobre ellos mismos, **261 tokens** (`test` 76 · `citations`
- *     101 · `exceptions` 46 · `scanner` 38) contra 57 en TODO el Corte A. O sea
- *     que el guardián más que cuadruplicó la población de citas del repo en
- *     archivos que él mismo no mira. (Foto del 2026-08-25, RE-DERIVADA cuatro
- *     veces —243 antes del fix-pack del re-AR, 247 después, 260 después del
- *     fix-pack de prosa del CR, 261 tras el fix-pack 3 de WKH-335— con `scanSource`.
- *     Que este número se mueva cada vez que alguien escribe una línea de prosa
- *     acá es exactamente lo que el ítem denuncia, y las cuatro fotos lo prueban.)
+ * 14. 🎯 LOS 5 ARCHIVOS DE ESTE GUARDIÁN. No están en `CORTE_A_PATHS`, y son los
+ *     citadores más densos del repo: medido con `scanSource` sobre ellos
+ *     mismos, **761 tokens** (`sample` 356 · `exceptions` 121 · `citations` 119
+ *     · `test` 103 · `scanner` 62) contra 57 en TODO el Corte A. O sea que el
+ *     guardián tiene TRECE VECES más citas que el universo que vigila, en
+ *     archivos que él mismo no mira.
+ *     🔴 **Y ESTE ÍTEM ES EL QUE MEJOR SE DENUNCIA A SÍ MISMO: envejeció EN LA
+ *     HU QUE LO ESCRIBIÓ.** Decía «LOS 4 ARCHIVOS … 261 tokens», y WKH-371
+ *     agregó el quinto (`cited-lines-guard.sample.ts`, 356 tokens, las 120
+ *     etiquetas de la muestra) sin que nada lo avisara: 261 → 761, 2,9×. El
+ *     número lo re-derivó el CR de esta HU, no un control. (Foto del
+ *     2026-08-28, la sexta —243 · 247 · 260 · 261 · y ahora 761—. Que se mueva
+ *     cada vez que alguien escribe prosa acá es exactamente lo que el ítem
+ *     denuncia; que haya hecho falta un revisor humano para notarlo, también.
+ *     ⚠️ Y ESTE MISMO PÁRRAFO LO MOVIÓ MIENTRAS SE ESCRIBÍA: la primera
+ *     derivación dio 752 y el desglose tenía 5 en el grupo del dotfile; al
+ *     reescribir el ítem se perdió un literal y ganaron 9 tokens de prosa
+ *     nueva, así que la segunda derivación dio 761 con 4. Los números de acá
+ *     son los de la ÚLTIMA pasada, corrida después de la última edición.)
  *     **Se decidió declararlo y NO incluirlos, y la razón es medida, no de
- *     esfuerzo** — el desglose de los 261:
- *       · **89** son literalmente el valor del campo `cite` de una entrada de
- *         `CITED_LINES`. Ésos YA tienen testigo, y mejor que el de acá: `G-C5`
- *         verifica esa misma cita contra el archivo apuntado y `G-C7` se pone
- *         rojo si el token desaparece de su citador.
- *       · **102** son `:N` sueltos (P3/P4) sin archivo: números de línea citados
- *         dentro de la prosa que explica el algoritmo.
- *       · **29** nombran archivos que el ÍNDICE DE GIT no tiene, y son TRES
- *         grupos, no dos. (Re-derivado el 2026-08-19 — la versión anterior
- *         decía «21 fixtures» y «5 son `.nexus/project-context.md:6`», y las
- *         dos estaban mal contadas: CR `MNR-cr-5`.)
+ *     esfuerzo** — el desglose de los 761, re-derivado el 2026-08-28 con la
+ *     regla escrita al lado de cada categoría:
+ *       · **589** son `:N` sueltos (P3/P4) sin archivo: números de línea
+ *         citados dentro de la prosa que explica el algoritmo, más los `cite:`
+ *         sueltos de las 120 entradas de la muestra. (Regla: `!citeNamesFile`.)
+ *       · **49** son literalmente el valor del campo `cite` de una de las 31
+ *         entradas de `CITED_LINES` que nombran archivo. Ésos YA tienen
+ *         testigo, y mejor que el de acá: `G-C5` verifica esa misma cita contra
+ *         el archivo apuntado y `G-C7` se pone rojo si el token desaparece de
+ *         su citador. (Regla: el token está en el conjunto de los `cite`
+ *         declarados. ⚠️ El «89» anterior salía de otra regla, que nadie
+ *         escribió; éste trae la suya.)
+ *       · **32** nombran archivos que el ÍNDICE DE GIT no tiene, y son CUATRO
+ *         grupos:
  *           — **16** son fixtures en memoria de `G-C2`/`G-C3`
  *             (`./splash.tsx:245` ×5, `foo.ts:42` ×3, `a.ts:1` ×2, `b.ts:2` ×2,
  *             `../../lib/fixture.ts:3` ×2, `./no/existe.ts:1` ×2): ésos no
@@ -193,18 +205,23 @@
  *             puerto de la URL de calibración. La propia HU lo declara ruido
  *             legítimo CON path (ver el barrido de `G-C11`), así que llamarlo
  *             «un archivo que no existe ni puede existir» era generalizar.
- *           — **5** nombran `.nexus/project-context.md`, y son DOS tokens
- *             distintos: 4 × `:6` + 1 × `:6-12`. Ese archivo SÍ existe en disco
+ *           — **4** nombran `.nexus/project-context.md`, y son DOS tokens
+ *             distintos: 3 × `:6` + 1 × `:6-12`. Ese archivo SÍ existe en disco
  *             y NO está trackeado, así que es —literalmente— el ejemplo de la
  *             segunda salida de emergencia que el candado 2️⃣ declara y no
  *             cierra (`TD-316-CITAS-PROJECT-CONTEXT`).
+ *           — **4** nombran `wasiai-remittance-agents/src/manifest/registry.ts`
+ *             (`:76` ×2, `:77`, `:275`). Son de OTRO repo, y los agregó
+ *             WKH-371 al arreglar dos citas sueltas que resolvían al archivo
+ *             equivocado: el arreglo cambia un destino inventado por un path
+ *             que este índice no puede verificar (`TD-371-PORTABILIDAD`).
  *         Declararlos a todos exigiría una excusa escrita por cada fixture, o
  *         sea llenar el archivo de excusas de ruido para poder verificar otra
  *         cosa.
- *       · **41** nombran un archivo trackeado; de ésos, 9 son el token
+ *       · **91** nombran un archivo trackeado; de ésos, 9 son el token
  *         HISTÓRICO `.gitignore:172` —el bug que esta HU arregló, citado como
  *         ejemplo de lo que estaba mal—, que por construcción ya no describe esa
- *         línea. Meter los 4 archivos al corte convertiría cada mención del bug
+ *         línea. Meter los 5 archivos al corte convertiría cada mención del bug
  *         en una cita rota.
  *     El residuo real —las citas de estos 4 archivos que sí afirman algo sobre
  *     otro archivo— **se verificó A MANO, una por una, y ninguna es falsa**: las
@@ -231,11 +248,46 @@
  *     `TD-224-CITAS-DEL-PROPIO-GUARDIAN`, y su arreglo NO es agregar los paths:
  *     es un corte que sepa distinguir un token que AFIRMA de uno que es DATO.
  *
- * Naming: G-C1..G-C12.
+ * 15. 🎯 EL DISCRIMINADOR DE CITAS SUELTAS (`classifyBareCite`, WKH-371) DECIDE
+ *     A QUÉ ARCHIVO, NO A QUÉ LÍNEA, y ni siquiera eso lo decide siempre.
+ *     Medido sobre el perímetro `src`+`test`+`scripts` al commit `19405ba`
+ *     (1152 tokens sueltos, sin los 8 archivos auto-referentes): **38 `CITA`,
+ *     953 `RUIDO`, 25 `DATO` y 136 `INDECIDIBLE`**. O sea que sobre 8 de cada
+ *     10 tokens que NO son ruido, el guardián sigue sin poder decir nada — y
+ *     `INDECIDIBLE` es una respuesta legítima, no un error, pero es SILENCIO.
+ *     Lo que este discriminador NO cubre, medido y no supuesto:
+ *       · **LA LÍNEA.** Un `:839` que nombra el archivo correcto y una línea que
+ *         se movió sale `CITA` igual. El número lo cruza `G-C5` con su
+ *         `mustContain`, y sólo para las citas DECLARADAS en `CITED_LINES`.
+ *       · **LOS DESTINOS CROSS-REPO.** Un contexto
+ *         `wasiai-remittance-agents/…/registry.ts:76` apunta afuera del índice
+ *         de git de este repo. Si el párrafo nombrara además UN SOLO archivo de
+ *         acá, se devolvería ÉSE. ⚠️ **Es un modo PREVISTO y con 0 instancias
+ *         medidas**: barridos los 1152 tokens del universo al commit base, los
+ *         13 que nombran un repo ajeno en su párrafo salen `RUIDO` (6), `DATO`
+ *         (3) o `INDECIDIBLE` (4), y ninguno `CITA`. Decir «es un falso
+ *         positivo medido» —como decía este renglón— era publicar un modo
+ *         hipotético como medición, que es el defecto que esta HU persigue.
+ *         ⚠️ «Repo ajeno» son estos CINCO y no otros, buscados como substring
+ *         del párrafo (el patrón es parte del número, CD-1):
+ *         `wasiai-remittance-agents`, `wasiai-v2`, `wasiai-facilitator`,
+ *         `wasiai-agentkey`, `chaski-v3`. Con sólo el primero el número es
+ *         **4**, no 13. El detalle de las cuatro definiciones y sus cuatro
+ *         números está en el docblock de `classifyBareCite`.
+ *       · **LA AUTO-CITA**, que es la forma PRINCIPAL en que este repo escribe
+ *         una cita suelta y sigue sin resolverse. La regla D5 se degradó a
+ *         `INDECIDIBLE` porque su censo completo —`D5_CENSUS`, 36 sitios
+ *         abiertos a mano— midió **17 de 36 que NO son auto-citas** (13
+ *         apuntan a otro archivo y 4 no son citas). Queda `TD-371-AUTOCITA`.
+ *       · **EL PÁRRAFO CORTADO POR UNA LÍNEA ` *` VACÍA.** El contexto que
+ *         decide suele estar del otro lado de un separador de docblock. Es la
+ *         causa medida de varios de los `INDECIDIBLE` de arriba.
+ *
+ * Naming: G-C1..G-C19 (con `G-C17b`, `G-C17c`, `G-C17d` y `G-C17e`).
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -246,23 +298,40 @@ import {
   type DelegatedTarget,
 } from './cited-lines-guard.citations.js';
 import {
+  D5_CENSUS,
   SCANNER_FALSE_POSITIVES,
   UNANCHORABLE_PROSE,
   UNICITY_EXCEPTIONS,
 } from './cited-lines-guard.exceptions.js';
 import {
+  type BareLabel,
+  type BareVerdict,
   type CiteForm,
   type FoundCite,
   citeMatchesTarget,
   citeNamesFile,
   citeTargetIfTracked,
+  classifyBareCite,
   isOrderedSubsequence,
   locate,
   normalizeTarget,
+  resolveContextTarget,
   resolveSymbolPath,
   scanSource,
   stripComments,
 } from './cited-lines-guard.scanner.js';
+import {
+  RESERVED_SAMPLE,
+  SAMPLE_BASE_COMMIT,
+  SAMPLE_BLIND_COMMIT,
+  SAMPLE_SEED,
+  SELF_REFERENTIAL,
+  STRATUM_N,
+  drawReservedSample,
+  oracleKey,
+  sampleFrame,
+  siteKey,
+} from './cited-lines-guard.sample.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..');
@@ -1458,7 +1527,7 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // Control de armado de este mismo test: si `cabecera` viniera vacía o del
     // archivo equivocado, los `includes` de arriba pasarían por casualidad o
     // fallarían todos juntos. Esto lo ancla al archivo correcto.
-    expect(cabecera.includes('Naming: G-C1..G-C12')).toBe(true);
+    expect(cabecera.includes('Naming: G-C1..G-C19')).toBe(true);
   });
 
   // ══════════════════════════════════════════════════════════════
@@ -1681,5 +1750,777 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // hallazgos haría fallar el caso bueno, y una que no devolviera NINGUNO
     // haría fallar los seis malos. Los dos lados están medidos arriba.
     expect(delegationFindings(bueno, tracked, leer)).toHaveLength(0);
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // EL DISCRIMINADOR DE CITAS SUELTAS (G-C13..G-C17c) — WKH-371
+  //
+  // 🔴 QUÉ AGUJERO TAPAN. `citeMatchesTarget` abre con `if (raw === null)
+  // return true`, y `citePathOf` devuelve `null` para TODO token P3/P4. O sea
+  // que el cruce mecánico entre un `:N` suelto y el `target` declarado a mano
+  // devolvía `true` sin mirar nada: `E-CITE_TARGET_MISMATCH` no podía dispararse
+  // jamás para esas entradas. `classifyBareCite` es lo que permite cruzarlas.
+  //
+  // 🔴 Y EL ESTÁNDAR QUE SE APLICAN A SÍ MISMOS. `G-C13`..`G-C16` usan fixtures
+  // EN MEMORIA con la respuesta escrita antes — es lo que los hace
+  // independientes del árbol, y por eso mismo NO prueban nada sobre el árbol.
+  // Quien mide contra el árbol es `G-C17` (el oráculo que ya existía en el repo
+  // desde agosto) y `G-C17b` (la muestra reservada, etiquetada a mano en un
+  // commit ANTERIOR a que `classifyBareCite` existiera). Hacen falta los cuatro:
+  // los primeros dicen qué contesta la función, los últimos dicen cuánto acierta.
+  // ══════════════════════════════════════════════════════════════
+
+  /** El índice de git de juguete que usan los fixtures en memoria. */
+  const toyTracked = new Set([
+    'src/services/agent.ts',
+    'src/types/agent.ts',
+    'src/services/compose.ts',
+    'src/lib/fixture.ts',
+    'src/adapters/chain-resolver.ts',
+    // Los DOS homónimos del fixture.
+    //
+    // ⚠️ Acá había dos rutas INVENTADAS bajo el directorio de documentos, con
+    // el basename que en este repo es el caso real —el de los documentos de
+    // HU, que tiene más de cien candidatos en el índice—. Lo puso rojo OTRO
+    // guardián, `test/docs-referenced-by-code-exist.test.ts`, que verifica que
+    // todo path con forma de documento nombrado por el código EXISTA. Y no
+    // alcanzó con cambiar el fixture: ese guardián es TEXTUAL, así que la
+    // primera versión de este mismo comentario —que citaba las dos rutas para
+    // explicar el arreglo— lo volvió a poner rojo. Por eso acá no se escriben.
+    //
+    // Se cambió el NOMBRE, no la propiedad: lo único que este fixture necesita
+    // es un basename con más de un candidato.
+    'src/uno/homonimo.ts',
+    'src/otro/homonimo.ts',
+  ]);
+  const toyByBase = new Map<string, string[]>();
+  for (const f of toyTracked) {
+    const b = f.slice(f.lastIndexOf('/') + 1);
+    toyByBase.set(b, [...(toyByBase.get(b) ?? []), f]);
+  }
+  /** Clasifica el ÚNICO token suelto de un fixture en memoria. */
+  const clasificar = (src: string, file = 'src/lib/fixture.ts'): BareVerdict => {
+    const sueltos = scanSource(src, file).filter((h) => h.form === 'P3' || h.form === 'P4');
+    expect(sueltos, `el fixture no tiene exactamente 1 token suelto: ${src}`).toHaveLength(1);
+    return classifyBareCite(sueltos[0] as FoundCite, src, toyTracked, toyByBase);
+  };
+
+  it('G-C13: la cascada emite EXACTAMENTE una de las cuatro clases, y las cuatro son alcanzables', () => {
+    // Input que lo pone en rojo: una cascada que devuelva `CITA` también para
+    // `D1` deja la clase RUIDO vacía y este test lo nombra. Una que devuelva
+    // siempre `INDECIDIBLE` deja vacías tres.
+    const casos: ReadonlyArray<readonly [BareLabel, string]> = [
+      ['RUIDO', "const u = 'http://localhost:3001/x';"],
+      ['DATO', "const e = { cite: ':692' };"],
+      ['CITA', '// el guard de `src/services/agent.ts:12` y su hermano de `:20`'],
+      ['INDECIDIBLE', '// `src/services/agent.ts:12` y `src/services/compose.ts:9`, y el `:20`'],
+    ];
+    const vistas = new Set<BareLabel>();
+    for (const [esperada, src] of casos) {
+      const v = clasificar(src);
+      expect(v.label, `fixture «${src}» salió ${v.label} (${v.why})`).toBe(esperada);
+      // `target` presente si Y SÓLO SI es CITA. Sin las dos direcciones, una
+      // implementación que devolviera siempre `target` pasaría la mitad.
+      expect(v.target !== undefined, `target incoherente con label=${v.label}`).toBe(
+        v.label === 'CITA',
+      );
+      expect(v.why.length, 'un veredicto sin motivo legible no es auditable').toBeGreaterThan(20);
+      vistas.add(v.label);
+    }
+    expect(
+      [...vistas].sort(),
+      'Alguna de las cuatro clases quedó INALCANZABLE con estos fixtures. Una clase que\n' +
+        'ningún input produce es código muerto que se lee como cobertura.\n',
+    ).toEqual(['CITA', 'DATO', 'INDECIDIBLE', 'RUIDO']);
+  });
+
+  it('G-C14: las DOS direcciones — el puerto sigue siendo ruido y la cita real resuelve su destino', () => {
+    // Calcado de `G-C11`: un control de una sola dirección lo pasa una función
+    // constante. Acá el caso malo tiene que morir Y el caso bueno tiene que
+    // seguir pasando.
+    //
+    // Input que lo pone en rojo: (a) aflojar D1 —sacarle el chequeo del carácter
+    // anterior— y el puerto pasa a CITA; (b) endurecer D3 —exigir que el
+    // contexto traiga `:N` y borrar D3b— y la cita cae a INDECIDIBLE.
+    const puerto = clasificar("const url = 'http://localhost:3001/x';");
+    expect(puerto.label, `se esperaba RUIDO para el puerto y salió ${puerto.label}`).toBe('RUIDO');
+    expect(puerto.rule).toBe('D1');
+
+    const conNumero = clasificar('// ver `src/services/agent.ts:12`, y el guard de `:20`');
+    expect(conNumero.label, `se esperaba CITA y salió ${conNumero.label}: ${conNumero.why}`).toBe(
+      'CITA',
+    );
+    expect(conNumero.target).toBe('src/services/agent.ts');
+    expect(conNumero.rule).toBe('D3a');
+
+    // D3b: el contexto nombra el archivo SIN número de línea. Es la mitad que
+    // se pierde si alguien «endurece» la regla exigiendo un `:N` en el contexto.
+    const sinNumero = clasificar('// `src/adapters/chain-resolver.ts` resuelve la cadena en `:20`');
+    expect(sinNumero.label, `se esperaba CITA por D3b: ${sinNumero.why}`).toBe('CITA');
+    expect(sinNumero.target).toBe('src/adapters/chain-resolver.ts');
+    expect(sinNumero.rule).toBe('D3b');
+
+    // Y el backtick NO decide: el mismo puerto backtickeado sigue sin ser cita,
+    // y la misma cita sin backticks sigue siéndolo.
+    expect(clasificar('// el puerto por defecto es `:443` del esquema').label).not.toBe('CITA');
+    expect(clasificar('// ver src/services/agent.ts:12 y el guard de :20').target).toBe(
+      'src/services/agent.ts',
+    );
+  });
+
+  it('G-C15: con HOMÓNIMOS el veredicto es INDECIDIBLE, nunca `candidates[0]`', () => {
+    // 🔴 EL DEFECTO QUE ESTE CONTROL EXISTE PARA IMPEDIR está a la vista en
+    // `citeTargetIfTracked`: `if (!raw.includes('/')) return candidates[0] ?? null;`
+    // Con un basename homónimo elige el primero EN SILENCIO. Ese comportamiento
+    // es aceptable ahí —verifica un `target` que un humano ya decidió— e
+    // inaceptable acá, donde no hay nadie que lo haya decidido.
+    //
+    // Input que lo pone en rojo, y es un SITIO QUE EXISTE: dentro de `add()`,
+    // en `scanContext` (`test/cited-lines-guard.scanner.ts`), sustituir la
+    // llamada a `mentionCandidates` por `citeTargetIfTracked`. Ése es el ÚNICO
+    // punto de resolución de la cascada.
+    // ⚠️ La versión anterior de este comentario decía «sustituir
+    // `resolveContextTarget` por `citeTargetIfTracked` en D3b», y eso NO ES UN
+    // SITIO DEL CÓDIGO: `classifyBareCite` llama a `scanContext` directo y
+    // nunca a `resolveContextTarget`. Un input rojo que nombra una sustitución
+    // inexistente no se puede correr, o sea que no es falsable.
+    // Corrido el mutante real, `G-C15` muere con su motivo propio:
+    //   AssertionError: se esperaba INDECIDIBLE por AMBIGUOUS y se obtuvo CITA
+    //   con target `src/uno/homonimo.ts`: D3b: el párrafo nombra un solo
+    //   archivo trackeado, sin número de línea: `src/uno/homonimo.ts`.
+    // (El mismo mutante también mata `G-C17`, `G-C17b` y `G-C18`, lo cual es
+    // esperable —toca la resolución entera— y por eso el mensaje de arriba, que
+    // nombra el homónimo del fixture, es lo que prueba que el rojo es de ACÁ.)
+    const candidatos = toyByBase.get('homonimo.ts') ?? [];
+    // ⛔ El assert es `> 1`, NUNCA un dígito: clavar el número de homónimos es un
+    // candado que se pudre solo el día que alguien agrega otro archivo con ese
+    // nombre — y en este repo eso pasa cada vez que se abre una HU.
+    expect(
+      candidatos.length,
+      'El fixture dejó de tener homónimos, así que este control no prueba nada.\n',
+    ).toBeGreaterThan(1);
+
+    const v = clasificar('// como explica `homonimo.ts`, el criterio está en `:20`');
+    expect(
+      v.label,
+      `se esperaba INDECIDIBLE por AMBIGUOUS y se obtuvo ${v.label}` +
+        `${v.target === undefined ? '' : ` con target \`${v.target}\``}: ${v.why}`,
+    ).toBe('INDECIDIBLE');
+    expect(v.target).toBeUndefined();
+    expect(v.rule).toBe('D7');
+
+    // La OTRA mitad, y es la que hace que la regla sea usable: si el párrafo
+    // trae además un contexto NO ambiguo, gana el no ambiguo. Medido: la
+    // versión gruesa —cualquier nombre ambiguo ⇒ indecidible— baja el recall a
+    // la mitad, porque casi todo párrafo largo menciona de paso algún `index.ts`.
+    const mixto = clasificar(
+      '// como explica `homonimo.ts`, el guard de `src/adapters/chain-resolver.ts` está en `:20`',
+    );
+    expect(mixto.label, `el contexto no ambiguo tenía que ganar: ${mixto.why}`).toBe('CITA');
+    expect(mixto.target).toBe('src/adapters/chain-resolver.ts');
+
+    // Y el resolvedor NUNCA devuelve `string | null` con homónimos: el tipo es
+    // lo que hace imposible confundir «no hay contexto» con «hay demasiado».
+    expect(
+      resolveContextTarget('ver `homonimo.ts`', 'src/lib/fixture.ts', toyTracked, toyByBase, 'bare'),
+    ).toBe('AMBIGUOUS');
+    expect(
+      resolveContextTarget('ver `nada.xyz`', 'src/lib/fixture.ts', toyTracked, toyByBase, 'bare'),
+    ).toBeNull();
+  });
+
+  it('G-C16: los OCHO auto-referentes están DECLARADOS y son disjuntos del Corte A, y este control no se lee a sí mismo', () => {
+    // 🔴 SON OCHO, NO SIETE. Los 7 de `DT-11` son los dos guardianes cuyos `:N`
+    // sueltos son el REGISTRO de citas ajenas. El octavo es
+    // `test/cited-lines-guard.sample.ts`, que contiene el `target` que el
+    // clasificador tiene que producir: si entrara al universo, el clasificador
+    // leería la respuesta.
+    //
+    // Input que lo pone en rojo: meter `test/cited-lines-guard.citations.ts` al
+    // universo. El token se resuelve leyendo su propio campo `target:`.
+    //
+    // ⚠️ QUÉ ASSERTA ESTE CONTROL, DICHO SIN AFIRMAR DE MÁS. Los tres `expect`
+    // de abajo verifican PERTENENCIA A UNA LISTA (`SELF_REFERENTIAL`), no que
+    // el clasificador no mire esos archivos: quien arma el universo es el
+    // llamador, y este `it` no lo ejecuta. Decir «están fuera del universo» —
+    // como decía el título de este control— es afirmar más de lo que se mide.
+    // Lo que sí se agrega debajo es la única consecuencia estructural que se
+    // puede verificar acá: la DISJUNCIÓN con el Corte A.
+    expect(SELF_REFERENTIAL.length).toBe(8);
+    expect(new Set(SELF_REFERENTIAL).size).toBe(SELF_REFERENTIAL.length);
+    for (const f of SELF_REFERENTIAL) {
+      expect(TRACKED_SET.has(f), `archivo auto-referente que no existe: ${f}`).toBe(true);
+    }
+
+    // 🔴 `CORTE_A_PATHS ∩ SELF_REFERENTIAL = ∅`, y hasta hoy no la verificaba
+    // NADIE. La ataja de rebote `G-C4` —un archivo auto-referente dentro del
+    // corte llenaría el barrido de citas no declaradas—, pero de rebote y con
+    // otro mensaje. Un archivo en las dos listas es una contradicción del
+    // contrato: el corte dice «esto se vigila», la otra lista dice «esto
+    // contiene la respuesta».
+    // Input que lo pone en rojo: agregar cualquiera de los 8 a `CORTE_A_PATHS`.
+    const enLasDos = CORTE_A_PATHS.filter((p) => SELF_REFERENTIAL.includes(p));
+    expect(
+      enLasDos,
+      'Un archivo declarado a la vez en `CORTE_A_PATHS` y en `SELF_REFERENTIAL`.\n' +
+        'Las dos declaraciones se contradicen: el corte lo vigila y la otra lista dice\n' +
+        'que contiene el `target` que el clasificador tendría que producir.\n',
+    ).toEqual([]);
+    for (const f of [
+      'test/cited-lines-guard.citations.ts',
+      'test/cited-lines-guard.exceptions.ts',
+      'test/cited-lines-guard.sample.ts',
+    ]) {
+      expect(
+        SELF_REFERENTIAL.includes(f),
+        `archivo auto-referente DENTRO del universo del clasificador: ${f}\n` +
+          'Contiene el `target` que el clasificador tiene que producir; leerlo como\n' +
+          'contexto es un control comparándose contra su propia salida.\n',
+      ).toBe(true);
+    }
+
+    // Y la demostración de POR QUÉ, con un fixture en memoria que imita la forma
+    // de una entrada de estos registros: el destino está escrito DOS LÍNEAS
+    // debajo del token, dentro del mismo literal de objeto, o sea dentro del
+    // mismo párrafo. Sin la exclusión, el clasificador «acierta» leyendo la
+    // respuesta que el archivo ya trae escrita.
+    //
+    // ⚠️ El token del fixture va en la PROSA de un `reason:`, no en el campo
+    // `cite:`. Medido: un `cite: ':20'` lo caza D2 —el carácter anterior es una
+    // comilla— y nunca llega a mirar el contexto, así que un fixture con esa
+    // forma NO reproduce el defecto y este control quedaría decorativo. Lo que
+    // sí lo reproduce es el `` `:20` `` que estos archivos escriben backtickeado
+    // adentro de sus motivos, que es como está escrita la mitad de este repo.
+    const entradaFalsa = [
+      '  {',
+      "    file: 'test/no-trackeado.ts',",
+      "    verdict: 'OTRO',",
+      "    realTarget: 'src/services/agent.ts',",
+      "    reason: 'lo que se cita en `:20` vive en el otro archivo',",
+      '  },',
+    ].join('\n');
+    const leyendoLaRespuesta = clasificar(entradaFalsa, 'test/cited-lines-guard.citations.ts');
+    expect(
+      leyendoLaRespuesta.target,
+      'El fixture dejó de reproducir el defecto, así que la exclusión de los 8 ya no\n' +
+        'está justificada por nada medido y este control pasó a ser decorativo.\n',
+    ).toBe('src/services/agent.ts');
+  });
+
+  it('G-C17: el ORÁCULO preexistente — recall sobre el piso publicado y CERO destinos mal resueltos', () => {
+    // 🔴 POR QUÉ ESTE ORÁCULO Y NO OTRO: las entradas P3/P4 de `CITED_LINES` se
+    // etiquetaron a mano entre el 2026-08-19 y el 2026-08-27, en OTRAS HUs,
+    // antes de que existiera ningún clasificador. No se pueden haber escrito
+    // mirando su salida. Medir la cascada contra el archivo del que salieron sus
+    // reglas dio 100 % en el F1 de esta HU, y contra este oráculo dio 21 %.
+    const bare = CITED_LINES.filter((c) => !citeNamesFile(c.cite));
+    expect(bare.length, 'el oráculo se quedó sin entradas P3/P4').toBeGreaterThanOrEqual(19);
+
+    let aciertos = 0;
+    const malResueltos: string[] = [];
+    for (const c of bare) {
+      const src = readTracked(c.from);
+      const hit = scanSource(src, c.from).find(
+        (h) => h.cite === c.cite && (h.form === 'P3' || h.form === 'P4'),
+      );
+      if (hit === undefined) continue;
+      const v = classifyBareCite(hit, src, TRACKED_SET, BY_BASENAME);
+      if (v.label !== 'CITA') continue;
+      if (v.target === c.target) aciertos += 1;
+      else malResueltos.push(`${c.from} :: ${c.cite} → declarado ${c.target}, resuelto ${v.target}`);
+    }
+
+    // 🔴 CERO destinos mal resueltos es el invariante DURO. Un `INDECIDIBLE` de
+    // más pide que alguien mire; un destino inventado pasa los controles.
+    expect(
+      malResueltos,
+      'El clasificador afirmó un destino DISTINTO del que un humano declaró a mano.\n' +
+        'Eso no es menos recall: es una afirmación falsa con cara de medición.\n',
+    ).toEqual([]);
+
+    // ⚠️ PISO, no igualdad. Un test que exigiera «exactamente N» se pone rojo el
+    // día que alguien escriba una cita nueva, y ese rojo no señala nada falso:
+    // es la fricción que termina con alguien borrando el guardián.
+    //
+    // 🔴 EL PISO ES 2 Y LA MEDICIÓN ES 6, Y ESA DISTANCIA ESTÁ MEDIDA, no
+    // elegida a ojo. Hasta el fix-pack 1 el piso era 6 —EXACTAMENTE el valor
+    // medido—, con este mismo comentario al lado prometiendo margen. Margen
+    // cero: una sola cita que dejara de resolver ponía el gate rojo sin que
+    // nada estuviera mal. Es el candado que se pudre solo, con la etiqueta de
+    // que no se pudre.
+    //
+    // Cómo se eligió el 2, y por qué NO es 4 —que fue el primer intento—:
+    //   · los 6 aciertos salen de **4 párrafos**, no de 6: `types/index.ts` 1 ·
+    //     `operator-address.ts` **2** · `payment-guards-…` **2** · `CLAUDE.md` 1.
+    //   · el clasificador decide POR PÁRRAFO, así que UNA edición de prosa
+    //     legítima cuesta hasta **2**, no 1. Medido con un mutante: agregando
+    //     `src/services/budget.ts` al párrafo de `operator-address.ts` —una
+    //     mención de paso, de las que cualquier HU escribe— el número cae de
+    //     **6 a 4** de una sola vez. Con piso 4 el margen volvía a ser cero.
+    //   · dos ediciones así cuestan 4 ⇒ el piso tiene que aguantar 6 − 4 = 2.
+    // Y sigue siendo un control real: el modo de falla que importa —que el
+    // clasificador deje de resolver— lleva el número a 0 ó 1.
+    // ⛔ El piso NO se sube para que un número publicado dé. Y el invariante
+    // DURO de este `it` no es éste: es el `toEqual([])` de arriba.
+    expect(
+      aciertos,
+      `El recall del clasificador sobre el oráculo cayó a ${aciertos}/${bare.length}, por\n` +
+        'debajo del piso 2. La medición publicada en `doc/sdd/232-…/censo.md` §7.3 es 6/19,\n' +
+        'repartida en 4 párrafos; el piso aguanta perder los dos más grandes.\n' +
+        'Si el clasificador cambió a propósito, se re-mide y se re-publica el censo; si\n' +
+        'no, algo se rompió.\n',
+    ).toBeGreaterThanOrEqual(2);
+
+    // Y el otro lado: las 4 ocurrencias que un humano declaró RUIDO a mano en
+    // `SCANNER_FALSE_POSITIVES` no pueden salir CITA.
+    for (const fp of SCANNER_FALSE_POSITIVES) {
+      const src = readTracked(fp.from);
+      for (const h of scanSource(src, fp.from)) {
+        if (h.cite !== fp.cite || (h.form !== 'P3' && h.form !== 'P4')) continue;
+        const v = classifyBareCite(h, src, TRACKED_SET, BY_BASENAME);
+        expect(
+          v.label,
+          `${fp.from}:${h.line} ${fp.cite} está declarado RUIDO a mano y salió ${v.label}`,
+        ).not.toBe('CITA');
+      }
+    }
+  });
+
+  it('G-C17d: el SORTEO tiene testigo — el marco se re-deriva y los 120 sitios son los que salieron', () => {
+    // 🔴 EL AGUJERO QUE ESTE CONTROL CIERRA, y lo falsificó el AR de esta HU:
+    // `sampleFrame`, `drawReservedSample`, `xorshift32`, `seedFrom`,
+    // `SAMPLE_SEED` y `STRATUM_N` estaban EXPORTADOS, DOCUMENTADOS Y SIN UN
+    // SOLO LLAMADOR. O sea que el mecanismo anti-cherry-pick de AC-2 —lo que
+    // garantiza que «nadie elige qué se etiqueta»— era código muerto, y toda la
+    // propiedad descansaba en el orden de los commits, que es prosa auditable a
+    // mano y no un guardián.
+    //
+    // La falsificación, ejecutada por el AR en dos ediciones y un commit:
+    // cambiar la etiqueta de un sitio de `CITA` a `RUIDO` y ajustar el tuple
+    // publicado de `fn:44` a `fn:43`. Resultado: 20 tests VERDES. Un falso
+    // negativo desapareció del registro y ningún control se enteró.
+    //
+    // Lo que este `it` agrega es lo único que esa maniobra no puede sobrevivir:
+    // los 120 `siteKey` de `RESERVED_SAMPLE` tienen que ser EXACTAMENTE los que
+    // el sorteo produce sobre el marco re-derivado del commit base. Cambiar una
+    // ETIQUETA sigue pasando por acá —este control mira los SITIOS, no las
+    // etiquetas, y eso va dicho para no afirmar de más—, pero SUSTITUIR un
+    // sitio por otro, que es como se saca de la muestra un caso incómodo, se
+    // pone rojo con los dos `siteKey` al lado.
+    //
+    // Input que lo pone en rojo: reemplazar un sitio de `RESERVED_SAMPLE` por
+    // otro del marco. Verificado con el mutante M1 del fix-pack 1.
+    const paths = execFileSync(
+      'git',
+      ['ls-tree', '-r', '-z', '--name-only', SAMPLE_BASE_COMMIT, '--', 'src', 'test', 'scripts'],
+      { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+    )
+      .split('\0')
+      .filter(Boolean);
+
+    // Un solo proceso para los 611 blobs: `git show` por archivo tarda ~30× más
+    // y este control tiene que costar poco para que nadie lo borre por lento.
+    const batch = execFileSync('git', ['cat-file', '--batch'], {
+      cwd: REPO_ROOT,
+      input: `${paths.map((p) => `${SAMPLE_BASE_COMMIT}:${p}`).join('\n')}\n`,
+      maxBuffer: 512 * 1024 * 1024,
+    });
+    const sources = new Map<string, string>();
+    let off = 0;
+    for (const p of paths) {
+      // Cabecera `<oid> SP <type> SP <size> LF`, después el contenido y un LF.
+      const nl = batch.indexOf(0x0a, off);
+      const size = Number(batch.toString('utf8', off, nl).split(' ')[2]);
+      sources.set(p, batch.toString('utf8', nl + 1, nl + 1 + size));
+      off = nl + 1 + size + 1;
+    }
+    expect(sources.size, 'el perímetro del marco cambió de tamaño').toBe(paths.length);
+
+    // El oráculo preexistente sale del marco: medirse dos veces contra las
+    // mismas ocurrencias no agrega información. Es la resta del `1152 → 1130`.
+    const oracleKeys = new Set<string>();
+    for (const c of CITED_LINES) {
+      if (!citeNamesFile(c.cite)) oracleKeys.add(oracleKey(c.from, c.cite));
+    }
+    for (const f of SCANNER_FALSE_POSITIVES) oracleKeys.add(oracleKey(f.from, f.cite));
+
+    const frame = sampleFrame(sources, oracleKeys);
+    // ⛔ PISOS, no igualdades: el marco es una foto del commit base y su tamaño
+    // exacto se publica en el censo (§7.1: 1130 = P3 130 + P4 1000). Lo que sí
+    // es estructural es que cada estrato tenga con qué llenar los 60.
+    expect(frame.filter((s) => s.form === 'P3').length).toBeGreaterThanOrEqual(STRATUM_N);
+    expect(frame.filter((s) => s.form === 'P4').length).toBeGreaterThanOrEqual(STRATUM_N);
+
+    const sorteados = drawReservedSample(frame, SAMPLE_SEED).map(siteKey);
+    const declarados = RESERVED_SAMPLE.map(siteKey);
+    const sobran = declarados.filter((k) => !sorteados.includes(k));
+    const faltan = sorteados.filter((k) => !declarados.includes(k));
+    expect(
+      { sobran, faltan },
+      'Los sitios de `RESERVED_SAMPLE` dejaron de ser los que el sorteo produce sobre el\n' +
+        'marco derivado del commit base. Alguien eligió a mano qué se etiqueta, que es\n' +
+        'exactamente lo que AC-2 prohíbe — o el marco cambió, y entonces se re-sortea y se\n' +
+        're-etiqueta, no se ajusta la lista.\n',
+    ).toEqual({ sobran: [], faltan: [] });
+  });
+
+  it('G-C17e: las ETIQUETAS de la muestra son las del commit CIEGO, sin una sola movida', () => {
+    // 🔴 EL AGUJERO QUE ESTE CONTROL CIERRA, y lo falsificó el re-AR de esta HU
+    // con DOS ataques, cada uno de dos ediciones, y los dos dejaron el gate
+    // ENTERO en verde (los dos `tsc`, `lint` y la suite completa):
+    //   · Ataque A — el `label` de un sitio pasa de `CITA` a `RUIDO`, se borra su
+    //     `target`, y el falso negativo publicado baja en uno. Un error del
+    //     clasificador desaparece del registro sin dejar rastro.
+    //   · Ataque B, el grave — el `target` declarado del único falso positivo
+    //     medido de la HU se mueve hasta lo que el clasificador contesta, y el
+    //     tuple publicado se ajusta. El FP se lava a acierto y la precisión
+    //     publicada salta a 14 de 14.
+    // `G-C17d` no los ve, y su docblock ya lo dice: mira los SITIOS, no las
+    // etiquetas. `G-C17b` tampoco, porque compara la derivación contra un
+    // literal que el atacante edita en la misma maniobra.
+    //
+    // Lo que este control agrega es lo único que esos dos ataques no pueden
+    // sobrevivir: las 120 etiquetas valen porque se escribieron cuando
+    // `classifyBareCite` no existía en el árbol, así que se CONGELAN contra ese
+    // commit —`SAMPLE_BLIND_COMMIT`— y cualquier línea de sitio o de etiqueta
+    // que se agregue, se borre o cambie sale roja con su texto al lado.
+    //
+    // ── QUÉ CUBRE, EXACTAMENTE ─────────────────────────────────────────────
+    // Las líneas de `test/cited-lines-guard.sample.ts` indentadas con CUATRO
+    // espacios cuyo campo es `file`, `line`, `cite`, `form`, `nth`, `label` o
+    // `target`: son los campos de las entradas de `RESERVED_SAMPLE` y en ese
+    // archivo no hay ninguna otra línea con esa indentación y esos nombres (los
+    // de la `interface` van con `readonly` y a dos espacios). Se derivan del
+    // `git diff` contra el commit ciego, no de las posiciones: reformatear un
+    // docblock o agregar una función no lo despierta.
+    //
+    // ── QUÉ **NO** CUBRE. Decirlo al revés sería afirmar de más ────────────
+    //   · El `reason`. Es la prosa de evidencia y se puede corregir sin tocar el
+    //     veredicto; un `reason` reescrito pasa por acá.
+    //   · La CORRECCIÓN de las etiquetas. Esto afirma que son LAS MISMAS, no que
+    //     estén bien. Una etiqueta equivocada desde el día uno lo sigue estando,
+    //     y es deliberado: un oráculo se conserva, no se mejora.
+    //   · Mover `SAMPLE_BLIND_COMMIT` hacia adelante, que descongela la muestra
+    //     entera. Ningún guardián puede decidir eso; queda como una línea
+    //     visible en el diff, que es donde tiene que estar el juicio humano.
+    //   · Todo lo demás del repo: mira un solo archivo.
+    const SAMPLE_FILE = 'test/cited-lines-guard.sample.ts';
+    const CAMPO_ORACULO = /^ {4}(?:file|line|cite|form|nth|label|target):/;
+
+    // Control positivo del INSTRUMENTO. Sin esto, un patrón que dejó de matchear
+    // —o un path equivocado— daría CERO líneas movidas y verde por vacío, que es
+    // el modo de falla clásico de un barrido que sólo verifica una ausencia.
+    const declaradas = readTracked(SAMPLE_FILE)
+      .split('\n')
+      .filter((l) => CAMPO_ORACULO.test(l) && l.startsWith('    label:')).length;
+    expect(
+      declaradas,
+      'El patrón de campos dejó de encontrar las etiquetas de `RESERVED_SAMPLE` en el\n' +
+        'archivo. Mientras eso pase, el control de abajo da verde sin mirar nada.\n',
+    ).toBe(RESERVED_SAMPLE.length);
+
+    const diff = execFileSync(
+      'git',
+      ['diff', '--no-color', '-U0', SAMPLE_BLIND_COMMIT, '--', SAMPLE_FILE],
+      { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+    );
+    const movidas = diff
+      .split('\n')
+      .filter((l) => (l.startsWith('+') || l.startsWith('-')) && !/^(\+\+\+|---) /.test(l))
+      .filter((l) => CAMPO_ORACULO.test(l.slice(1)));
+    expect(
+      movidas,
+      'Cambió una línea de SITIO o de ETIQUETA de `RESERVED_SAMPLE` respecto del commit\n' +
+        'ciego. Esas 120 etiquetas se escribieron ANTES de que `classifyBareCite`\n' +
+        'existiera y todo su valor está en eso: ajustarlas ahora —aunque sea «para\n' +
+        'corregirlas»— convierte cualquier error del clasificador en un acierto, y el\n' +
+        'resto del gate no se entera.\n' +
+        'Si una etiqueta está mal, NO se edita: se declara en el censo y se cuenta como\n' +
+        'error. Si la muestra tiene que cambiar, se re-sortea y se re-etiqueta entera en\n' +
+        'un commit propio, y recién ahí se mueve `SAMPLE_BLIND_COMMIT` con el motivo\n' +
+        'escrito al lado de la constante.\n' +
+        'Abajo, las líneas movidas: `-` es lo que decía el commit ciego, `+` lo que dice\n' +
+        'el árbol de hoy.\n',
+    ).toEqual([]);
+  });
+
+  it('G-C17b: la MUESTRA RESERVADA — los números se re-derivan, no se leen del censo', () => {
+    // 🔴 LA CEGUERA NO SE PROMETE: SE GARANTIZA POR ORDEN DE COMMITS. En el
+    // commit que trae estas 120 etiquetas, `classifyBareCite` no existe en el
+    // árbol. Se comprueba con
+    //   git show <ese commit>:test/cited-lines-guard.scanner.ts | grep -c classifyBareCite
+    //
+    // 🔴 Y LOS FUENTES SE LEEN DEL COMMIT BASE, no del árbol de hoy (CD-21). Sin
+    // eso, este control sería un candado que se pudre solo: cualquiera que
+    // inserte una línea en alguno de los ~50 archivos de la muestra correría las
+    // 120 posiciones y lo pondría rojo sin que nada estuviera mal.
+    //
+    // Input que lo pone en rojo: editar una etiqueta de `RESERVED_SAMPLE` sin
+    // tocar el censo — el número derivado deja de coincidir con el publicado.
+    expect(RESERVED_SAMPLE.length).toBe(120);
+    const src = new Map<string, string>();
+    for (const s of RESERVED_SAMPLE) {
+      if (src.has(s.file)) continue;
+      src.set(
+        s.file,
+        execFileSync('git', ['show', `${SAMPLE_BASE_COMMIT}:${s.file}`], {
+          cwd: REPO_ROOT,
+          encoding: 'utf8',
+          maxBuffer: 64 * 1024 * 1024,
+        }),
+      );
+    }
+
+    const stats = { P3: { tp: 0, fp: 0, fn: 0 }, P4: { tp: 0, fp: 0, fn: 0 } };
+    const ausentes: string[] = [];
+    for (const s of RESERVED_SAMPLE) {
+      const texto = src.get(s.file) as string;
+      let n = 0;
+      let hit: FoundCite | undefined;
+      for (const h of scanSource(texto, s.file)) {
+        if (h.line !== s.line || h.cite !== s.cite) continue;
+        if (h.form !== 'P3' && h.form !== 'P4') continue;
+        if (n === s.nth) {
+          hit = h;
+          break;
+        }
+        n += 1;
+      }
+      if (hit === undefined) {
+        ausentes.push(siteKey(s));
+        continue;
+      }
+      const v = classifyBareCite(hit, texto, TRACKED_SET, BY_BASENAME);
+      const st = stats[s.form];
+      const pred = v.label === 'CITA';
+      const real = s.label === 'CITA';
+      if (pred && real && v.target === s.target) st.tp += 1;
+      else if (pred && real) {
+        st.fp += 1;
+        st.fn += 1;
+      } else if (pred) st.fp += 1;
+      else if (real) st.fn += 1;
+    }
+    expect(
+      ausentes,
+      'Sitios de la muestra que ya no existen AL COMMIT BASE. Como los fuentes se leen\n' +
+        'de ese commit, esto no puede pasar por una edición de hoy: significa que la\n' +
+        'muestra y el commit base dejaron de corresponderse.\n',
+    ).toEqual([]);
+
+    // Los números PUBLICADOS en `doc/sdd/232-…/censo.md`, re-derivados acá. Si
+    // alguien cambia una etiqueta y no re-publica, esto lo dice con los dos
+    // números al lado.
+    const publicado = { P3: { tp: 13, fp: 1, fn: 44 }, P4: { tp: 1, fp: 0, fn: 1 } };
+    for (const form of ['P3', 'P4'] as const) {
+      expect(
+        stats[form],
+        `El estrato ${form} declara ${JSON.stringify(publicado[form])} en el censo y la\n` +
+          `derivación de esta corrida da ${JSON.stringify(stats[form])}.\n` +
+          'Uno de los dos está viejo: se re-mide y se re-publica, no se ajusta el número.\n',
+      ).toEqual(publicado[form]);
+    }
+    // ⛔ Y el invariante que NO es una foto: cero destinos inventados en P4, que
+    // es el estrato masivo. Éste no se re-publica: se arregla.
+    expect(stats.P4.fp).toBe(0);
+  });
+
+  it('G-C17c: el censo de D5 tiene una entrada por sitio, y su veredicto es el que degradó la regla', () => {
+    // 🔴 D5 ESTÁ DEGRADADA A `INDECIDIBLE`, y este control es lo que impide que
+    // alguien la vuelva a encender sin re-hacer el censo. El umbral se escribió
+    // ANTES de medir (CD-19): más de 21 % de destinos equivocados y D5 se cae.
+    //
+    // Input que lo pone en rojo: volver a emitir `CITA` desde D5 — la lista de
+    // sitios sigue igual pero el clasificador deja de decir `INDECIDIBLE`.
+    const sitios = new Map<string, string>();
+    for (const e of D5_CENSUS) {
+      const k = `${e.file} :: ${e.line} :: ${e.cite}`;
+      expect(sitios.has(k), `entrada duplicada en el censo de D5: ${k}`).toBe(false);
+      sitios.set(k, e.verdict);
+      expect(e.reason.length, `motivo demasiado corto para ${k}`).toBeGreaterThan(40);
+      expect(
+        e.realTarget !== undefined,
+        `\`realTarget\` incoherente con verdict=${e.verdict} en ${k}`,
+      ).toBe(e.verdict === 'OTRO');
+    }
+
+    const equivocados = D5_CENSUS.filter((e) => e.verdict !== 'AUTO').length;
+    const tasa = equivocados / D5_CENSUS.length;
+    expect(
+      tasa,
+      `El censo de D5 declara ${equivocados} destinos equivocados sobre ${D5_CENSUS.length}\n` +
+        `(${(tasa * 100).toFixed(0)} %). El umbral escrito ANTES de medir era 21 %.\n` +
+        'Si esto bajó del umbral, D5 se puede volver a encender — pero re-midiendo el\n' +
+        'censo entero, no editando este número.\n',
+    ).toBeGreaterThan(0.21);
+
+    // Y la consecuencia mecánica: mientras el censo esté por encima del umbral,
+    // NINGÚN sitio de D5 puede salir `CITA`.
+    //
+    // 🔴 «NINGUNO» SON LOS 36, NO LOS 6 PRIMEROS. Hasta el fix-pack 1 este
+    // bucle corría sobre `D5_CENSUS.slice(0, 6)` con la palabra «NINGÚN»
+    // escrita al lado: la afirmación cubría 6 veces menos de lo que decía, y
+    // los 30 sitios de la cola no los miraba nadie. Los fuentes se leen una
+    // sola vez por archivo, así que los 36 cuestan lo mismo que los 6.
+    const d5src = new Map<string, string>();
+    for (const e of D5_CENSUS) {
+      let texto = d5src.get(e.file);
+      if (texto === undefined) {
+        texto = execFileSync('git', ['show', `${SAMPLE_BASE_COMMIT}:${e.file}`], {
+          cwd: REPO_ROOT,
+          encoding: 'utf8',
+          maxBuffer: 64 * 1024 * 1024,
+        });
+        d5src.set(e.file, texto);
+      }
+      const hit = scanSource(texto, e.file).find((h) => h.line === e.line && h.cite === e.cite);
+      expect(hit, `sitio del censo de D5 ausente al commit base: ${e.file}:${e.line}`).toBeDefined();
+      const v = classifyBareCite(hit as FoundCite, texto, TRACKED_SET, BY_BASENAME);
+      expect(v.rule, `${e.file}:${e.line} dejó de llegar a D5`).toBe('D5');
+      expect(
+        v.label,
+        `${e.file}:${e.line} volvió a salir CITA desde D5, con el censo todavía en rojo`,
+      ).toBe('INDECIDIBLE');
+    }
+  });
+
+  it('G-C18: el cruce mecánico de los `:N` SUELTOS contra el `target` declarado (E-BARE_TARGET_MISMATCH)', () => {
+    // 🔴 EL AGUJERO QUE ESTE CONTROL CIERRA, y estaba a la vista:
+    //
+    //   citeMatchesTarget(fromFile, token, target)  →  if (raw === null) return true;
+    //
+    // `citePathOf` devuelve `null` para TODO token P3/P4 —no nombran archivo—,
+    // así que ese `return true` contesta que SÍ sin mirar nada. Medido antes de
+    // escribir este control, sobre las 19 entradas P3/P4 del registro:
+    //
+    //   citeMatchesTarget('src/lib/operator-address.ts', '`:95`', 'CLAUDE.md')            → true
+    //   citeMatchesTarget('src/lib/operator-address.ts', '`:95`', 'src/no/existe.ts')     → true
+    //   las 19, contra un target inventado                                               → true
+    //
+    // O sea: `E-CITE_TARGET_MISMATCH` NO PODÍA DISPARARSE JAMÁS para ninguna de
+    // ellas, y sus `target` dependían enteramente de la prosa del `targetReason`.
+    //
+    // ⚠️ ESO NO QUIERE DECIR QUE ESAS ENTRADAS NO TUVIERAN NINGÚN TESTIGO, y
+    // decirlo al revés sería afirmar de más: `G-C5` ya cruza `mustContain`
+    // contra `target:line` (`E-TARGET_MISSING`, `E-LINE_OUT_OF_RANGE`,
+    // `E-WRONG_FILE`, `E-ANCHOR_GONE`, `E-LINE_MOVED`) y `G-C6` cruza
+    // `symbolPath`. Lo que faltaba es lo que ESTE control agrega: cruzar el
+    // token contra el CONTEXTO en que está escrito, o sea preguntar si el
+    // párrafo sostiene el destino que el humano declaró.
+    //
+    // COSTO: CERO declaraciones nuevas. No se amplía `CORTE_A_PATHS` ni
+    // `CITED_LINES`: el control se monta sobre lo que ya está declarado.
+    //
+    // Input que lo pone en rojo: cambiar el PÁRRAFO de un citador para que
+    // nombre un archivo distinto del `target` declarado. Ver el mutante en las
+    // notas de la HU — y ojo con el mutante OBVIO (cambiarle el `target` a la
+    // entrada), que se pone rojo hoy por `G-C5`/`E-ANCHOR_GONE` y por lo tanto
+    // NO prueba nada sobre este control.
+    const bare = CITED_LINES.filter((c) => !citeNamesFile(c.cite));
+    expect(bare.length, 'el registro se quedó sin entradas P3/P4').toBeGreaterThanOrEqual(19);
+
+    // El control POSITIVO del propio control: la vacuidad que motiva todo esto
+    // sigue siendo real, así que este `it` no está midiendo algo ya cubierto.
+    for (const c of bare.slice(0, 3)) {
+      expect(
+        citeMatchesTarget(c.from, c.cite, 'src/no/existe/en/ningun/lado.ts'),
+        `\`citeMatchesTarget\` dejó de ser vacuo para ${c.cite}. Si alguien la arregló, este\n` +
+          'control puede ser redundante — pero hay que MEDIRLO antes de borrarlo.\n',
+      ).toBe(true);
+    }
+
+    const hallazgos: string[] = [];
+    let conTestigo = 0;
+    for (const c of bare) {
+      const src = readTracked(c.from);
+      const hit = scanSource(src, c.from).find(
+        (h) => h.cite === c.cite && (h.form === 'P3' || h.form === 'P4'),
+      );
+      if (hit === undefined) continue;
+      const v = classifyBareCite(hit, src, TRACKED_SET, BY_BASENAME);
+      // `INDECIDIBLE` NO es un hallazgo: significa que el contexto no alcanza y
+      // que sigue rigiendo el `targetReason` escrito a mano, como hasta hoy.
+      if (v.label !== 'CITA') continue;
+      conTestigo += 1;
+      if (v.target !== c.target) {
+        hallazgos.push(
+          `E-BARE_TARGET_MISMATCH  ${c.from}:${hit.line} ${c.cite}\n` +
+            `    target declarado a mano : ${c.target}\n` +
+            `    destino del contexto    : ${v.target}\n` +
+            `    ${v.why}`,
+        );
+      }
+    }
+
+    expect(
+      hallazgos,
+      'El PÁRRAFO en que está escrita una cita suelta apunta a un archivo distinto del que\n' +
+        'la entrada declara. Una de las dos cosas está mal, y ninguna de las dos la ve\n' +
+        '`citeMatchesTarget`, que para estos tokens devuelve `true` sin mirar.\n\n' +
+        `${hallazgos.join('\n')}\n`,
+    ).toEqual([]);
+
+    // ⚠️ PISO, no igualdad, y por la misma razón que en `G-C17`: cuántas de las
+    // 19 llegan a tener testigo mecánico depende de cómo esté escrita la prosa
+    // de cada citador, y eso cambia con cada HU que toque uno de esos archivos.
+    // Clavar el número sería un candado que se pudre solo.
+    //
+    // 🔴 PISO 2, MEDICIÓN 6 — el mismo cambio, el mismo motivo y la misma
+    // medición que en `G-C17`: el piso anterior (6) estaba clavado sobre el
+    // valor medido, o sea con margen CERO, prometiendo margen en el comentario
+    // de al lado. Los 6 salen de 4 párrafos y una sola edición de prosa cuesta
+    // hasta 2 (medido: 6 → 4 con una mención de paso). Ver `G-C17`.
+    expect(
+      conTestigo,
+      `Sólo ${conTestigo} de las ${bare.length} entradas P3/P4 tienen testigo mecánico, por debajo\n` +
+        'del piso 2. La medición publicada en `doc/sdd/232-wkh-371-…/censo.md` §10.2 es 6\n' +
+        'de 19, repartida en 4 párrafos.\n' +
+        'El resto sigue dependiendo del `targetReason` escrito a mano, que es prosa.\n',
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it('G-C19: los archivos de este guardián PASAN por un typecheck — el gate del repo no los mira', () => {
+    // 🔴 EL AGUJERO, MEDIDO Y CONFIRMADO POR DOS REVISORES: `tsconfig.json`
+    // declara `"include": ["src/**/*"]` y `npm run lint` corre `biome check
+    // src/`. Los dos sub-gates de tipos y de estilo del repo son
+    // ESTRUCTURALMENTE CIEGOS a `test/`: de las líneas de este guardián,
+    // `tsc` typechequea CERO. El único control que corría sobre ellas era
+    // `vitest`, que transpila sin typechequear — o sea que `tsc 0 · lint 520`
+    // es un resultado verdadero que NO habla de este archivo.
+    //
+    // Control positivo, corrido antes de escribir este `it`: inyectando
+    // `const x: BareLabel = 'NO_EXISTE';` en el escáner,
+    //   tsc -p tsconfig.json      --noEmit  → exit 0   (ciego)
+    //   tsc -p tsconfig.guards.json --noEmit → exit 2   error TS2322
+    //
+    // ⚠️ SE CORRE EL BINARIO DIRECTO, NO `npx tsc`. Bajo el hook de este
+    // entorno `npx tsc` imprime «TypeScript compilation completed» y TAPA el
+    // exit code, hasta para `--version`. Un gate leído por su salida en vez de
+    // por su código sale verde siempre.
+    //
+    // Input que lo pone en rojo: cualquier error de tipos en uno de los 5
+    // archivos del `include` de `tsconfig.guards.json`.
+    const tsc = join(REPO_ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
+    expect(existsSync(tsc), `no está el compilador en ${tsc}`).toBe(true);
+
+    let salida = '';
+    let code = 0;
+    try {
+      salida = execFileSync(process.execPath, [tsc, '-p', 'tsconfig.guards.json', '--noEmit'], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        maxBuffer: 16 * 1024 * 1024,
+      });
+    } catch (e) {
+      const err = e as { status?: number; stdout?: string; stderr?: string };
+      code = err.status ?? 1;
+      salida = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    expect(
+      { code, salida },
+      'Los archivos de este guardián no typechequean bajo el `strict` del propio repo.\n' +
+        '⚠️ Y esto NO lo dice `npm run lint` ni `tsc -p tsconfig.json`: ninguno de los dos\n' +
+        'mira `test/`. Ver el docblock de `tsconfig.guards.json`.\n',
+    ).toEqual({ code: 0, salida: '' });
   });
 });

@@ -7,7 +7,7 @@
  * rutas y una función sin llamador. La versión anterior de este bloque decía
  * «las tres rutas» y citaba dos.
  *
- * ── `spend-policy.ts:163` y `:190`: SÍ hay ruta, y el caller no elige la key ──
+ * ── `src/services/spend-policy.ts:163` y `src/services/spend-policy.ts:190`: SÍ hay ruta, y el caller no elige la key ──
  * Las dos son `/keys/me/spend-policies` (`src/routes/auth/spend-policy.ts:79` es
  * el `fastify.get`, `:106` el `fastify.delete`) y las dos pasan `callerKey.id`
  * **y** `callerKey.owner_ref`, dos campos de la **misma fila autenticada**

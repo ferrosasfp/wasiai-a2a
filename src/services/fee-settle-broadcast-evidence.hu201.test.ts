@@ -352,8 +352,8 @@ describe('src/services/fee-split.ts — evidencia de broadcast en success:false'
   });
 
   // T-FEE-201-G: el hash de un leg FALLADO no puede promoverse al agregado.
-  // `settleFeeSplits` corta en el return temprano del `failed` (:316) antes del
-  // `priorTx` de :335 — este test canda esa precedencia, para que reordenar los
+  // `settleFeeSplits` corta en el return temprano del `failed` (`fee-split.ts:316`) antes del
+  // `priorTx` de `fee-split.ts:336` — este test canda esa precedencia, para que reordenar los
   // bloques no convierta la evidencia de un intento en el txHash del settlement.
   it('T-FEE-201-G: el hash de un leg failed NO sube a settlement.txHash', async () => {
     // platform OK, creator falla CON hash de broadcast.
