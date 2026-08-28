@@ -276,3 +276,326 @@ export const SCANNER_FALSE_POSITIVES: readonly ScannerFalsePositive[] = [
       'formatos de fecha, que es una heurística que envejece peor que esta excusa.',
   },
 ];
+
+/** Un sitio del censo de D5, con el veredicto LEÍDO EN EL SITIO. */
+export interface D5Site {
+  readonly file: string;
+  readonly line: number;
+  readonly cite: string;
+  /**
+   * `AUTO`  — sí apunta a su propio archivo (D5 acertaba).
+   * `OTRO`  — apunta a OTRO archivo: D5 habría inventado el destino.
+   * `RUIDO` — no es una cita: un slice de Python, un puerto.
+   */
+  readonly verdict: 'AUTO' | 'OTRO' | 'RUIDO';
+  /** El destino REAL cuando `verdict === 'OTRO'`. */
+  readonly realTarget?: string;
+  readonly reason: string;
+}
+
+/**
+ * 🔴 EL CENSO QUE DEGRADÓ A D5 (WKH-371, CD-19).
+ *
+ * D5 era la regla de la AUTO-CITA: «el párrafo no nombra ningún archivo y el
+ * `:N` cae dentro del rango de líneas del propio citador ⇒ es una cita a sí
+ * mismo». Es la única regla de la cascada que afirma un destino SIN ninguna
+ * evidencia en el párrafo, así que su verificación no podía ser un muestreo:
+ * es un CENSO. Estos son TODOS los sitios del perímetro que llegaban a D5,
+ * abiertos y leídos uno por uno.
+ *
+ * ⛔ EL UMBRAL SE ESCRIBIÓ ANTES DE MEDIR, y sin eso cualquier resultado se
+ * narra como éxito: «más de 20 destinos equivocados sobre 94 ⇒ D5 se degrada a
+ * `INDECIDIBLE` y se re-publica todo».
+ *
+ * Resultado: **19 `AUTO`, 13 `OTRO`, 4 `RUIDO`** ⇒ 17 equivocados sobre 36.
+ * Las dos lecturas del umbral, escritas las dos porque elegir la cómoda en
+ * silencio es el defecto que esta HU persigue:
+ *   · absoluta («más de 20») → 17 ≤ 20 ⇒ D5 pasaría;
+ *   · como tasa («20 sobre 94» = 21 %) → 17/36 = 47 % ⇒ D5 NO pasa.
+ * Manda la tasa: el «20» sólo significa algo contra el denominador para el que
+ * se escribió, y el denominador real salió 2,6 veces más chico.
+ *
+ * ⚠️ LO QUE ESTE CENSO **NO** DICE: que la auto-cita sea rara. Es la forma
+ * principal —19 de 36 sitios lo son, y los 5 falsos negativos que el F1 midió
+ * contra las entradas ya etiquetadas son 5 de 5 auto-citas—. Lo que dice es que
+ * «el número cae dentro del rango de líneas del propio archivo» NO ALCANZA para
+ * reconocerla: en un archivo de 2000 líneas casi cualquier número cae adentro,
+ * así que la condición no discrimina nada. Queda ABIERTO como
+ * `TD-371-AUTOCITA`: hace falta una señal de verdad (proximidad del contexto,
+ * «este archivo» escrito con todas las letras, o cruzar el `mustContain`), no
+ * una cota que casi siempre se cumple.
+ *
+ * ⛔ NO SE GENERÓ VOLCANDO LA SALIDA DEL CLASIFICADOR (CD-11): el clasificador
+ * dio la LISTA de sitios que llegan a D5, y cada `verdict`, cada `realTarget` y
+ * cada `reason` salió de abrir el sitio y leer la oración.
+ *
+ * FOTO del 2026-08-28, contra el commit `19405ba`. El número se deriva
+ * corriendo `G-C17c`, no se lee de este párrafo.
+ */
+export const D5_CENSUS: readonly D5Site[] = [
+  {
+    file: 'scripts/doctor-deps.sh',
+    line: 60,
+    cite: ':5',
+    verdict: 'RUIDO',
+    reason: 'Es un slice de Python dentro de un heredoc: `for f in found[:5]:`. El `[` anterior no es un identificador, así que D1 no lo ve.',
+  },
+  {
+    file: 'scripts/doctor-deps.sh',
+    line: 90,
+    cite: ':8',
+    verdict: 'RUIDO',
+    reason: 'Mismo caso: `for pkg, info in list(d.items())[:8]:`, un slice en el Python embebido del script.',
+  },
+  {
+    file: 'scripts/eq-sweep.mjs',
+    line: 64,
+    cite: '`:241-257`',
+    verdict: 'AUTO',
+    reason: '«El porqué completo … está sobre `cederElTurno` (`:241-257`)», y `cederElTurno` es una función de este mismo script.',
+  },
+  {
+    file: 'src/adapters/escrow/debit-capture.ownership.test.ts',
+    line: 33,
+    cite: '`:199-202`',
+    verdict: 'AUTO',
+    reason: 'Lo dice con todas las letras: «`mockRpc.mockResolvedValue(...)` de ESTE archivo, `:199-202`».',
+  },
+  {
+    file: 'src/adapters/escrow/debit-capture.ownership.test.ts',
+    line: 155,
+    cite: '`:139`',
+    verdict: 'OTRO',
+    realTarget: 'src/adapters/escrow/debit-capture.ts',
+    reason: '«Un deadline dentro de la ventana `[now, now + 3600]` de `:139`…»: abierto el destino, `debit-capture.ts:139` es `if (now > dl || dl > now + MAX_DEADLINE_TTL_SECONDS)`. La 139 de ESTE archivo es un docblock de columnas.',
+  },
+  {
+    file: 'src/adapters/escrow/debit-capture.ownership.test.ts',
+    line: 155,
+    cite: '`:230-235`',
+    verdict: 'OTRO',
+    realTarget: 'src/adapters/escrow/debit-capture.ts',
+    reason: 'La otra mitad de la misma oración: `debit-capture.ts:230-235` es el bloque `DEADLINE_EXPIRED` / `DEADLINE_TOO_FAR`.',
+  },
+  {
+    file: 'src/adapters/escrow/debit-capture.ownership.test.ts',
+    line: 254,
+    cite: '`:236-249`',
+    verdict: 'OTRO',
+    realTarget: 'src/adapters/escrow/debit-capture.ts',
+    reason: '«La decisión es del código (`:236-249`), no del doble»: «el código» es el de producción, y la frase entera existe para separarlo de este archivo.',
+  },
+  {
+    file: 'src/adapters/escrow/debit-capture.ownership.test.ts',
+    line: 255,
+    cite: '`:275-287`',
+    verdict: 'OTRO',
+    realTarget: 'src/adapters/escrow/debit-capture.ts',
+    reason: '«se lee en los argumentos con los que llamó al RPC (`:275-287`)»: la llamada al RPC está en el código de producción; acá sólo se leen sus argumentos.',
+  },
+  {
+    file: 'src/adapters/escrow/debit-capture.ts',
+    line: 130,
+    cite: ':88-89',
+    verdict: 'AUTO',
+    reason: '«espejo EXACTO de captureDebitSignature (:88-89)», y `captureDebitSignature` está en este mismo archivo.',
+  },
+  {
+    file: 'src/adapters/escrow/debit-capture.ts',
+    line: 136,
+    cite: ':141-149',
+    verdict: 'AUTO',
+    reason: '«espejo de captureDebitSignature (:141-149)», misma función del mismo archivo.',
+  },
+  {
+    file: 'src/adapters/solana/facilitator-settle.ts',
+    line: 416,
+    cite: '`:360`',
+    verdict: 'AUTO',
+    reason: '«Arriba se aplica dos veces … al CUERPO (`:360`)», y «arriba» es este archivo.',
+  },
+  {
+    file: 'src/adapters/solana/facilitator-settle.ts',
+    line: 417,
+    cite: '`:372`',
+    verdict: 'AUTO',
+    reason: 'La otra mitad de la misma oración: «y al CAMPO (`:372`)».',
+  },
+  {
+    file: 'src/adapters/solana/facilitator-settle.ts',
+    line: 523,
+    cite: '`:203-209`',
+    verdict: 'AUTO',
+    reason: 'El ARCHIVO es correcto —`payoutViaFacilitator` vive acá, y su corte con `\'not-sent\'` está en `:633`— pero la LÍNEA está podrida: `:203-209` es hoy el docblock de `PAYOUT_ROUTE_PROBE_TIMEOUT_MS`. La propia frase dice «del original». Lo que el clasificador decide es el archivo; la línea la cruza el registro.',
+  },
+  {
+    file: 'src/lib/capability-risk.ts',
+    line: 162,
+    cite: '`:176-178`',
+    verdict: 'AUTO',
+    reason: '«el MISMO `normalize` que `classifyCapability` (`:176-178`)», y `classifyCapability` es de este archivo.',
+  },
+  {
+    file: 'src/lib/ssrf-dispatcher.ts',
+    line: 342,
+    cite: ':80',
+    verdict: 'RUIDO',
+    reason: 'Es un PUERTO en la prosa: «the scheme\'s own default-port shift (http :80 → https :443)». El carácter anterior es un espacio, así que D1 no lo alcanza.',
+  },
+  {
+    file: 'src/lib/ssrf-dispatcher.ts',
+    line: 343,
+    cite: ':443',
+    verdict: 'RUIDO',
+    reason: 'El otro puerto de la misma oración. Los dos son la prueba de que ni el rango ni los backticks separan un puerto de una línea.',
+  },
+  {
+    file: 'src/middleware/x402.ts',
+    line: 518,
+    cite: '`:514`',
+    verdict: 'AUTO',
+    reason: '«ni una línea de `:514` en adelante se ejecuta para Solana»: habla del código que sigue en este mismo archivo.',
+  },
+  {
+    file: 'src/routes/agents.ownership.test.ts',
+    line: 13,
+    cite: '`:72`',
+    verdict: 'AUTO',
+    reason: '«el mock registra los `.eq()` en `:72`»: el mock es el de este archivo. Ya estaba declarado así a mano en `CITED_LINES`.',
+  },
+  {
+    file: 'src/routes/agents.ownership.test.ts',
+    line: 13,
+    cite: '`:76-77`',
+    verdict: 'AUTO',
+    reason: 'Ídem, misma oración: «`maybeSingle`/`single` (`:76-77`) devuelven `state.row`». También declarada a mano.',
+  },
+  {
+    file: 'src/routes/capabilities.ts',
+    line: 78,
+    cite: ':41-43',
+    verdict: 'AUTO',
+    reason: 'Lo dice explícito: «mismo patrón que HU-204 en este archivo (:41-43)».',
+  },
+  {
+    file: 'src/routes/payments.dispute-ownership.test.ts',
+    line: 22,
+    cite: '`:72`',
+    verdict: 'OTRO',
+    realTarget: 'src/routes/agents.ownership.test.ts',
+    reason: 'El título de la sección, CUATRO líneas más arriba, dice «POR QUÉ NO SE COPIA EL MOCK DE `agents.ownership.test.ts`»: el `:72` es de AQUEL mock. Queda fuera del párrafo porque una línea ` *` vacía corta.',
+  },
+  {
+    file: 'src/routes/payments.dispute-ownership.test.ts',
+    line: 22,
+    cite: '`:76-77`',
+    verdict: 'OTRO',
+    realTarget: 'src/routes/agents.ownership.test.ts',
+    reason: 'La otra mitad de la misma oración, sobre el mismo mock ajeno.',
+  },
+  {
+    file: 'src/services/agent.ownership.test.ts',
+    line: 13,
+    cite: '`:49`',
+    verdict: 'OTRO',
+    realTarget: 'src/routes/agents.ownership.test.ts',
+    reason: '«Ese archivo … su mock registra los `.eq()` (`:49`)», y «ese archivo» es el que titula la sección: `src/routes/agents.ownership.test.ts`.',
+  },
+  {
+    file: 'src/services/agent.ownership.test.ts',
+    line: 13,
+    cite: '`:53-54`',
+    verdict: 'OTRO',
+    realTarget: 'src/routes/agents.ownership.test.ts',
+    reason: 'Misma oración, mismo archivo ajeno: «`maybeSingle`/`single` (`:53-54`)».',
+  },
+  {
+    file: 'src/services/arbiter.ownership.test.ts',
+    line: 362,
+    cite: '`:212-219`',
+    verdict: 'OTRO',
+    realTarget: 'src/services/arbiter.ts',
+    reason: '«El `nonce` con el que el código llamó a `executeResolveDispute` (`:212-219`)»: abierto el destino, `arbiter.ts:212-219` ES esa llamada.',
+  },
+  {
+    file: 'src/services/arbiter/evidence.ownership.test.ts',
+    line: 45,
+    cite: '`:112`',
+    verdict: 'OTRO',
+    realTarget: 'src/services/arbiter/evidence.ts',
+    reason: '«`readEvidence` llama `receiptService.verify` una vez por recibo (`:112`)», y `readEvidence` es de `evidence.ts`, no de este test.',
+  },
+  {
+    file: 'src/services/compose.ts',
+    line: 751,
+    cite: ':634',
+    verdict: 'AUTO',
+    reason: '«guard `i > 0` de :634»: el guard es de este archivo. Ya estaba declarada a mano en `CITED_LINES`.',
+  },
+  {
+    file: 'src/services/discovery.ts',
+    line: 664,
+    cite: ':293',
+    verdict: 'AUTO',
+    reason: '«Es GLOBAL sobre la concatenación de todas las fuentes (:293)»: el `slice` y la concatenación son de este archivo.',
+  },
+  {
+    file: 'src/services/fee-settle-broadcast-evidence.hu201.test.ts',
+    line: 355,
+    cite: ':316',
+    verdict: 'OTRO',
+    realTarget: 'src/services/fee-split.ts',
+    reason: '«`settleFeeSplits` corta en el return temprano del `failed` (:316)», y `settleFeeSplits` vive en `fee-split.ts`. El propio `fee-split.ts:494` escribe las mismas dos líneas.',
+  },
+  {
+    file: 'src/services/fee-settle-broadcast-evidence.hu201.test.ts',
+    line: 356,
+    cite: ':335',
+    verdict: 'OTRO',
+    realTarget: 'src/services/fee-split.ts',
+    reason: 'El `priorTx` de la misma oración, también de `fee-split.ts`. ⚠️ Y el número no coincide con el que declara `fee-split.ts:494` para lo mismo (`:336`): uno de los dos está corrido, y nada lo cruza.',
+  },
+  {
+    file: 'src/services/fee-split.ts',
+    line: 494,
+    cite: ':316',
+    verdict: 'AUTO',
+    reason: 'El return temprano de `settleFeeSplits`, en este mismo archivo. Ya declarada a mano en `CITED_LINES`.',
+  },
+  {
+    file: 'src/services/fee-split.ts',
+    line: 494,
+    cite: ':336',
+    verdict: 'AUTO',
+    reason: 'El `priorTx` del mismo archivo. También declarada a mano.',
+  },
+  {
+    file: 'src/services/llm/transform.ownership.test.ts',
+    line: 10,
+    cite: '`:234`',
+    verdict: 'OTRO',
+    realTarget: 'src/services/llm/transform.ts',
+    reason: 'El párrafo de arriba lo dice entero —«`src/services/llm/transform.ts:234` es el `.eq(\'owner_ref\', ownerId)`»— pero queda del otro lado de una línea ` *` vacía, y el párrafo de `:234` no nombra nada.',
+  },
+  {
+    file: 'src/services/orchestrate.test.ts',
+    line: 3949,
+    cite: ':557',
+    verdict: 'AUTO',
+    reason: '«el shape de pipeline.success NO cambian (regresión :557)»: abierta la 557 de este archivo, es `it(\'T-12: chargeProtocolFee invoked when pipeline.success=true\')`.',
+  },
+  {
+    file: 'src/services/reputation.ts',
+    line: 90,
+    cite: '`:182-183`',
+    verdict: 'AUTO',
+    reason: '«acá `\'__anon__\'` se EXCLUYE (ver `:182-183`, CR MNR-2)»: el bucketing es de este archivo.',
+  },
+  {
+    file: 'src/types/index.ts',
+    line: 288,
+    cite: '`:203-225`',
+    verdict: 'AUTO',
+    reason: '«están en el docblock de `AgentPaymentSpec.contract` (`:203-225`)», y ese tipo es de este archivo. Ya declarada a mano en `CITED_LINES`.',
+  },
+];

@@ -231,7 +231,32 @@
  *     `TD-224-CITAS-DEL-PROPIO-GUARDIAN`, y su arreglo NO es agregar los paths:
  *     es un corte que sepa distinguir un token que AFIRMA de uno que es DATO.
  *
- * Naming: G-C1..G-C12.
+ * 15. 🎯 EL DISCRIMINADOR DE CITAS SUELTAS (`classifyBareCite`, WKH-371) DECIDE
+ *     A QUÉ ARCHIVO, NO A QUÉ LÍNEA, y ni siquiera eso lo decide siempre.
+ *     Medido sobre el perímetro `src`+`test`+`scripts` al commit `19405ba`
+ *     (1152 tokens sueltos, sin los 8 archivos auto-referentes): **38 `CITA`,
+ *     953 `RUIDO`, 25 `DATO` y 136 `INDECIDIBLE`**. O sea que sobre 8 de cada
+ *     10 tokens que NO son ruido, el guardián sigue sin poder decir nada — y
+ *     `INDECIDIBLE` es una respuesta legítima, no un error, pero es SILENCIO.
+ *     Lo que este discriminador NO cubre, medido y no supuesto:
+ *       · **LA LÍNEA.** Un `:839` que nombra el archivo correcto y una línea que
+ *         se movió sale `CITA` igual. El número lo cruza `G-C5` con su
+ *         `mustContain`, y sólo para las citas DECLARADAS en `CITED_LINES`.
+ *       · **LOS DESTINOS CROSS-REPO.** Un contexto
+ *         `wasiai-remittance-agents/…/registry.ts:76` apunta afuera del índice
+ *         de git de este repo. Si el párrafo nombra además algún archivo de
+ *         acá, se devuelve ÉSE: es un falso positivo medido, contado en
+ *         `doc/sdd/232-…/censo.md` y no escondido.
+ *       · **LA AUTO-CITA**, que es la forma PRINCIPAL en que este repo escribe
+ *         una cita suelta y sigue sin resolverse. La regla D5 se degradó a
+ *         `INDECIDIBLE` porque su censo completo —`D5_CENSUS`, 36 sitios
+ *         abiertos a mano— midió 17 destinos equivocados. Queda
+ *         `TD-371-AUTOCITA`.
+ *       · **EL PÁRRAFO CORTADO POR UNA LÍNEA ` *` VACÍA.** El contexto que
+ *         decide suele estar del otro lado de un separador de docblock. Es la
+ *         causa medida de varios de los `INDECIDIBLE` de arriba.
+ *
+ * Naming: G-C1..G-C17.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -246,23 +271,34 @@ import {
   type DelegatedTarget,
 } from './cited-lines-guard.citations.js';
 import {
+  D5_CENSUS,
   SCANNER_FALSE_POSITIVES,
   UNANCHORABLE_PROSE,
   UNICITY_EXCEPTIONS,
 } from './cited-lines-guard.exceptions.js';
 import {
+  type BareLabel,
+  type BareVerdict,
   type CiteForm,
   type FoundCite,
   citeMatchesTarget,
   citeNamesFile,
   citeTargetIfTracked,
+  classifyBareCite,
   isOrderedSubsequence,
   locate,
   normalizeTarget,
+  resolveContextTarget,
   resolveSymbolPath,
   scanSource,
   stripComments,
 } from './cited-lines-guard.scanner.js';
+import {
+  RESERVED_SAMPLE,
+  SAMPLE_BASE_COMMIT,
+  SELF_REFERENTIAL,
+  siteKey,
+} from './cited-lines-guard.sample.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..');
@@ -1458,7 +1494,7 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // Control de armado de este mismo test: si `cabecera` viniera vacía o del
     // archivo equivocado, los `includes` de arriba pasarían por casualidad o
     // fallarían todos juntos. Esto lo ancla al archivo correcto.
-    expect(cabecera.includes('Naming: G-C1..G-C12')).toBe(true);
+    expect(cabecera.includes('Naming: G-C1..G-C17')).toBe(true);
   });
 
   // ══════════════════════════════════════════════════════════════
@@ -1681,5 +1717,410 @@ describe('cited lines guard — las citas `archivo:línea` del Corte A', () => {
     // hallazgos haría fallar el caso bueno, y una que no devolviera NINGUNO
     // haría fallar los seis malos. Los dos lados están medidos arriba.
     expect(delegationFindings(bueno, tracked, leer)).toHaveLength(0);
+  });
+
+  // ══════════════════════════════════════════════════════════════
+  // EL DISCRIMINADOR DE CITAS SUELTAS (G-C13..G-C17c) — WKH-371
+  //
+  // 🔴 QUÉ AGUJERO TAPAN. `citeMatchesTarget` abre con `if (raw === null)
+  // return true`, y `citePathOf` devuelve `null` para TODO token P3/P4. O sea
+  // que el cruce mecánico entre un `:N` suelto y el `target` declarado a mano
+  // devolvía `true` sin mirar nada: `E-CITE_TARGET_MISMATCH` no podía dispararse
+  // jamás para esas entradas. `classifyBareCite` es lo que permite cruzarlas.
+  //
+  // 🔴 Y EL ESTÁNDAR QUE SE APLICAN A SÍ MISMOS. `G-C13`..`G-C16` usan fixtures
+  // EN MEMORIA con la respuesta escrita antes — es lo que los hace
+  // independientes del árbol, y por eso mismo NO prueban nada sobre el árbol.
+  // Quien mide contra el árbol es `G-C17` (el oráculo que ya existía en el repo
+  // desde agosto) y `G-C17b` (la muestra reservada, etiquetada a mano en un
+  // commit ANTERIOR a que `classifyBareCite` existiera). Hacen falta los cuatro:
+  // los primeros dicen qué contesta la función, los últimos dicen cuánto acierta.
+  // ══════════════════════════════════════════════════════════════
+
+  /** El índice de git de juguete que usan los fixtures en memoria. */
+  const toyTracked = new Set([
+    'src/services/agent.ts',
+    'src/types/agent.ts',
+    'src/services/compose.ts',
+    'src/lib/fixture.ts',
+    'src/adapters/chain-resolver.ts',
+    // Los DOS homónimos del fixture.
+    //
+    // ⚠️ Acá había dos rutas INVENTADAS bajo el directorio de documentos, con
+    // el basename que en este repo es el caso real —el de los documentos de
+    // HU, que tiene más de cien candidatos en el índice—. Lo puso rojo OTRO
+    // guardián, `test/docs-referenced-by-code-exist.test.ts`, que verifica que
+    // todo path con forma de documento nombrado por el código EXISTA. Y no
+    // alcanzó con cambiar el fixture: ese guardián es TEXTUAL, así que la
+    // primera versión de este mismo comentario —que citaba las dos rutas para
+    // explicar el arreglo— lo volvió a poner rojo. Por eso acá no se escriben.
+    //
+    // Se cambió el NOMBRE, no la propiedad: lo único que este fixture necesita
+    // es un basename con más de un candidato.
+    'src/uno/homonimo.ts',
+    'src/otro/homonimo.ts',
+  ]);
+  const toyByBase = new Map<string, string[]>();
+  for (const f of toyTracked) {
+    const b = f.slice(f.lastIndexOf('/') + 1);
+    toyByBase.set(b, [...(toyByBase.get(b) ?? []), f]);
+  }
+  /** Clasifica el ÚNICO token suelto de un fixture en memoria. */
+  const clasificar = (src: string, file = 'src/lib/fixture.ts'): BareVerdict => {
+    const sueltos = scanSource(src, file).filter((h) => h.form === 'P3' || h.form === 'P4');
+    expect(sueltos, `el fixture no tiene exactamente 1 token suelto: ${src}`).toHaveLength(1);
+    return classifyBareCite(sueltos[0] as FoundCite, src, toyTracked, toyByBase);
+  };
+
+  it('G-C13: la cascada emite EXACTAMENTE una de las cuatro clases, y las cuatro son alcanzables', () => {
+    // Input que lo pone en rojo: una cascada que devuelva `CITA` también para
+    // `D1` deja la clase RUIDO vacía y este test lo nombra. Una que devuelva
+    // siempre `INDECIDIBLE` deja vacías tres.
+    const casos: ReadonlyArray<readonly [BareLabel, string]> = [
+      ['RUIDO', "const u = 'http://localhost:3001/x';"],
+      ['DATO', "const e = { cite: ':692' };"],
+      ['CITA', '// el guard de `src/services/agent.ts:12` y su hermano de `:20`'],
+      ['INDECIDIBLE', '// `src/services/agent.ts:12` y `src/services/compose.ts:9`, y el `:20`'],
+    ];
+    const vistas = new Set<BareLabel>();
+    for (const [esperada, src] of casos) {
+      const v = clasificar(src);
+      expect(v.label, `fixture «${src}» salió ${v.label} (${v.why})`).toBe(esperada);
+      // `target` presente si Y SÓLO SI es CITA. Sin las dos direcciones, una
+      // implementación que devolviera siempre `target` pasaría la mitad.
+      expect(v.target !== undefined, `target incoherente con label=${v.label}`).toBe(
+        v.label === 'CITA',
+      );
+      expect(v.why.length, 'un veredicto sin motivo legible no es auditable').toBeGreaterThan(20);
+      vistas.add(v.label);
+    }
+    expect(
+      [...vistas].sort(),
+      'Alguna de las cuatro clases quedó INALCANZABLE con estos fixtures. Una clase que\n' +
+        'ningún input produce es código muerto que se lee como cobertura.\n',
+    ).toEqual(['CITA', 'DATO', 'INDECIDIBLE', 'RUIDO']);
+  });
+
+  it('G-C14: las DOS direcciones — el puerto sigue siendo ruido y la cita real resuelve su destino', () => {
+    // Calcado de `G-C11`: un control de una sola dirección lo pasa una función
+    // constante. Acá el caso malo tiene que morir Y el caso bueno tiene que
+    // seguir pasando.
+    //
+    // Input que lo pone en rojo: (a) aflojar D1 —sacarle el chequeo del carácter
+    // anterior— y el puerto pasa a CITA; (b) endurecer D3 —exigir que el
+    // contexto traiga `:N` y borrar D3b— y la cita cae a INDECIDIBLE.
+    const puerto = clasificar("const url = 'http://localhost:3001/x';");
+    expect(puerto.label, `se esperaba RUIDO para el puerto y salió ${puerto.label}`).toBe('RUIDO');
+    expect(puerto.rule).toBe('D1');
+
+    const conNumero = clasificar('// ver `src/services/agent.ts:12`, y el guard de `:20`');
+    expect(conNumero.label, `se esperaba CITA y salió ${conNumero.label}: ${conNumero.why}`).toBe(
+      'CITA',
+    );
+    expect(conNumero.target).toBe('src/services/agent.ts');
+    expect(conNumero.rule).toBe('D3a');
+
+    // D3b: el contexto nombra el archivo SIN número de línea. Es la mitad que
+    // se pierde si alguien «endurece» la regla exigiendo un `:N` en el contexto.
+    const sinNumero = clasificar('// `src/adapters/chain-resolver.ts` resuelve la cadena en `:20`');
+    expect(sinNumero.label, `se esperaba CITA por D3b: ${sinNumero.why}`).toBe('CITA');
+    expect(sinNumero.target).toBe('src/adapters/chain-resolver.ts');
+    expect(sinNumero.rule).toBe('D3b');
+
+    // Y el backtick NO decide: el mismo puerto backtickeado sigue sin ser cita,
+    // y la misma cita sin backticks sigue siéndolo.
+    expect(clasificar('// el puerto por defecto es `:443` del esquema').label).not.toBe('CITA');
+    expect(clasificar('// ver src/services/agent.ts:12 y el guard de :20').target).toBe(
+      'src/services/agent.ts',
+    );
+  });
+
+  it('G-C15: con HOMÓNIMOS el veredicto es INDECIDIBLE, nunca `candidates[0]`', () => {
+    // 🔴 EL DEFECTO QUE ESTE CONTROL EXISTE PARA IMPEDIR está a la vista en
+    // `citeTargetIfTracked`: `if (!raw.includes('/')) return candidates[0] ?? null;`
+    // Con un basename homónimo elige el primero EN SILENCIO. Ese comportamiento
+    // es aceptable ahí —verifica un `target` que un humano ya decidió— e
+    // inaceptable acá, donde no hay nadie que lo haya decidido.
+    //
+    // Input que lo pone en rojo: sustituir `resolveContextTarget` por
+    // `citeTargetIfTracked` en D3b. Resuelve un target arbitrario y este test
+    // dice cuál salió.
+    const candidatos = toyByBase.get('homonimo.ts') ?? [];
+    // ⛔ El assert es `> 1`, NUNCA un dígito: clavar el número de homónimos es un
+    // candado que se pudre solo el día que alguien agrega otro archivo con ese
+    // nombre — y en este repo eso pasa cada vez que se abre una HU.
+    expect(
+      candidatos.length,
+      'El fixture dejó de tener homónimos, así que este control no prueba nada.\n',
+    ).toBeGreaterThan(1);
+
+    const v = clasificar('// como explica `homonimo.ts`, el criterio está en `:20`');
+    expect(
+      v.label,
+      `se esperaba INDECIDIBLE por AMBIGUOUS y se obtuvo ${v.label}` +
+        `${v.target === undefined ? '' : ` con target \`${v.target}\``}: ${v.why}`,
+    ).toBe('INDECIDIBLE');
+    expect(v.target).toBeUndefined();
+    expect(v.rule).toBe('D7');
+
+    // La OTRA mitad, y es la que hace que la regla sea usable: si el párrafo
+    // trae además un contexto NO ambiguo, gana el no ambiguo. Medido: la
+    // versión gruesa —cualquier nombre ambiguo ⇒ indecidible— baja el recall a
+    // la mitad, porque casi todo párrafo largo menciona de paso algún `index.ts`.
+    const mixto = clasificar(
+      '// como explica `homonimo.ts`, el guard de `src/adapters/chain-resolver.ts` está en `:20`',
+    );
+    expect(mixto.label, `el contexto no ambiguo tenía que ganar: ${mixto.why}`).toBe('CITA');
+    expect(mixto.target).toBe('src/adapters/chain-resolver.ts');
+
+    // Y el resolvedor NUNCA devuelve `string | null` con homónimos: el tipo es
+    // lo que hace imposible confundir «no hay contexto» con «hay demasiado».
+    expect(
+      resolveContextTarget('ver `homonimo.ts`', 'src/lib/fixture.ts', toyTracked, toyByBase, 'bare'),
+    ).toBe('AMBIGUOUS');
+    expect(
+      resolveContextTarget('ver `nada.xyz`', 'src/lib/fixture.ts', toyTracked, toyByBase, 'bare'),
+    ).toBeNull();
+  });
+
+  it('G-C16: los OCHO archivos auto-referentes están fuera del universo, y este control no se lee a sí mismo', () => {
+    // 🔴 SON OCHO, NO SIETE. Los 7 de `DT-11` son los dos guardianes cuyos `:N`
+    // sueltos son el REGISTRO de citas ajenas. El octavo es
+    // `test/cited-lines-guard.sample.ts`, que contiene el `target` que el
+    // clasificador tiene que producir: si entrara al universo, el clasificador
+    // leería la respuesta.
+    //
+    // Input que lo pone en rojo: meter `test/cited-lines-guard.citations.ts` al
+    // universo. El token se resuelve leyendo su propio campo `target:`.
+    expect(SELF_REFERENTIAL.length).toBe(8);
+    expect(new Set(SELF_REFERENTIAL).size).toBe(SELF_REFERENTIAL.length);
+    for (const f of SELF_REFERENTIAL) {
+      expect(TRACKED_SET.has(f), `archivo auto-referente que no existe: ${f}`).toBe(true);
+    }
+    for (const f of [
+      'test/cited-lines-guard.citations.ts',
+      'test/cited-lines-guard.exceptions.ts',
+      'test/cited-lines-guard.sample.ts',
+    ]) {
+      expect(
+        SELF_REFERENTIAL.includes(f),
+        `archivo auto-referente DENTRO del universo del clasificador: ${f}\n` +
+          'Contiene el `target` que el clasificador tiene que producir; leerlo como\n' +
+          'contexto es un control comparándose contra su propia salida.\n',
+      ).toBe(true);
+    }
+
+    // Y la demostración de POR QUÉ, con un fixture en memoria que imita la forma
+    // de una entrada de estos registros: el destino está escrito DOS LÍNEAS
+    // debajo del token, dentro del mismo literal de objeto, o sea dentro del
+    // mismo párrafo. Sin la exclusión, el clasificador «acierta» leyendo la
+    // respuesta que el archivo ya trae escrita.
+    //
+    // ⚠️ El token del fixture va en la PROSA de un `reason:`, no en el campo
+    // `cite:`. Medido: un `cite: ':20'` lo caza D2 —el carácter anterior es una
+    // comilla— y nunca llega a mirar el contexto, así que un fixture con esa
+    // forma NO reproduce el defecto y este control quedaría decorativo. Lo que
+    // sí lo reproduce es el `` `:20` `` que estos archivos escriben backtickeado
+    // adentro de sus motivos, que es como está escrita la mitad de este repo.
+    const entradaFalsa = [
+      '  {',
+      "    file: 'test/no-trackeado.ts',",
+      "    verdict: 'OTRO',",
+      "    realTarget: 'src/services/agent.ts',",
+      "    reason: 'lo que se cita en `:20` vive en el otro archivo',",
+      '  },',
+    ].join('\n');
+    const leyendoLaRespuesta = clasificar(entradaFalsa, 'test/cited-lines-guard.citations.ts');
+    expect(
+      leyendoLaRespuesta.target,
+      'El fixture dejó de reproducir el defecto, así que la exclusión de los 8 ya no\n' +
+        'está justificada por nada medido y este control pasó a ser decorativo.\n',
+    ).toBe('src/services/agent.ts');
+  });
+
+  it('G-C17: el ORÁCULO preexistente — recall sobre el piso publicado y CERO destinos mal resueltos', () => {
+    // 🔴 POR QUÉ ESTE ORÁCULO Y NO OTRO: las entradas P3/P4 de `CITED_LINES` se
+    // etiquetaron a mano entre el 2026-08-19 y el 2026-08-27, en OTRAS HUs,
+    // antes de que existiera ningún clasificador. No se pueden haber escrito
+    // mirando su salida. Medir la cascada contra el archivo del que salieron sus
+    // reglas dio 100 % en el F1 de esta HU, y contra este oráculo dio 21 %.
+    const bare = CITED_LINES.filter((c) => !citeNamesFile(c.cite));
+    expect(bare.length, 'el oráculo se quedó sin entradas P3/P4').toBeGreaterThanOrEqual(19);
+
+    let aciertos = 0;
+    const malResueltos: string[] = [];
+    for (const c of bare) {
+      const src = readTracked(c.from);
+      const hit = scanSource(src, c.from).find(
+        (h) => h.cite === c.cite && (h.form === 'P3' || h.form === 'P4'),
+      );
+      if (hit === undefined) continue;
+      const v = classifyBareCite(hit, src, TRACKED_SET, BY_BASENAME);
+      if (v.label !== 'CITA') continue;
+      if (v.target === c.target) aciertos += 1;
+      else malResueltos.push(`${c.from} :: ${c.cite} → declarado ${c.target}, resuelto ${v.target}`);
+    }
+
+    // 🔴 CERO destinos mal resueltos es el invariante DURO. Un `INDECIDIBLE` de
+    // más pide que alguien mire; un destino inventado pasa los controles.
+    expect(
+      malResueltos,
+      'El clasificador afirmó un destino DISTINTO del que un humano declaró a mano.\n' +
+        'Eso no es menos recall: es una afirmación falsa con cara de medición.\n',
+    ).toEqual([]);
+
+    // ⚠️ PISO, no igualdad. Un test que exigiera «exactamente N» se pone rojo el
+    // día que alguien escriba una cita nueva, y ese rojo no señala nada falso:
+    // es la fricción que termina con alguien borrando el guardián.
+    expect(
+      aciertos,
+      `El recall del clasificador sobre el oráculo cayó a ${aciertos}/${bare.length}, por\n` +
+        'debajo del piso publicado en `doc/sdd/232-…/censo.md`. Si el clasificador cambió\n' +
+        'a propósito, se re-mide y se re-publica el censo; si no, algo se rompió.\n',
+    ).toBeGreaterThanOrEqual(6);
+
+    // Y el otro lado: las 4 ocurrencias que un humano declaró RUIDO a mano en
+    // `SCANNER_FALSE_POSITIVES` no pueden salir CITA.
+    for (const fp of SCANNER_FALSE_POSITIVES) {
+      const src = readTracked(fp.from);
+      for (const h of scanSource(src, fp.from)) {
+        if (h.cite !== fp.cite || (h.form !== 'P3' && h.form !== 'P4')) continue;
+        const v = classifyBareCite(h, src, TRACKED_SET, BY_BASENAME);
+        expect(
+          v.label,
+          `${fp.from}:${h.line} ${fp.cite} está declarado RUIDO a mano y salió ${v.label}`,
+        ).not.toBe('CITA');
+      }
+    }
+  });
+
+  it('G-C17b: la MUESTRA RESERVADA — los números se re-derivan, no se leen del censo', () => {
+    // 🔴 LA CEGUERA NO SE PROMETE: SE GARANTIZA POR ORDEN DE COMMITS. En el
+    // commit que trae estas 120 etiquetas, `classifyBareCite` no existe en el
+    // árbol. Se comprueba con
+    //   git show <ese commit>:test/cited-lines-guard.scanner.ts | grep -c classifyBareCite
+    //
+    // 🔴 Y LOS FUENTES SE LEEN DEL COMMIT BASE, no del árbol de hoy (CD-21). Sin
+    // eso, este control sería un candado que se pudre solo: cualquiera que
+    // inserte una línea en alguno de los ~50 archivos de la muestra correría las
+    // 120 posiciones y lo pondría rojo sin que nada estuviera mal.
+    //
+    // Input que lo pone en rojo: editar una etiqueta de `RESERVED_SAMPLE` sin
+    // tocar el censo — el número derivado deja de coincidir con el publicado.
+    expect(RESERVED_SAMPLE.length).toBe(120);
+    const src = new Map<string, string>();
+    for (const s of RESERVED_SAMPLE) {
+      if (src.has(s.file)) continue;
+      src.set(
+        s.file,
+        execFileSync('git', ['show', `${SAMPLE_BASE_COMMIT}:${s.file}`], {
+          cwd: REPO_ROOT,
+          encoding: 'utf8',
+          maxBuffer: 64 * 1024 * 1024,
+        }),
+      );
+    }
+
+    const stats = { P3: { tp: 0, fp: 0, fn: 0 }, P4: { tp: 0, fp: 0, fn: 0 } };
+    const ausentes: string[] = [];
+    for (const s of RESERVED_SAMPLE) {
+      const texto = src.get(s.file) as string;
+      let n = 0;
+      let hit: FoundCite | undefined;
+      for (const h of scanSource(texto, s.file)) {
+        if (h.line !== s.line || h.cite !== s.cite) continue;
+        if (h.form !== 'P3' && h.form !== 'P4') continue;
+        if (n === s.nth) {
+          hit = h;
+          break;
+        }
+        n += 1;
+      }
+      if (hit === undefined) {
+        ausentes.push(siteKey(s));
+        continue;
+      }
+      const v = classifyBareCite(hit, texto, TRACKED_SET, BY_BASENAME);
+      const st = stats[s.form];
+      const pred = v.label === 'CITA';
+      const real = s.label === 'CITA';
+      if (pred && real && v.target === s.target) st.tp += 1;
+      else if (pred && real) {
+        st.fp += 1;
+        st.fn += 1;
+      } else if (pred) st.fp += 1;
+      else if (real) st.fn += 1;
+    }
+    expect(
+      ausentes,
+      'Sitios de la muestra que ya no existen AL COMMIT BASE. Como los fuentes se leen\n' +
+        'de ese commit, esto no puede pasar por una edición de hoy: significa que la\n' +
+        'muestra y el commit base dejaron de corresponderse.\n',
+    ).toEqual([]);
+
+    // Los números PUBLICADOS en `doc/sdd/232-…/censo.md`, re-derivados acá. Si
+    // alguien cambia una etiqueta y no re-publica, esto lo dice con los dos
+    // números al lado.
+    const publicado = { P3: { tp: 13, fp: 1, fn: 44 }, P4: { tp: 1, fp: 0, fn: 1 } };
+    for (const form of ['P3', 'P4'] as const) {
+      expect(
+        stats[form],
+        `El estrato ${form} declara ${JSON.stringify(publicado[form])} en el censo y la\n` +
+          `derivación de esta corrida da ${JSON.stringify(stats[form])}.\n` +
+          'Uno de los dos está viejo: se re-mide y se re-publica, no se ajusta el número.\n',
+      ).toEqual(publicado[form]);
+    }
+    // ⛔ Y el invariante que NO es una foto: cero destinos inventados en P4, que
+    // es el estrato masivo. Éste no se re-publica: se arregla.
+    expect(stats.P4.fp).toBe(0);
+  });
+
+  it('G-C17c: el censo de D5 tiene una entrada por sitio, y su veredicto es el que degradó la regla', () => {
+    // 🔴 D5 ESTÁ DEGRADADA A `INDECIDIBLE`, y este control es lo que impide que
+    // alguien la vuelva a encender sin re-hacer el censo. El umbral se escribió
+    // ANTES de medir (CD-19): más de 21 % de destinos equivocados y D5 se cae.
+    //
+    // Input que lo pone en rojo: volver a emitir `CITA` desde D5 — la lista de
+    // sitios sigue igual pero el clasificador deja de decir `INDECIDIBLE`.
+    const sitios = new Map<string, string>();
+    for (const c of CORTE_A_PATHS) void c;
+    for (const e of D5_CENSUS) {
+      const k = `${e.file} :: ${e.line} :: ${e.cite}`;
+      expect(sitios.has(k), `entrada duplicada en el censo de D5: ${k}`).toBe(false);
+      sitios.set(k, e.verdict);
+      expect(e.reason.length, `motivo demasiado corto para ${k}`).toBeGreaterThan(40);
+      expect(
+        e.realTarget !== undefined,
+        `\`realTarget\` incoherente con verdict=${e.verdict} en ${k}`,
+      ).toBe(e.verdict === 'OTRO');
+    }
+
+    const equivocados = D5_CENSUS.filter((e) => e.verdict !== 'AUTO').length;
+    const tasa = equivocados / D5_CENSUS.length;
+    expect(
+      tasa,
+      `El censo de D5 declara ${equivocados} destinos equivocados sobre ${D5_CENSUS.length}\n` +
+        `(${(tasa * 100).toFixed(0)} %). El umbral escrito ANTES de medir era 21 %.\n` +
+        'Si esto bajó del umbral, D5 se puede volver a encender — pero re-midiendo el\n' +
+        'censo entero, no editando este número.\n',
+    ).toBeGreaterThan(0.21);
+
+    // Y la consecuencia mecánica: mientras el censo esté por encima del umbral,
+    // NINGÚN sitio de D5 puede salir `CITA`.
+    for (const e of D5_CENSUS.slice(0, 6)) {
+      const texto = execFileSync('git', ['show', `${SAMPLE_BASE_COMMIT}:${e.file}`], {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      const hit = scanSource(texto, e.file).find((h) => h.line === e.line && h.cite === e.cite);
+      expect(hit, `sitio del censo de D5 ausente al commit base: ${e.file}:${e.line}`).toBeDefined();
+      const v = classifyBareCite(hit as FoundCite, texto, TRACKED_SET, BY_BASENAME);
+      expect(v.rule, `${e.file}:${e.line} dejó de llegar a D5`).toBe('D5');
+      expect(
+        v.label,
+        `${e.file}:${e.line} volvió a salir CITA desde D5, con el censo todavía en rojo`,
+      ).toBe('INDECIDIBLE');
+    }
   });
 });
