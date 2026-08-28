@@ -203,15 +203,24 @@ manifiesto. Tras restaurar, las dos suites vuelven a **35 passed (35)**.
 ## [2026-08-27] TD-370-CITAS-FUERA-DEL-CORTE — declaradas, NO tocadas
 
 `CORTE_A_PATHS` son 14 paths; fuera de ellos las citas se pudren en silencio y **ningún guardián
-las mira**. La inserción de W1.B corrió estas dos, y arreglarlas violaría CD-9 (`discovery.ts` y
-el camino del dinero están en Scope OUT):
+las mira**. Arreglarlas violaría CD-9 (`discovery.ts` y el camino del dinero están en Scope OUT):
 
-- `src/services/discovery.ts` cita un rango de `services/agent.ts` que esta HU desplazó.
-- `src/services/orchestrate.ts` cita una línea de `services/agent.ts` que esta HU desplazó.
+- `src/services/discovery.ts` cita un rango de `services/agent.ts` para el SELECT sin `limit` de
+  `listAsAgents`.
+- `src/services/orchestrate.ts` cita una línea de `services/agent.ts` para el SELECT de
+  `getBySlugAsAgent`.
+- `src/services/agent.ownership.test.ts` cita `agent.ts` **cinco veces**: dos para `listMine`, dos
+  para el chequeo de dueño del `delete` y una para su `return`.
 
-Y una **ya podrida antes de esta HU**, que se declara para que el CR no la impute a este trabajo:
-`src/services/agent.ownership.test.ts` cita una línea de `agent.ts` como `listMine`, y `listMine`
-ya vivía en otra línea antes de tocar nada.
+⚠️ **PROVENANCE — corregida en la iteración 1 (CR-it1/MNR-3).** Acá decía que "la inserción de W1.B
+corrió estas dos", y es **FALSO**: **las tres ya estaban podridas en `091db28`**, antes de que esta
+HU tocara nada. Reproducido abriendo el árbol base con `git show 091db28:src/services/agent.ts`:
+`listAsAgents` vivía en la línea 505 y la cita dice `429-440`; `getBySlugAsAgent` en la 578 y la
+cita dice `526`; `listMine` en la 598 y la cita dice `549`; el `delete` en la 798 y las citas dicen
+`715`/`721`. Esta HU las **desplazó más**, no las rompió. La conclusión no cambia —se dejan como
+están, y lo que se agrega es que estén escritas— pero **atribuirle a este trabajo un daño que ya
+existía es exactamente la clase de afirmación que este archivo existe para no repetir**, y además
+apaga la búsqueda de la causa real.
 
 ⚠️ Las tres se dejan **como están, a propósito**. Lo que se agrega es que estén escritas.
 
@@ -232,7 +241,7 @@ ya vivía en otra línea antes de tocar nada.
   archivo que yo hubiera escrito.
 - **Causa raíz 1 — el bug REAL, y era mío**: `TypeError: Cannot read properties of undefined
   (reading 'trim')`, 23 veces. Yo había escrito
-  `row.payout_wallet !== null && row.payout_wallet.trim() !== ''`. Los cuatro llamadores entran a
+  `row.payout_wallet !== null && row.payout_wallet.trim() !== ''`. Los tres llamadores entran a
   `mapRowToRecord` por un **cast** (`as unknown as OwnedAgentRow`), así que en tiempo de ejecución
   llega lo que la query trajo: los dobles de Supabase de media docena de suites devuelven filas
   **sin la columna**, o sea `undefined`, que **no es `null`** — pasa el filtro y revienta en el
@@ -272,3 +281,192 @@ ya vivía en otra línea antes de tocar nada.
 - **Aplicar en**: el arreglo de citas por desplazamiento es **lo último que se toca**, después del
   formateador y después del último fix. Hacerlo antes es garantizar hacerlo dos veces — y la
   segunda es la que se olvida.
+
+---
+
+# FIX-PACK · iteración 1 (AR + CR RECHAZADO) — 2026-08-27
+
+## [2026-08-27 20:4x] BLQ-1 — Tres mutantes vivos: la mitad de completitud sólo se probaba SALTEÁNDOSE la función que produce el dato
+
+- **Error**: `evaluarCompletitud` tenía sus dos ramas `sin-dato` **sin un solo test que las
+  ejercitara por el camino real**. Los fixtures de T-C3/T-C4 traían **siempre**
+  `hasPayoutWallet: true`, y los únicos tests que tocaban `sinDato` se lo inyectaban **directo a
+  `classify`**. Resultado medido: tres mutantes con la suite **35/35 verde**, y uno de ellos
+  produciendo `exit 0 CONFORME … comparados=1 sindato=0` sobre algo que nunca se midió.
+- **Causa raíz**: probar la escalera con `obs` sintético es barato y da sensación de cobertura
+  por fila, pero **corta el cable entre el productor del dato y el clasificador**. La invariante
+  que el docblock declara como razón de ser de la HU —*"un dato AUSENTE no es un dato bueno"*—
+  vivía entera en ese cable. Y la asimetría lo delata: en la mitad de **deriva** el mismo mutante
+  muere (T-J1/T-J2 corren por `main()`), así que fue olvido, no diseño.
+- **Fix**: `T-C6`, un único test **por `main()`** con los dos fixtures que faltaban (registro
+  ausente y registro sin el booleano) que afirma **tres** cosas: `exit === CONFIG`, `sindato=1`
+  y **`comparados=0`**. Las tres hacen falta: el exit mata M8 y M9; **sólo `comparados=0` mata a
+  M14**, que deja el exit correcto y vacía de significado al contador que la fila anti-vacuidad y
+  su control positivo leen como "el chequeo ejecutó".
+- **Aplicar en**: cuando una función pura produce un estado y otra lo clasifica, **un test que le
+  pasa el estado a mano no prueba la primera**. Al menos uno tiene que entrar por el punto de
+  entrada real. Y el contador que un control positivo lee es parte del contrato: se afirma su
+  valor exacto, no `> 0`.
+
+## [2026-08-27] BLQ-2 / MNR-2 — Cuarta pasada de citas, y esta vez las de PROSA que ningún guardián mira
+
+- **Error**: `test/ownership-filter-guard.exceptions.ts` decía que el dueño se compara en `:697`
+  (update) y `:872` (delete). Reales: **`:711`** y **`:886`**. `:697` es la **firma** de `update`;
+  `:872` es una apertura de docblock. Mismo error, viejo, en el comentario de
+  `test/cited-lines-guard.citations.ts`.
+- **Causa raíz**: los valores previos (`:633`/`:808`) eran **correctos** en `091db28`. El
+  desplazamiento real de esa región fue **+78** y a estos dos se les aplicó **+64**, el delta de
+  la **primera** pasada. O sea: **la re-derivación de la tercera vuelta llegó a `citations.ts` y
+  no a `exceptions.ts`.** Sumar un delta es adivinar; abrir la línea es medir.
+- **Fix**: re-derivadas **abriendo cada línea** y confirmando el método contenedor por el
+  `op:` de al lado (`agentPublishUpdate` en `:711`, `agentPublishDelete` en `:886`). Verificado
+  además que la tercera cita del mismo motivo (`:525`, pre-check de colisión de slug) **sí** es
+  correcta. En `citations.ts` se agrega la advertencia de que esos dos números son prosa.
+- **🔴 MEDIDO, y es el hallazgo**: con las dos citas apuntando a `:99999`/`:99998` —líneas que no
+  existen en un archivo de 950— **`npm test` completo sale VERDE: `314 passed | 6 skipped (320)`,
+  `6349 passed`**. No hay ningún rojo que confirmar porque **no hay guardián**. El silencio se
+  midió en vez de suponerse. ⇒ **TD-370-EXCEPTIONS-SIN-GUARDIAN**, abajo.
+- **Aplicar en**: una cita de línea **nunca** se actualiza sumándole el delta de otra pasada. Y
+  cuando una corrección no tiene rojo posible, lo que se reporta no es "verificado": es **la
+  medición de que nadie lo mira**.
+
+## [2026-08-27] BLQ-3 — Una credencial revocada se reportaba como caída de producción
+
+- **Error**: `/agents` con `401`/`403` caía en el `status !== 200` genérico ⇒ `INALCANZABLE(2)`
+  con el texto *"esto NO dice que el catálogo esté mal"*. El propio docblock define `CONFIG` como
+  *"yo no estoy en condiciones de preguntar"*, y el caso hermano —credencial **ausente**— ya salía
+  `CONFIG(3)` nombrándola.
+- **Causa raíz**: **ausente y revocada son el mismo hecho por dos códigos distintos**, y el
+  segundo entró por el camino del error de transporte porque *llegó como un status HTTP*. La
+  forma del error se comió su significado.
+- **Fix**: partición explícita antes del genérico ⇒ `obs.credencialRechazada`, y una fila **4b**
+  en la escalera (hermana de la 4: misma clase, misma variable nombrada, y **numerada `4b` a
+  propósito para no correr los números del contrato del W0**). Leyenda del issue y docblock del
+  workflow ampliados. Test `T-E5`, con el contraste de que un `503` del **mismo** listado sigue
+  siendo `INALCANZABLE`.
+- **Aplicar en**: antes de mandar un status al cajón de "el otro no contestó", preguntar **quién
+  falló**. Un `4xx` de autenticación acusa a mi credencial; un `5xx` acusa al otro lado.
+
+## [2026-08-27] BLQ-4 — El mensaje afirmaba que el catálogo estaba bien en la misma línea que decía `derivas=4`
+
+- **Error**: `1 manifiesto caído + 4 derivas REALES` salía `exit=2` con *"esto NO dice que el
+  catálogo esté mal"*. Quien confía en el exit code —que es lo que AC-8 le pide— se perdía las
+  cuatro, y un solo manifiesto flaky enmascaraba la señal todos los días.
+- **Causa raíz**: el principio correcto estaba **escrito** en el docblock de la fila 10 —*"si
+  coexisten manda la que cuesta dinero"*— y aplicado entre 10 y 11, pero **no** a las filas 8 y 9,
+  que van antes y no acusan a nadie. Que la colisión 10 vs 12 esté bien resuelta prueba que fue
+  olvido y no diseño.
+- **Fix elegido, y por qué**: de las dos salidas legítimas —mover 8/9 debajo de 10/11, o cambiar
+  su mensaje— se tomó una **tercera que las domina**: el mismo `guard` que la fila 7 ya usa
+  (`&& !acusaAlCatalogo`). Corrige el **exit code**, que es lo que el mensaje solo no arregla, y
+  **deja las filas en el lugar que el contrato del W0 les da**, así que la escalera se sigue
+  pudiendo auditar renglón por renglón contra el Story File. Mover las filas habría sido drift del
+  contrato; cambiar sólo el mensaje habría dejado el exit mintiendo. Test `T-E6`, con las cuatro
+  combinaciones puras: cuando **no** coexisten, 8 y 9 siguen ganando (T-E4b sigue verde).
+- **Aplicar en**: cuando un docblock enuncia un principio de precedencia, **buscar todas las
+  parejas donde aplica**, no sólo la que motivó escribirlo. Un principio aplicado en un solo lugar
+  es una excepción disfrazada de regla.
+
+## [2026-08-27] BLQ-5 — Repetí, para `owner_ref`, el defecto que estaba corrigiendo para `payout_wallet`
+
+- **Error**: el párrafo de CD-23 decía *"la primera mitad sigue siendo cierta: `AgentRow` no las
+  tipa"*, con antecedente **las tres** columnas (`owner_ref, payout_wallet, referrer_ref`).
+  `AgentRow` **sí** tipa `owner_ref`, y lo tipaba igual en `091db28`.
+- **Causa raíz**: el párrafo que se estaba corrigiendo hablaba de tres columnas como un bloque, y
+  la corrección **heredó el sujeto plural sin re-verificarlo columna por columna**. Lo que protege
+  a `owner_ref` no es el tipo: es que `mapRowToAgent` **no la emite** — **barrera de VALOR**, y el
+  párrafo la vendía como de tipo. Cuatro renglones más abajo `referrer_ref` sí estaba
+  singularizado bien, lo que muestra que el defecto es del sujeto colectivo, no del conocimiento.
+- **Fix**: sujeto acotado a las dos columnas para las que la afirmación es cierta, y la barrera de
+  `owner_ref` nombrada por lo que es. **Y el test que faltaba**: `T-S6` **deriva del fuente** que
+  `AgentRow` declara `owner_ref` y no declara las otras dos, y exige que el párrafo diga eso.
+  `T-S5` verificaba **que la edición ocurrió**, nunca que la frase superviviente fuera verdadera —
+  la misma clase de guardián que mira la columna y no el valor.
+- **Aplicar en**: cuando se corrige una afirmación sobre **N** cosas, se re-verifica **una por
+  una**. Y un test de prosa que sólo busca `toContain` de la frase nueva no prueba nada sobre la
+  frase vieja que quedó al lado: hay que anclar el test al **hecho derivado del fuente**.
+
+## [2026-08-27] MNR — los cuatro que se arreglaron, y el que se difiere
+
+- **MNR-CR-1** — `agent.ts` decía *"los **cuatro** llamadores"* nueve renglones después de decir
+  *"sus **tres**"*, y el mismo número falso estaba en este archivo. Son **tres**. `T-S6` ahora los
+  **cuenta sobre el fuente** y exige el número en palabras, acotado al docblock del tipo (el
+  archivo habla de "los dos llamadores" de otra función, y esa frase es cierta y es de otra HU).
+  ⚠️ *"las cuatro lecturas y las dos escrituras"* **es cierta y no se tocó**.
+- **MNR-CR-2** — ver BLQ-2: mismo mecanismo, en el archivo donde esa lección está escrita.
+- **MNR-CR-3** — **provenance corregida**, no la conclusión: la TD decía que *"la inserción de
+  W1.B corrió estas dos"* y **las tres ya estaban podridas en `091db28`** (reproducido con
+  `git show 091db28:src/services/agent.ts`: `listAsAgents` en 505 vs cita `429-440`,
+  `getBySlugAsAgent` en 578 vs `526`, `listMine` en 598 vs `549`, `delete` en 798 vs `715`/`721`).
+  Y `agent.ownership.test.ts` tiene **5** tokens podridos, no 1. Imputarle a este trabajo un daño
+  preexistente apaga la búsqueda de la causa real.
+- **MNR-4 (AR-2 = CR-4)** — los dos npm scripts tenían **cuerpo idéntico** y no fijaban
+  `CHECK_MODE` ⇒ a mano daban `CONFIG(3)`. Peor: **`T-S4` clavaba el cuerpo duplicado**, así que
+  su verde no validaba los scripts, **los congelaba**. Arreglados los dos **y el test con ellos**,
+  que ahora además cruza el modo contra `MODOS`.
+- **MNR-AR-1** — un `/discover` que contesta `200` con HTML o con `agents` que no es array
+  **rompió su contrato**, no se cayó. Misma clase (el listado quedó sin leer igual), pero el
+  detalle ahora lo distingue: `/discover 200 con un cuerpo del que no sale la lista de agentes`.
+  Test `T-E7`.
+- **MNR-CR-5** — `GET /agents` no está en la tabla de `doc/INTEGRATION.md`. Hueco
+  **pre-existente y fuera de Scope IN** ⇒ **backlog, no fix-pack**. No se tocó.
+
+## [2026-08-27] TD-370-EXCEPTIONS-SIN-GUARDIAN — declarada, medida, NO cerrada
+
+`test/ownership-filter-guard.exceptions.ts` es el archivo que justifica **por qué una query NO
+lleva filtro de ownership** — el artefacto que la sección *Security Conventions* de `CLAUDE.md`
+manda auditar. Sus motivos citan líneas de `src/services/*.ts` **en prosa**, y **ningún guardián
+las verifica**: no está en `CORTE_A_PATHS`, y el guardián de citas sólo declara entradas cuyo
+`from` esté en ese corte.
+
+**Medido, no supuesto** (arriba, BLQ-2): con dos citas apuntando a líneas inexistentes, la suite
+completa sale verde. Un revisor que siga una de esas citas cae en un comentario, no encuentra el
+chequeo, y **no puede validar la excepción**.
+
+**Por qué no se cierra en este fix-pack**: meter el archivo en `CORTE_A_PATHS` obliga a declarar
+**todas** sus citas de una vez y mueve los invariantes de conteo del guardián — es una HU propia,
+no un renglón de un fix-pack de 5 bloqueantes. Queda escrita acá, con su medición, para que la
+próxima no la descubra de nuevo.
+
+## [2026-08-27] FIX-PACK · CUARTA pasada de citas — las rompió MI PROPIO arreglo de prosa
+
+- **Error**: gate final del fix-pack en rojo con **3 tests / 7 sitios**: `G-C5` (3 citas movidas),
+  `G-08` (4 cadenas "sin motivo escrito") y `G-09` (4 excepciones "que sobreviven a su sitio").
+  Ninguno de los 7 es código que yo haya escrito: **los desplazó el párrafo de CD-23**, que pasó de
+  6 a 9 renglones, y la reflow de "los tres llamadores", que sumó uno más.
+- **Causa raíz**: exactamente la lección que este archivo ya tenía escrita —*"el arreglo de citas
+  por desplazamiento es lo último que se toca"*— y que **no apliqué a un arreglo de PROSA**, porque
+  no se siente una inserción: es un párrafo. Un comentario de 9 líneas donde había 6 mueve tanto
+  como un `if`. **Los barridos miran lo que escribiste, no lo que desplazaste.**
+- **Fix**: re-derivados los **once** anclas **abriendo cada línea** y confirmando el símbolo
+  contenedor por el `async <método>(` de arriba y el `op:` de al lado — nunca sumando el `+4`, que
+  es el error del BLQ-2 de este mismo fix-pack:
+  - `exceptions.ts`: chains `450→454` (getSplitContextRow), `585→589` (listAsAgents),
+    `625→629` (listPublisherAnchors), `658→662` (getBySlugAsAgent); `417` (getRow) **no se movió**.
+  - prosa dentro de esas mismas razones: `:711→:715`, `:886→:890`, `:525→:529`,
+    `:428-443→:428-447`, `:581→:585`.
+  - `citations.ts` + los tokens en los fuentes citadores: `src/types/index.ts` `:477→:481` y
+    `src/routes/agents.ownership.test.ts` `:886→:890` y `:900→:904`. **Renombrados de mayor a
+    menor**, por la colisión que ya costó un intento en W3.3.
+  ⚠️ **Desvío del Scope IN declarado**: se editaron `src/types/index.ts` y
+  `src/routes/agents.ownership.test.ts`, que sólo contienen el número de la cita. Es la misma clase
+  de desvío forzado que W4.2. ⛔ Y **CD-9 se respetó**: las 3 citas que deben quedar podridas viven
+  en `discovery.ts`, `orchestrate.ts` y `src/services/agent.ownership.test.ts` —el del **service**,
+  no el de la **ruta**— y **ninguna de las tres se tocó**.
+- **Aplicar en**: un fix-pack que edita prosa en un archivo grande de `src/` **termina** con el
+  barrido de citas, igual que uno que edita código. Y el rojo de `G-08` dice *"cadena sin motivo
+  escrito"*, que **suena a un agujero de seguridad nuevo** y es un número de línea viejo: leer el
+  código antes de creerle al mensaje.
+
+### El gate del fix-pack, corrido completo y en orden, con el árbol staged
+
+```
+git add -A
+npx tsc -p tsconfig.json --noEmit   → exit 0
+npm run lint                        → Checked 520 files. No fixes applied.   exit 0
+npm test                            → Test Files 314 passed | 6 skipped (320)
+                                       Tests    6350 passed | 19 skipped (6369)   exit 0
+```
+Entrada del fix-pack: `520 · 314/320 · 6345/6364`. **+5 casos, CERO archivos nuevos** (T-C6, T-E5,
+T-E6, T-E7 en la suite del chequeo; T-S6 en la del servicio) ⇒ los conteos de archivo de los README
+**no se tocan**, y el guardián que los verifica corrió en verde dentro de ese `npm test`.

@@ -38,7 +38,11 @@
  *                            CONFIG(3). ⛔ NO hay default que corra "algo": un
  *                            typo mediría otra cosa en silencio.
  *   A2A_CATALOG_OWNER_KEY    Sólo en modo `completitud`. Ausente ⇒ CONFIG(3)
- *                            nombrándola. Nunca se imprime.
+ *                            nombrándola, y RECHAZADA (401/403) ⇒ la MISMA clase,
+ *                            también nombrándola: revocada y ausente son el mismo
+ *                            hecho por dos códigos distintos, y reportar la revocada
+ *                            como caída del otro lado manda a mirar el deploy en vez
+ *                            de rotar el secreto. Nunca se imprime.
  *
  * ── TD-370-OUTPUTSCHEMA-SIN-FUENTE ────────────────────────────────────────────
  * `outputSchema` se CUENTA y se reporta (`outputSchemaPresente=n/n`), y NO entra a
@@ -282,7 +286,14 @@ export function evaluarCompletitud(fila, registro) {
  * ⚠️ La fila 10 va ANTES que la 11 a propósito: una fila incompleta NO se reporta
  * como sana ni aunque su deriva sea cero, y si coexisten manda la que cuesta
  * dinero. El orden no esconde nada: la línea de salida lleva SIEMPRE los seis
- * contadores, así que el exit atribuye y la línea enumera.
+ * contadores, así que el exit atribuye y la línea enumera. Ese mismo principio es
+ * el que guardan las filas 8 y 9: una acusación al catálogo no se puede tapar con
+ * un "no pude preguntar" que convive con ella.
+ *
+ * ⚠️ La fila 4b no está en la escalera del contrato y se numera así, y no como una
+ * fila nueva, para no correr los números de las demás: es la hermana de la 4 —misma
+ * clase, misma variable nombrada— y una credencial rechazada es el mismo hecho que
+ * una ausente.
  *
  * ⚠️ La fila 13 pregunta sólo por `comparados`, y es deliberado: las filas 8 a 12
  * ya sacaron del camino todo lo que no está sano. Re-preguntarlo acá haría que
@@ -313,6 +324,13 @@ export function classify(obs) {
   if (modo === 'completitud' && obs.credencialPresente !== true) {
     return verdict('CONFIG', 'falta la credencial A2A_CATALOG_OWNER_KEY — la completitud NO se verificó, y un sin dato jamás sale por exit 0');
   }
+  // 4b — la hermana de la 4, y sale por la MISMA clase que ella a propósito: una
+  // credencial ausente y una credencial rechazada son el mismo hecho —"no estoy en
+  // condiciones de preguntar"— por dos códigos distintos. Nombra la variable, igual
+  // que la 4, porque lo que hay que hacer es rotar el secreto.
+  if (modo === 'completitud' && obs.credencialRechazada !== undefined) {
+    return verdict('CONFIG', `el listado propio rechazó la credencial A2A_CATALOG_OWNER_KEY (${obs.credencialRechazada}) — hay que rotarla; la completitud NO se verificó y un sin dato jamás sale por exit 0`);
+  }
   // 5
   if (modo === 'deriva' && obs.conSchemaEnMetadata === 0) {
     return verdict('CONFIG', 'ningún elegible publica su inputSchema bajo metadata — un cero uniforme acusa al instrumento que lo buscó donde no vive');
@@ -336,12 +354,29 @@ export function classify(obs) {
   if (obs.comparados === 0 && obs.inalcanzables === 0 && obs.unresolved === 0) {
     return verdict('CONFIG', 'el chequeo terminó sin haber comparado ni un par — un chequeo que no ejecutó nada no afirma nada');
   }
+  // 8 y 9 — con el MISMO guard que la fila 7, y por el mismo motivo.
+  //
+  // ⚠️ MEDIDO: con la condición literal del contrato, un solo manifiesto caído
+  // conviviendo con cuatro derivas REALES sale `exit=2` diciendo textualmente "esto NO
+  // dice que el catálogo esté mal" **en la misma línea que dice `derivas=4`**. O sea:
+  // el mensaje afirma que el catálogo está bien mientras el contador lo desmiente, y
+  // quien confía en el exit code —que es lo que AC-8 le pide— se pierde las cuatro.
+  // Un manifiesto flaky enmascararía la señal todos los días.
+  //
+  // El principio que lo resuelve ya estaba escrito para la fila 10 y sólo faltaba
+  // aplicarlo acá: **si coexisten, manda la que cuesta dinero**. Y se aplica igual que
+  // en la fila 7 —agregando la condición que faltaba, sin mover las filas de lugar—
+  // para que la escalera se siga pudiendo auditar contra el contrato del W0 renglón
+  // por renglón. Es equivalente a evaluar 10 y 11 primero, y no pierde nada: cuando
+  // NO coexisten (que es el caso de todos los días) estas dos filas siguen ganando, y
+  // la línea de salida lleva SIEMPRE los seis contadores.
+  const acusaAlCatalogo = obs.incompletas > 0 || obs.derivas > 0;
   // 8
-  if (obs.inalcanzables > 0) {
+  if (obs.inalcanzables > 0 && !acusaAlCatalogo) {
     return verdict('INALCANZABLE', `${obs.inalcanzables} elegible(s) no contestaron — esto NO dice que el catálogo esté mal`);
   }
   // 9
-  if (obs.unresolved > 0) {
+  if (obs.unresolved > 0 && !acusaAlCatalogo) {
     return verdict('UNRESOLVED', `${obs.unresolved} elegible(s) cuya unión con su manifiesto no se pudo verificar — de ésos no se comparó ni un campo`);
   }
   // 10
@@ -426,7 +461,15 @@ export async function main(env = process.env, escribir = (s) => process.stdout.w
   const lista = await request(`${BASE_URL}/discover`, { method: 'GET' }, LISTA_TIMEOUT_MS, true);
   if (lista.status !== 200 || !Array.isArray(lista.body?.agents)) {
     obs.listadoInalcanzable = true;
-    obs.detalleListado = `/discover ${lista.networkError ?? lista.status ?? 'sin status'}`;
+    // Un `200` con un cuerpo del que no sale la lista —HTML de un proxy, o un
+    // `agents` que no es un array— NO es "no contestó": contestó y rompió su
+    // contrato. La clase es la misma porque el listado quedó sin leer igual, pero el
+    // detalle lo dice, porque son dos cosas distintas de arreglar y `catalogo=0` no
+    // alcanza para desambiguarlas.
+    obs.detalleListado =
+      lista.status === 200
+        ? '/discover 200 con un cuerpo del que no sale la lista de agentes'
+        : `/discover ${lista.networkError ?? lista.status ?? 'sin status'}`;
     return emit(classify(obs), obs, extra, t0, escribir);
   }
   const agentes = lista.body.agents;
@@ -457,6 +500,15 @@ export async function main(env = process.env, escribir = (s) => process.stdout.w
       LISTA_TIMEOUT_MS,
       true,
     );
+    // Una credencial RECHAZADA y una credencial AUSENTE son EL MISMO HECHO por dos
+    // códigos distintos: yo no estoy en condiciones de preguntar. El otro lado sí
+    // contestó —contestó que no me conoce—, así que llamarlo INALCANZABLE acusaría a
+    // producción de un defecto que es mío, y con la key rotada —operación rutinaria—
+    // el humano miraría el deploy en vez de rotar el secreto.
+    if (propios.status === 401 || propios.status === 403) {
+      obs.credencialRechazada = propios.status;
+      return emit(classify(obs), obs, extra, t0, escribir);
+    }
     if (propios.status !== 200) {
       obs.listadoInalcanzable = true;
       obs.detalleListado = `/agents ${propios.networkError ?? propios.status ?? 'sin status'}`;

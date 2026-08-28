@@ -92,11 +92,11 @@ interface AgentRow {
  * angosto futuro que alimente este mapper tenga que decir en voz alta que le está
  * pasando algo que no seleccionó.
  *
- * ⚠️ Y eso es TODO lo que el tipo compra, que es menos de lo que parece: los cuatro
- * llamadores entran por un cast, así que en tiempo de ejecución acá puede llegar una
- * fila SIN la columna. El mapper lo contempla y devuelve `false`; no se apoya en el
- * tipo para no reventar. La distinción entre "no la tiene" y "no la pude medir" no
- * vive en este booleano: vive del lado del chequeo, que trata un registro sin el
+ * ⚠️ Y eso es TODO lo que el tipo compra, que es menos de lo que parece:
+ * los tres llamadores entran por un cast, así que en tiempo de ejecución acá puede
+ * llegar una fila SIN la columna. El mapper lo contempla y devuelve `false`; no se
+ * apoya en el tipo para no reventar. La distinción entre "no la tiene" y "no la pude
+ * medir" no vive en este booleano: vive del lado del chequeo, que trata un registro sin el
  * campo como dato faltante y jamás como fila sana.
  */
 type OwnedAgentRow = AgentRow & { payout_wallet: string | null };
@@ -432,11 +432,15 @@ export const publishedAgentService = {
    * referrer_ref`. Uso server-side exclusivo desde `resolveAgentSplitContext`.
    *
    * ⚠️ WKH-370 CORRIGIÓ ESTE PÁRRAFO, que decía que esas columnas "jamás entran a
-   * `AgentRow` ni a un shape público". La primera mitad sigue siendo cierta:
-   * `AgentRow` no las tipa, y por eso `mapRowToAgent` —el mapper del catálogo
-   * ANÓNIMO— no puede verlas. La segunda mitad ya no lo sería si se dejaba escrita
-   * así: `mapRowToRecord` recibe `OwnedAgentRow` y LEE `payout_wallet`. Lo que NO
-   * cambió, y es lo que la regla protege, es que el VALOR no sale a ningún lado.
+   * `AgentRow` ni a un shape público". La primera mitad es cierta
+   * **sólo para dos de las tres**: `payout_wallet` y `referrer_ref` no están en ese
+   * tipo, y por eso `mapRowToAgent` —el mapper del catálogo ANÓNIMO— no puede verlas.
+   * `owner_ref` SÍ está en `AgentRow`, y ya estaba antes de esta HU: para ésa la
+   * barrera **no es de TIPO sino de VALOR** — ese mapper podría leerla y NO la emite,
+   * campo por campo, y eso es lo que se fija sobre el objeto que produce. La segunda
+   * mitad ya no lo sería si se dejaba escrita así: `mapRowToRecord` recibe
+   * `OwnedAgentRow` y LEE `payout_wallet`. Lo que NO cambió, y es lo que la regla
+   * protege, es que el VALOR no sale a ningún lado.
    * Lo que viaja al shape del dueño es un booleano de presencia, por una ruta
    * autenticada y acotada a su propio `owner_ref`. `referrer_ref` sigue sin entrar
    * a ningún tipo fuera de esta función.

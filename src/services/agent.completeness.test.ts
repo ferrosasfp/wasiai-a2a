@@ -11,6 +11,8 @@
  * T-B2 — CONTROL NEGATIVO: el objeto del catálogo ANÓNIMO no lo lleva, ni lleva la
  *        columna. La HU no agrega superficie pública anónima.
  * T-S5 — ningún comentario que esta HU agrega o edita en `agent.ts` cita una línea.
+ * T-S6 — y la prosa que sobrevivió a esa edición es VERDADERA, no sólo distinta: los
+ *        números y el sujeto de cada afirmación se DERIVAN del fuente.
  */
 
 import { readFileSync } from 'node:fs';
@@ -134,5 +136,57 @@ describe('WKH-370 · hasPayoutWallet en el shape del dueño', () => {
     expect(doc).toContain('WKH-370 CORRIGIÓ ESTE PÁRRAFO');
     expect(doc).not.toMatch(/JAMÁS entran a `AgentRow` ni a un shape público/);
     expect(doc).toContain('el VALOR no sale a ningún lado');
+  });
+
+  it('T-S6 (CR-it1/BLQ-5): la prosa que sobrevivió es VERDADERA, no sólo distinta', () => {
+    // T-S5 verifica que el párrafo se EDITÓ. Eso es presencia de la edición, nunca
+    // verdad de la frase superviviente — la misma clase de guardián que mira la
+    // columna y no el valor. Y la frase superviviente era falsa para una de las tres
+    // columnas: decía que `AgentRow` "no las tipa", con antecedente
+    // `owner_ref, payout_wallet, referrer_ref`.
+    const desde = AGENT_SRC.indexOf('async getSplitContextRow');
+    const doc = AGENT_SRC.slice(AGENT_SRC.lastIndexOf('/**', desde), desde);
+
+    // El ANCLA de verdad, derivada del tipo real y no copiada del párrafo: `AgentRow`
+    // SÍ declara `owner_ref`, y NO declara las otras dos. Si algún día eso cambia, el
+    // párrafo tiene que cambiar con él y este test es el que lo obliga.
+    const inicioTipo = AGENT_SRC.indexOf('interface AgentRow {');
+    const agentRow = AGENT_SRC.slice(
+      inicioTipo,
+      AGENT_SRC.indexOf('\n}', inicioTipo),
+    );
+    expect(inicioTipo).toBeGreaterThan(-1);
+    expect(agentRow).toContain('owner_ref: string;');
+    expect(agentRow).not.toContain('payout_wallet');
+    expect(agentRow).not.toContain('referrer_ref');
+    // ⇒ para `owner_ref` la barrera del catálogo anónimo NO puede ser el tipo. Es de
+    // valor: `mapRowToAgent` podría leerla y no la emite (T-B2 lo fija). El párrafo
+    // tiene que decir eso, y no lo contrario.
+    expect(doc).toContain('sólo para dos de las tres');
+    expect(doc).toContain('no es de TIPO sino de VALOR');
+
+    // Y el otro número que el párrafo del tipo afirma: los llamadores del mapper del
+    // dueño se CUENTAN sobre el fuente, no se escriben de memoria. Eran "cuatro" en
+    // dos sitios distintos, y son tres.
+    const enPalabras = ['cero', 'un', 'dos', 'tres', 'cuatro', 'cinco'];
+    const llamadores = AGENT_SRC.split('\n').filter(
+      (l) =>
+        l.includes('mapRowToRecord') &&
+        !/^\s*(\*|\/\/)/.test(l) &&
+        !l.includes('function mapRowToRecord'),
+    );
+    expect(llamadores).toHaveLength(3);
+    // Acotado al docblock del tipo que esta HU agregó: `agent.ts` habla de "los dos
+    // llamadores" de OTRA función más abajo, y esa frase es de otra HU y es cierta.
+    const dondeTipo = AGENT_SRC.indexOf('type OwnedAgentRow =');
+    const docTipo = AGENT_SRC.slice(
+      AGENT_SRC.lastIndexOf('/**', dondeTipo),
+      dondeTipo,
+    );
+    expect(dondeTipo).toBeGreaterThan(-1);
+    expect(docTipo).toContain(
+      `los ${enPalabras[llamadores.length]} llamadores`,
+    );
+    expect(docTipo).not.toMatch(/los (cero|un|dos|cuatro|cinco) llamadores/);
   });
 });

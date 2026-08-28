@@ -25,8 +25,11 @@ name: check-catalog-vs-live
 # documenta ACÁ y no en `.env.example` a propósito: ahí viven las envs del
 # SERVICIO, no las de un script de CI, y el equivalente de la sonda del camino del
 # dinero tampoco está (sólo su metadata no-secreta). Ausente ⇒ el job sale CONFIG
-# (exit 3) NOMBRÁNDOLA, y el job `deriva` corre igual: la falta del secreto no
-# puede convertirse en un verde ni en un rojo de producción.
+# (exit 3) NOMBRÁNDOLA, y RECHAZADA (401/403) sale por la MISMA clase y también la
+# nombra: una credencial revocada y una ausente son el mismo hecho —"no estoy en
+# condiciones de preguntar"— y reportar la revocada como caída de producción manda al
+# humano a mirar el deploy en vez de rotar el secreto. El job `deriva` corre igual: la
+# falta del secreto no puede convertirse en un verde ni en un rojo de producción.
 # `CHECK_MODE` — `deriva` | `completitud`. Ausente o no reconocido ⇒ CONFIG(3).
 # No hay default que corra "algo": un typo mediría otra cosa en silencio.
 #
@@ -236,7 +239,8 @@ jobs:
             "nacida puede coincidir con su manifiesto en todo y estar rota igual — por eso" \
             "esta mitad tiene su propio job y su propio issue. Exit 5 hay filas incompletas," \
             "3 el chequeo no está en condiciones de afirmar nada (por ejemplo: falta el" \
-            "secreto, o no se pudo medir alguna fila), 2 el otro lado no contestó." \
+            "secreto, la credencial fue RECHAZADA con 401/403 y hay que rotarla, o no se" \
+            "pudo medir alguna fila), 2 el otro lado no contestó." \
             "**Un exit 3 NO implica a producción.**" \
             "" \
             "Este issue se cierra solo en la próxima corrida por reloj que pase en verde.")

@@ -352,6 +352,47 @@ describe('WKH-370 · completitud: la fila mal nacida (AC-2, AC-3)', () => {
     expect(evaluarCompletitud(fila(), registro()).estado).toBe('completa');
   });
 
+  it('T-C6 (AR-it1/BLQ-1): un dato AUSENTE sale sin-dato por `main()` — y ⛔ NO cuenta como comparado', async () => {
+    // ⚠️ Este test corre por `main()` A PROPÓSITO, y ése es todo el punto. Los otros
+    // tests de completitud le inyectan el `sin-dato` DIRECTO a `classify`, saltándose
+    // la función que lo produce, y sus fixtures traen SIEMPRE `hasPayoutWallet: true`.
+    // Con ese hueco sobrevivían tres mutantes con la suite entera en verde:
+    //   · M8  — registro AUSENTE → `completa`: una fila que el listado no devolvió se
+    //           declara sana.
+    //   · M9  — registro SIN el booleano → `completa`: FALSO VERDE end-to-end, exit 0
+    //           "CONFORME … comparados=1 sindato=0" sobre algo que nunca se midió.
+    //   · M14 — `comparados += 1` movido ARRIBA del `continue`: el exit sigue estando
+    //           bien y `comparados > 0` deja de significar "comparé algo", que es lo
+    //           único que sostiene la fila anti-vacuidad y su control positivo.
+    // Por eso las tres aserciones van juntas: el exit mata a M8 y M9, y `comparados=0`
+    // —medido sobre la línea EMITIDA— es la única que mata a M14.
+    const casos = [
+      ['el registro no viene en el listado propio', []],
+      ['el registro viene SIN el booleano de payout', [{ slug: SLUG }]],
+    ];
+    for (const [porque, registros] of casos) {
+      const r = await correr(conCatalogo(registros), envCompletitud);
+      // Control positivo primero: si no salió a preguntarle al listado propio, el
+      // resto de este test no prueba nada.
+      expect(r.llamadas, porque).toContain(`GET ${AGENTS_URL}`);
+      expect(r.exit, porque).toBe(CLASES.CONFIG);
+      expect(r.exit, porque).not.toBe(CLASES.CONFORME);
+      expect(r.salida, porque).toContain('tipo=sin-dato');
+      const linea = r.salida.trim().split('\n').at(-1);
+      expect(linea, porque).toMatch(/ sindato=1 /);
+      // ⛔ La que mata a M14: un elegible que NO se pudo medir no engrosa el contador
+      // que después la escalera lee como "el chequeo ejecutó".
+      expect(linea, porque).toMatch(/ comparados=0 /);
+    }
+    // Y el contraste que prueba que el rojo de arriba viene del dato faltante y no de
+    // que esta mitad no funcione: el MISMO camino, con el booleano presente, mide.
+    const medido = await correr(conCatalogo([registro()]), envCompletitud);
+    expect(medido.exit).toBe(CLASES.CONFORME);
+    const lineaMedida = medido.salida.trim().split('\n').at(-1);
+    expect(lineaMedida).toMatch(/ comparados=1 /);
+    expect(lineaMedida).toMatch(/ sindato=0 /);
+  });
+
   it('T-C5 (D-1): sin outputSchema en catálogo NI en manifiesto → CONFORME(0), y se CUENTA', async () => {
     const sinOutput = fila({ metadata: { inputSchema: SCHEMA_REAL, payment: PAGO_PERSISTIDO } });
     const r = await correr({
@@ -470,6 +511,7 @@ describe('WKH-370 · siete clases, siete códigos, y un default que no es el bue
       classify(obsBase({ agentes: 0 })),
       classify(obsBase({ elegibles: 0 })),
       classify(obsBase({ modo: 'completitud' })),
+      classify(obsBase({ modo: 'completitud', credencialPresente: true, credencialRechazada: 401 })),
       classify(obsBase({ conSchemaEnMetadata: 0 })),
       classify(obsBase({ modo: 'completitud', credencialPresente: true, sinDato: 5 })),
       classify(obsBase({ comparados: 0 })),
@@ -548,6 +590,83 @@ describe('WKH-370 · siete clases, siete códigos, y un default que no es el bue
     expect(isRetryable({ name: 'AbortError' }, false)).toBe(false);
     expect(isRetryable({ cause: { code: 'ECONNRESET' } }, false)).toBe(true);
     expect(isRetryable({ cause: { code: 'EPIPE' } }, false)).toBe(false);
+  });
+
+  it('T-E5 (AR-it1/BLQ-3): credencial RECHAZADA → CONFIG(3) nombrándola, ⛔ nunca INALCANZABLE(2)', async () => {
+    // Una credencial ausente y una rechazada son el mismo hecho —"no estoy en
+    // condiciones de preguntar"— y salían por códigos distintos: el 401 se reportaba
+    // como caída de producción. Con la key rotada, que acá es rutina, el humano iba a
+    // mirar el deploy en vez de rotar el secreto, y la mitad de completitud quedaba
+    // apagada con un aviso diario que se lee como blip transitorio.
+    const conCredencialRota = (status) => ({
+      [DISCOVER_URL]: { status: 200, body: catalogo([fila()]) },
+      [AGENTS_URL]: { status, body: { error: 'unauthorized' } },
+    });
+    for (const status of [401, 403]) {
+      const r = await correr(conCredencialRota(status), {
+        CHECK_MODE: 'completitud',
+        A2A_CATALOG_OWNER_KEY: 'credencial-revocada',
+      });
+      expect(r.exit, `status ${status}`).toBe(CLASES.CONFIG);
+      expect(r.exit, `status ${status}`).not.toBe(CLASES.INALCANZABLE);
+      // Nombra la variable, igual que el caso hermano de la credencial ausente: lo
+      // que hay que hacer es rotar el secreto, y el aviso tiene que decirlo.
+      expect(r.salida, `status ${status}`).toContain('A2A_CATALOG_OWNER_KEY');
+      expect(r.salida, `status ${status}`).toContain(String(status));
+      expect(r.salida, `status ${status}`).not.toContain('NO dice que el catálogo esté mal');
+      // Control positivo: llegó a preguntarle al listado propio, no cortó antes.
+      expect(r.llamadas, `status ${status}`).toContain(`GET ${AGENTS_URL}`);
+    }
+    // Y el contraste que prueba que la partición no se tragó el resto: un 503 del
+    // MISMO listado sigue siendo el otro lado que no contestó.
+    const caido = await correr(conCredencialRota(503), {
+      CHECK_MODE: 'completitud',
+      A2A_CATALOG_OWNER_KEY: 'credencial-buena',
+    });
+    expect(caido.exit).toBe(CLASES.INALCANZABLE);
+    expect(caido.salida).toContain('/agents 503');
+  });
+
+  it('T-E6 (AR-it1/BLQ-4): una acusación al catálogo NO se tapa con un "no pude preguntar"', async () => {
+    // El caso medido: 1 manifiesto caído + derivas REALES salía `exit=2` con el texto
+    // "esto NO dice que el catálogo esté mal" en la misma línea que `derivas=N`.
+    const OTRO = `${SLUG}-b`;
+    const OTRO_INVOKE = 'https://agentes.example/api/agents/otro/invoke';
+    const OTRO_MANIFEST = 'https://agentes.example/api/agents/otro/manifest';
+    const r = await correr({
+      [DISCOVER_URL]: {
+        status: 200,
+        body: catalogo([fila(), fila({ slug: OTRO, name: OTRO, invokeUrl: OTRO_INVOKE })]),
+      },
+      // El primero no contesta; el segundo contesta y DIFIERE.
+      [MANIFEST_URL]: { status: 502, body: null },
+      [OTRO_MANIFEST]: { status: 200, body: manifiesto({ slug: OTRO, name: OTRO, priceUsdc: 0.99 }) },
+    });
+    expect(r.exit).toBe(CLASES.DERIVA);
+    expect(r.exit).not.toBe(CLASES.INALCANZABLE);
+    const linea = r.salida.trim().split('\n').at(-1);
+    // Y las dos cosas siguen enumeradas: el exit atribuye, la línea enumera.
+    expect(linea).toMatch(/ derivas=1 /);
+    expect(linea).toMatch(/ inalcanzables=1 /);
+    expect(linea).not.toContain('NO dice que el catálogo esté mal');
+    // En la escalera pura, las cuatro combinaciones: cuando coexisten manda la que
+    // cuesta dinero, y cuando NO coexisten las filas 8 y 9 siguen ganando.
+    expect(classify(obsBase({ inalcanzables: 1, derivas: 4 })).klass).toBe('DERIVA');
+    expect(classify(obsBase({ inalcanzables: 1, derivas: 0 })).klass).toBe('INALCANZABLE');
+    expect(classify(obsBase({ unresolved: 1, incompletas: 2 })).klass).toBe('INCOMPLETA');
+    expect(classify(obsBase({ unresolved: 1, incompletas: 0 })).klass).toBe('UNRESOLVED');
+  });
+
+  it('T-E7 (AR-it1/MNR-1): un 200 con un cuerpo ilegible NO se reporta igual que un 503', async () => {
+    // Los dos quedan sin listado y salen por la misma clase, pero son dos cosas
+    // distintas de arreglar: un proxy que devuelve HTML con 200 rompió su contrato,
+    // no se cayó. `catalogo=0` sale igual en los dos y no los desambigua.
+    const ilegible = await correr({ [DISCOVER_URL]: { status: 200, body: { agents: 'no-soy-un-array' } } });
+    expect(ilegible.exit).toBe(CLASES.INALCANZABLE);
+    expect(ilegible.salida).toContain('/discover 200 con un cuerpo');
+    const caido = await correr({ [DISCOVER_URL]: { status: 503, body: null } });
+    expect(caido.salida).toContain('/discover 503');
+    expect(caido.salida).not.toContain('cuerpo');
   });
 
   it('T-E4c: canonicalJson ordena las keys, así que la huella no depende del orden', () => {
@@ -674,8 +793,21 @@ describe('WKH-370 · afirmaciones sobre el fuente real del chequeo', () => {
   it('T-S4 (CD-14): los npm scripts no empiezan por `test`, y package.json:11 no se movió', () => {
     const pkgSrc = readFileSync(resolve(REPO_ROOT, 'package.json'), 'utf8');
     const pkg = JSON.parse(pkgSrc);
-    for (const nombre of ['check:catalog:deriva', 'check:catalog:completitud']) {
-      expect(pkg.scripts[nombre]).toBe('node scripts/check-catalog-vs-live.mjs');
+    // ⚠️ CR-it1/MNR-4: acá los dos scripts estaban CLAVADOS con el mismo cuerpo, sin
+    // `CHECK_MODE`. Correr `npm run check:catalog:deriva` a mano daba CONFIG(3) —el
+    // modo ausente— y el verde de este test no validaba los scripts: los CONGELABA,
+    // porque arreglarlos lo ponía rojo. Ahora cada uno fija SU modo, y el que sale de
+    // la línea de comandos es el que el script reconoce.
+    for (const [nombre, modo] of [
+      ['check:catalog:deriva', 'deriva'],
+      ['check:catalog:completitud', 'completitud'],
+    ]) {
+      expect(pkg.scripts[nombre]).toBe(
+        `CHECK_MODE=${modo} node scripts/check-catalog-vs-live.mjs`,
+      );
+      // El modo que el script fija tiene que ser uno de los que el script acepta: un
+      // typo acá volvería a dar CONFIG(3) sin que nadie lo note.
+      expect(MODOS).toContain(modo);
       // El descubridor de runners de CI se queda con los steps que corren
       // `npm test` / `npm run test…` SIN `if:` ni `continue-on-error:`. Los steps de
       // este workflow llevan los dos, así que un nombre que empiece por `test` los
