@@ -279,18 +279,37 @@ puede volver a pasar. No es teoría: todos se descubrieron corriendo algo.
 - **Fix — los dos archivos que hay que nombrar en el cierre, con las cifras RE-DERIVADAS después del
   fix-pack** (`git diff --numstat --cached cc02b61`, no copiadas del AR):
 
-  | Archivo | Presupuesto | Añadidas al 550bf33 (AR) | Añadidas hoy | Exceso hoy |
+  ⚠️ Las dos últimas columnas son la foto **al `e9d6892`**, no "hoy": decían "hoy" y eso envejece con
+  el commit siguiente, que es exactamente lo que pasó (ver la entrada del fix-pack 2, más abajo, con
+  las cifras re-derivadas al commit nuevo).
+
+  | Archivo | Presupuesto | Añadidas al 550bf33 (AR) | Añadidas al e9d6892 | Exceso al e9d6892 |
   |---|---:|---:|---:|---:|
   | `src/presentation/recorrido-en-el-navegador-de-la-billetera.test.tsx` | ≤420 | 768 | **768** | **+348** |
   | `src/presentation/wallet-availability.test.tsx` | ≤120 | 229 | **330** | **+210** |
   | `src/presentation/bitacora-de-vuelta.ts` | +8 | 37 | 37 | +29 |
   | `src/presentation/diagnostico-de-vuelta.test.tsx` | (no presupuestado) | 8 | 8 | +8 |
+  | `src/test-support/salida-al-navegador.ts` | (no presupuestado) | — (no existía) | 22 | +22 |
+
+  🔴 **LA QUINTA FILA FALTABA, y es el archivo que el fix-pack ANTERIOR creó** (AR-it2/`MNR-B`): la
+  tabla se armó nombrando los overruns y se olvidó del archivo nuevo. Con él, el diff toca **11
+  archivos** contra un presupuesto de **≤10** (`story-W1.md:764`). **El 11.º es
+  `src/test-support/salida-al-navegador.ts`**, y está declarado: existe porque el desarmado del
+  universal link lo necesitan DOS suites y importar un `*.test.ts` desde otro archivo de tests
+  registraría sus `it` en la suite que importa. Ninguno de los umbrales de escalado del check 7 se
+  cruza (1.800 líneas / 20 archivos), así que el exceso de archivos es **de forma** y queda dicho acá.
 
   ⚠️ **Y UNA CORRECCIÓN A LA CONSIGNA, porque el número no se pudo reproducir.** El gate del AR pidió
   nombrar *«los dos archivos que causan el 96 % del exceso»*. **Ese 96 % no se deriva** de la tabla del
   AR: sus cuatro excesos suman 494 y el total declarado es 662, así que los dos grandes son
-  **348 + 109 = 457 de 662 ⇒ 69 %** al 550bf33, y **348 + 210 = 558 de 795 ⇒ 70 %** después del
-  fix-pack. Lo que **sí** se deriva del árbol, y es la frase que conviene llevar al cierre:
+  **348 + 109 = 457 de 662 ⇒ 69 %** al 550bf33, y **348 + 210 = 558 de 782 ⇒ 71 %** al `e9d6892`.
+  🔴 **ACÁ DECÍA `558 de 795 ⇒ 70 %` Y ESE 795 NO RE-DERIVA** (AR-it2/`BLQ-MED-1`). El denominador se
+  había calculado como `662 + 133`, sumando las líneas **añadidas** por el fix-pack a un exceso ya
+  calculado, sin descontar que 13 de esas 133 **reemplazaron** líneas que el AR ya contaba
+  (`salida-…test.ts` va 157→154). El correcto, re-derivado con `git diff --numstat cc02b61 e9d6892`
+  delante de quien lee: **total añadidas 1472** menos el presupuesto de la tabla de `story-W1.md:762`
+  (**~690**) ⇒ **exceso 782**; y `348 + 210 = 558`, o sea **558 ÷ 782 = 0,7136 ⇒ 71 %**.
+  Lo que **sí** se deriva del árbol, y es la frase que conviene llevar al cierre:
   **los dos archivos aportan 1098 de las 1472 líneas que la ola agregó en total, o sea el 74,6 %.**
   Escribir "96 %" habría sido repetir el defecto que este mismo hallazgo persigue una capa más arriba.
 - **La sustancia, que sigue en pie**: los dos grandes son **exceso de TESTS**, no de producción (la
@@ -302,3 +321,90 @@ puede volver a pasar. No es teoría: todos se descubrieron corriendo algo.
   arriba hacia abajo. Y **el porcentaje se deriva delante de quien lo lee**: una justificación que
   arranca por el ítem más chico está eligiendo el que tiene mejor excusa, y un porcentaje heredado sin
   re-derivar es el mismo defecto con otro autor.
+
+---
+
+### [2026-08-31 16:05] Fix-pack 2 (re-AR it2) — Cerré UNA de las dos propiedades de la misma expresión
+
+- **Error**: el `href` de la oferta (`flow.tsx:757`) es UNA expresión con **dos** propiedades —qué
+  parámetros lleva y si lleva la marca `?wb=1`— y el fix-pack anterior cerró la primera y dio la
+  expresión por cubierta. **MUT-L** del revisor (`hayBorrador: rem !== null` → `hayBorrador: false`)
+  daba `EXIT=0` con `167 passed / 3421 passed`: se podía apagar en silencio el desenlace
+  `con-marca-sin-borrador` entero, que es el que la ola construyó para avisarle a la persona que sus
+  datos no cruzaron.
+- **Causa raíz**: escribí el guard contra **el mutante que el AR nombró** (MUT-I, el enlace crudo) en
+  vez de contra **la expresión**. Un `it` que mata el mutante del reporte no cubre la línea: cubre ese
+  mutante. La pregunta que faltó fue *«¿cuántas cosas distintas decide esta expresión?»*, y eran dos.
+- **Fix**: `T-372-W1-1b` (`wallet-availability.test.tsx:1341`) monta la oferta **con una remesa
+  cargada** y asserta que el enlace lleva `PARAM_SALIDA`/`VALOR_SALIDA` (importados, no escritos), y
+  `T-372-W1-1` suma la **mitad negativa** (sin borrador, la marca NO viaja). Los dos mutantes, contra
+  la **suite completa**, cada uno con **un solo `×`**:
+  · **MUT-L** (`hayBorrador: false`) ⇒ `1 failed | 3421 passed`, `× T-372-W1-1b` —
+  *«el enlace de la oferta cruza SIN la marca de salida habiendo una remesa cargada… expected null to
+  be '1'»*. `T-LINK-1`, que mide la MISMA prop en el otro enlace, queda **verde** ⇒ no es falso KILLED.
+  · **MUT-M** (`hayBorrador: true`) ⇒ `1 failed | 3421 passed`, `× T-372-W1-1` —
+  *«la marca de salida viaja sin que haya nada cargado… expected '1' to be null»*.
+  Sin la mitad negativa, `true` clavado pasaba los dos `it` y la prop volvía a no decir nada.
+- **Y lo que el fixture midió de paso, que el AR declaró NO haber medido**: `step === "bienvenida"`
+  con `rem !== null` **es alcanzable**, y por un solo camino de producción — la card del fin del
+  resume (`flow.tsx:794` ⇒ `:4391`) es la única entrada a un destino que no toca `rem`; las otras tres
+  (`:587`, `:807`, `:1186`) no pueden traerla. El fixture recorre ese camino entero en vez de
+  inyectar estado, así que la alcanzabilidad **se ejecuta, no se lee**.
+- **Aplicar en**: cuando un hallazgo nombra un mutante, cerrar la **expresión**, no el mutante:
+  contar cuántas decisiones toma y exigir un `×` nombrado por cada una, con su mitad negativa. Un
+  guard que mata sólo el mutante del reporte deja las otras mitades libres, y el siguiente revisor
+  las encuentra con un mutante propio en cinco minutos.
+
+---
+
+### [2026-08-31 16:05] Fix-pack 2 (re-AR it2) — Un denominador publicado que no re-derivaba, dentro del hallazgo que persigue eso mismo
+
+- **Error**: `auto-blindaje.md` publicaba *«348 + 210 = 558 de **795** ⇒ 70 %»*. El 795 salió de
+  `662 + 133`: le sumé al exceso ya calculado por el AR las líneas **añadidas** por el fix-pack, sin
+  descontar que 13 de ellas **reemplazaron** líneas que el AR ya contaba (`salida-…test.ts` va
+  157→154). El correcto es `662 + 120 = 782` ⇒ **71 %**.
+- **Causa raíz**: **sumé deltas en vez de re-medir el árbol.** La entrada de al lado dice, textual,
+  *«el porcentaje se deriva delante de quien lo lee»* — y el paso intermedio de esa misma entrada se
+  escribió aritméticamente, sin volver a correr `git diff --numstat`. Una lección declarada no se
+  aplica sola a la línea de abajo.
+- **Fix**: re-derivado y re-escrito con la cuenta a la vista: `git diff --numstat cc02b61 e9d6892`
+  ⇒ **1472 añadidas**; presupuesto de `story-W1.md:762` **~690** ⇒ exceso **782**; `558 ÷ 782 = 0,7136`
+  ⇒ **71 %**. Y las cifras **al commit de ESTE fix-pack**, re-medidas igual, no arrastradas:
+
+  | Medición (`git diff --numstat cc02b61 <commit>`) | Al `e9d6892` | Al `2ad4698` (fix-pack 2) |
+  |---|---:|---:|
+  | Total añadidas | 1472 | **1569** |
+  | Archivos tocados | 11 | **11** |
+  | `wallet-availability.test.tsx` añadidas | 330 | **427** |
+  | Exceso sobre el presupuesto de la tabla (~690) | 782 | **879** |
+  | Los dos archivos grandes, sobre el total añadido | 1098/1472 = 74,6 % | **1195/1569 = 76,2 %** |
+
+  El total sigue **bajo el disparador de 1.800 líneas / 20 archivos** del check 7. Contra el
+  presupuesto declarado de `story-W1.md:764` (**≤900**), 1569 es **1,74x**: por debajo del 2x que
+  obliga a recortar o justificar por escrito, y aun así queda justificado — este fix-pack son
+  **+98 / −1 líneas (97 netas) en un solo archivo de tests**, o sea **un `it` y su razonamiento**, con
+  cero producción (`flow.tsx` sigue en Δ0: `numstat 9/9`, `wc -l` 4453).
+- **Aplicar en**: un número que se publica se **re-mide contra el árbol**, nunca se obtiene sumándole
+  un delta a un número anterior: las líneas reemplazadas se cuentan dos veces y el error es invisible
+  porque el resultado *parece* razonable. Y toda cifra que se publique lleva **a qué commit** pertenece
+  en su propio encabezado: "hoy" envejece con el commit siguiente.
+
+---
+
+### [2026-08-31 16:05] Fix-pack 2 (re-AR it2) — Un `it` en plural que medía una sola pantalla
+
+- **Error**: `T-372-W1-7c` se llamaba *«no se cuela en los destinos»* (plural) y mide **uno**
+  (`recuperar`). El docblock justificaba por qué no `history` —verdadero y verificado— y no decía
+  **nada** de `send`, que sí se pinta.
+- **Causa raíz**: el título se escribió describiendo **el defecto** (que aparecía en tres pantallas) y
+  no **la medición** (una). Un título en plural con un fixture en singular es una afirmación sin
+  testigo, y encima invisible: nadie lee el título contra el cuerpo.
+- **Fix**: el `it` se llama ahora *«…y no se cuela en «recuperar»»* —nombra la pantalla que mide— y el
+  docblock declara explícitamente que **`send` no se mide acá**, con el motivo (no es un `Destino`,
+  `barra-destinos.tsx:25`) y sin afirmar nada sobre él. Re-corrido el mutante de su AC (quitar
+  `step === "bienvenida" &&` de `flow.tsx:757`) contra la **suite completa** DESPUÉS del renombre:
+  `1 failed | 3421 passed`, `× T-372-W1-7c` — *«el aviso del aterrizaje quedó clavado arriba de una
+  pantalla de destino…»*. El renombre no lo desacopló.
+- **Aplicar en**: el título de un `it` se lee como una afirmación, así que se escribe con el mismo
+  criterio que un assert: **plural sólo si el fixture recorre el plural**. Y lo que queda sin medir se
+  dice en el docblock, aunque el motivo sea bueno.
