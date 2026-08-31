@@ -293,7 +293,8 @@ puede volver a pasar. No es teoría: todos se descubrieron corriendo algo.
 
   🔴 **LA QUINTA FILA FALTABA, y es el archivo que el fix-pack ANTERIOR creó** (AR-it2/`MNR-B`): la
   tabla se armó nombrando los overruns y se olvidó del archivo nuevo. Con él, el diff toca **11
-  archivos** contra un presupuesto de **≤10** (`story-W1.md:764`). **El 11.º es
+  archivos** contra un presupuesto de **≤10** (`story-W1.md:770`; decía `:764`, que es la FILA de
+  `flow.tsx` de la tabla — re-derivado en el fix-pack 3). **El 11.º es
   `src/test-support/salida-al-navegador.ts`**, y está declarado: existe porque el desarmado del
   universal link lo necesitan DOS suites y importar un `*.test.ts` desde otro archivo de tests
   registraría sus `it` en la suite que importa. Ninguno de los umbrales de escalado del check 7 se
@@ -307,7 +308,7 @@ puede volver a pasar. No es teoría: todos se descubrieron corriendo algo.
   había calculado como `662 + 133`, sumando las líneas **añadidas** por el fix-pack a un exceso ya
   calculado, sin descontar que 13 de esas 133 **reemplazaron** líneas que el AR ya contaba
   (`salida-…test.ts` va 157→154). El correcto, re-derivado con `git diff --numstat cc02b61 e9d6892`
-  delante de quien lee: **total añadidas 1472** menos el presupuesto de la tabla de `story-W1.md:762`
+  delante de quien lee: **total añadidas 1472** menos el presupuesto de la tabla de `story-W1.md:768`
   (**~690**) ⇒ **exceso 782**; y `348 + 210 = 558`, o sea **558 ÷ 782 = 0,7136 ⇒ 71 %**.
   Lo que **sí** se deriva del árbol, y es la frase que conviene llevar al cierre:
   **los dos archivos aportan 1098 de las 1472 líneas que la ola agregó en total, o sea el 74,6 %.**
@@ -368,7 +369,7 @@ puede volver a pasar. No es teoría: todos se descubrieron corriendo algo.
   escribió aritméticamente, sin volver a correr `git diff --numstat`. Una lección declarada no se
   aplica sola a la línea de abajo.
 - **Fix**: re-derivado y re-escrito con la cuenta a la vista: `git diff --numstat cc02b61 e9d6892`
-  ⇒ **1472 añadidas**; presupuesto de `story-W1.md:762` **~690** ⇒ exceso **782**; `558 ÷ 782 = 0,7136`
+  ⇒ **1472 añadidas**; presupuesto de `story-W1.md:768` **~690** ⇒ exceso **782**; `558 ÷ 782 = 0,7136`
   ⇒ **71 %**. Y las cifras **al commit de ESTE fix-pack**, re-medidas igual, no arrastradas:
 
   | Medición (`git diff --numstat cc02b61 <commit>`) | Al `e9d6892` | Al `2ad4698` (fix-pack 2) |
@@ -380,10 +381,21 @@ puede volver a pasar. No es teoría: todos se descubrieron corriendo algo.
   | Los dos archivos grandes, sobre el total añadido | 1098/1472 = 74,6 % | **1195/1569 = 76,2 %** |
 
   El total sigue **bajo el disparador de 1.800 líneas / 20 archivos** del check 7. Contra el
-  presupuesto declarado de `story-W1.md:764` (**≤900**), 1569 es **1,74x**: por debajo del 2x que
-  obliga a recortar o justificar por escrito, y aun así queda justificado — este fix-pack son
-  **+98 / −1 líneas (97 netas) en un solo archivo de tests**, o sea **un `it` y su razonamiento**, con
-  cero producción (`flow.tsx` sigue en Δ0: `numstat 9/9`, `wc -l` 4453).
+  presupuesto declarado de `story-W1.md:770` (**≤900 líneas añadidas y ≤10 archivos**), 1569 es
+  **1,74x** en líneas: por debajo del 2x que obliga a recortar o justificar por escrito, y aun así
+  queda justificado — este fix-pack son **+98 / −1 líneas (97 netas) en un solo archivo de tests**, o
+  sea **un `it` y su razonamiento**, con cero producción (`flow.tsx` sigue en Δ0: `numstat 9/9`,
+  `wc -l` 4453).
+
+  🔴 **CR/`MNR-4` — Y LA OTRA MITAD DEL PRESUPUESTO, QUE ESTE PÁRRAFO NO DECLARABA: son 11 archivos
+  contra el `≤10`.** El párrafo contrastaba 1569 con el `≤900` y se quedaba ahí, así que el
+  desbordamiento de la SEGUNDA magnitud declarada en la misma línea del story file quedaba dicho
+  arriba (en la tabla del fix-pack anterior) y no acá, que es donde se saca la conclusión. **Es un
+  desborde, es de 1 archivo, y el archivo es
+  `src/test-support/salida-al-navegador.ts`** (+22, nuevo, no presupuestado): existe porque el
+  desarmado del universal link lo necesitan DOS suites y importar un `*.test.ts` desde otro archivo de
+  tests registraría sus `it` en la suite que importa. ⚠️ La cita que este párrafo traía (`:764`) era
+  la FILA de `flow.tsx` de la tabla, no la línea del presupuesto: re-derivada a `:770`.
 - **Aplicar en**: un número que se publica se **re-mide contra el árbol**, nunca se obtiene sumándole
   un delta a un número anterior: las líneas reemplazadas se cuentan dos veces y el error es invisible
   porque el resultado *parece* razonable. Y toda cifra que se publique lleva **a qué commit** pertenece
@@ -408,3 +420,223 @@ puede volver a pasar. No es teoría: todos se descubrieron corriendo algo.
 - **Aplicar en**: el título de un `it` se lee como una afirmación, así que se escribe con el mismo
   criterio que un assert: **plural sólo si el fixture recorre el plural**. Y lo que queda sin medir se
   dice en el docblock, aunque el motivo sea bueno.
+
+---
+
+### [2026-08-31 16:55] Fix-pack 3 (CR) — El instrumento de campo se daba vuelta con una recarga
+
+- **Error**: `flow.tsx:757` declaraba la regla de lectura del entregable de la ola —*«si aparece, el
+  almacenamiento no cruzó; si no aparece y el borrador está, cruzó»*— y era **falsa ante una recarga
+  de pestaña**. Nadie limpiaba `wb` de la barra (`hrefSinRastroDeVuelta` borra los parámetros de
+  respuesta de la billetera y `dl`, y nada más) y el once-guard de la bitácora es por **carga de
+  página**, no por aterrizaje. Secuencia medida por el CR: `?wb=1` con disco vacío ⇒ aviso puesto e
+  hito `con-marca-sin-borrador`; la persona re-tipea (se persiste una fila); recarga con `wb=1`
+  todavía en la barra ⇒ **aviso ausente e hito `con-marca-y-borrador`**, o sea los dos instrumentos
+  publicando *«el almacenamiento cruzó»* sobre datos cargados a mano de este lado.
+- **Causa raíz**: la marca de la URL se trató como **estado de la pestaña** y no como **evento de un
+  aterrizaje**. Un evento que no se consume deja de ser un evento a la primera recarga. El repo ya
+  tenía la disciplina contraria para `dl` y no se la aplicó a la marca nueva.
+- **Fix — salida (a) del CR, CONSUMIR la marca**, porque (b) sólo hubiera reescrito la prosa dejando
+  la medición de campo —la razón de ser de W1— igual de invertible en el teléfono:
+  · `hrefSinLaMarcaDeSalida` (`salida-al-navegador-de-la-billetera.ts:144`), puro, devuelve `null`
+    cuando no hay nada que consumir para que quien llama no escriba el historial en cada carga;
+  · lo llama el efecto de `flow.tsx:146` con `history.replaceState`, ⛔ **no** el inicializador del
+    `useState`: escribir la barra durante el render es impuro, y bajo `StrictMode` el inicializador
+    corre dos veces, así que la segunda pasada leería una URL que la primera ya limpió. En el efecto
+    la doble corrida de `StrictMode` es inocua (`aterrizaje` ya está congelado y el helper devuelve
+    `null` la segunda vez);
+  · y las dos frases de `:757` se reescribieron igual, diciendo **qué contestan y qué no**.
+- **Criterio de cierre — CUMPLIDO.** `T-372-W1-7e` reproduce aterrizar → persistir → recargar.
+  **MUT-CR-BM** (borrar el `replaceState` de `flow.tsx:146`, o sea el código de hoy) contra la suite
+  COMPLETA ⇒ `1 failed | 3426 passed`, `× T-372-W1-7e` con **el mensaje del paso 3**: *«tras una
+  recarga el hito publica un aterrizaje que no ocurrió … expected 'con-marca-y-borrador' to be
+  'sin-marca'»*. Un solo `×` ⇒ no es falso KILLED.
+  ⚠️ **Y hubo que usar `expect.soft` para que el rojo saliera del paso 3.** Con `expect` duro el
+  mutante cortaba en la fila intermedia («la marca quedó viva en la barra») y el `it` nunca llegaba a
+  la recarga: el rojo hablaba del MECANISMO y no de la PROPIEDAD que el hallazgo pide cerrar.
+  `expect.soft` verificado contra la versión instalada: `node_modules/vitest/dist/index.d.ts:77`,
+  `vitest@2.1.9`.
+- **Aplicar en**: toda marca de URL que signifique *«esto acaba de pasar»* se **consume al leerla**.
+  Si sobrevive en la barra, deja de decir «pasó» y pasa a decir «alguna vez pasó», y una recarga
+  convierte al instrumento en su propio contraejemplo. Y cuando un mutante muere, mirar **cuál**
+  aserción produjo el rojo: morir por una fila intermedia deja la propiedad del hallazgo sin testigo.
+
+---
+
+### [2026-08-31 16:55] Fix-pack 3 (CR) — «No pude leer el disco» publicado como «no hay borrador»
+
+- **Error**: `flow.tsx:146` tenía `catch { hayBorrador = false; }`. Con `?wb=1`, el borrador **SÍ** en
+  el disco y un `getItem` que tira, la pantalla mostraba *«Acá no están los datos que cargaste antes»*
+  y el hito decía `con-marca-sin-borrador`: **se le decía a la persona que sus datos no están cuando
+  sí están**, y el instrumento publicaba «no cruzó» sin haber podido mirar.
+- **Causa raíz**: el tipo era un `boolean`, y un booleano **no tiene dónde poner el tercer valor**. El
+  colapso no fue una decisión: fue lo único que el tipo permitía. Y el repo ya declaraba la disciplina
+  contraria dos párrafos más abajo, en el mismo archivo, para `sin-marca`.
+- **Fix — el tercer valor, con el nombre que YA existía en el repo** (no se inventó uno nuevo):
+  `BorradorEnElDisco = "con-borrador" | "sin-borrador" | "disco-ilegible"`
+  (`bitacora-de-vuelta.ts:168`), donde `"disco-ilegible"` es el de `MotivoParaNoMostrar`
+  (`splash-puerta.ts:68`), publicado como `ILEGIBLE (no se pudo preguntar)` en
+  `diagnostico-de-vuelta.tsx:580`. El hito tiene su **cuarto desenlace**,
+  `con-marca-disco-ilegible`, y el mapeo es un `Record` sobre la unión cerrada, así que un quinto
+  valor **no compila** en vez de caer en un `else` silencioso.
+- **Criterio de cierre — CUMPLIDO.** `T-372-W1-7f`, con `getItem` tirando **sólo para la clave del
+  repo** (uno que tire para todas rompe el montaje del árbol de providers y el rojo hablaría de otra
+  cosa). **MUT-CR-BB1** (`catch → "sin-borrador"`, el defecto exacto) contra la suite COMPLETA ⇒
+  `1 failed | 3426 passed`, `× T-372-W1-7f`, dos mensajes: `expect(element).not.toBeInTheDocument()`
+  y *«el hito colapsó «el disco no se dejó leer» … expected 'con-marca-sin-borrador' to be
+  'con-marca-disco-ilegible'»*. Y el **mutante espejo** `MUT-CR-BB1c` (`catch → "con-borrador"`, que
+  afirma la PRESENCIA sin preguntar) ⇒ `× T-372-W1-7f` *«… expected 'con-marca-y-borrador' to be
+  'con-marca-disco-ilegible'»*: la fila del hito no afirma **ninguna** de las dos.
+- **Aplicar en**: un `catch` que asigna el valor `false`/`0`/`[]` de la variable que estaba calculando
+  está convirtiendo «no pude preguntar» en «la respuesta es no». Antes de escribirlo: ¿el tipo tiene
+  lugar para el tercer valor? Si no lo tiene, el colapso no es una decisión y no se ve leyendo.
+
+---
+
+### [2026-08-31 16:55] Fix-pack 3 (CR) — I-5 era la única línea de producción de la ola sin testigo
+
+- **Error**: `flow.tsx:1386`. Revertirla a su texto de antes de W1 borra **las dos** cosas que I-5
+  pide —la advertencia *«Si al llegar no ves lo que cargaste, cargalo otra vez.»* y el segundo enlace
+  `URL_INSTALAR_PHANTOM`— y el gate quedaba **entero verde** (`167 passed / 3422 passed`). Por el
+  criterio que la propia ola escribió en `wallet-availability.test.tsx` («un artefacto que nadie mira
+  no es un instrumento»), I-5 era **decoración**.
+- **Causa raíz**: el enlace GEMELO de la oferta (`flow.tsx:757`) sí tenía guard (`T-372-W1-6`), y eso
+  produjo la sensación de que la propiedad estaba cubierta. **Son dos pantallas distintas**, y la
+  persona ve una sola: la cobertura de un sitio no se hereda al otro. Es el mismo cuadrante que
+  `AR/BLQ-BAJO-1` y `AR-it2/BLQ-BAJO-2`, que fueron exactamente esto en la otra expresión duplicada.
+- **Fix**: `T-372-W1-6b` monta `connect` sin wallet, lee el `<a>` de `NoWalletHere`, asserta
+  `href === URL_INSTALAR_PHANTOM` (**importado**, nunca escrito a mano) y pinnea la frase condicional.
+- **Criterio de cierre — CUMPLIDO.** **MUT-CR-2** (revertir `:1386` al texto de
+  `git show cc02b61:src/presentation/flow.tsx | sed -n '1386p'`) contra la suite COMPLETA ⇒
+  `1 failed | 3426 passed`, `× T-372-W1-6b` *«Unable to find an accessible element with the role
+  "link" and name /Instalar Phantom y crear mi billetera/»*. Un solo `×` ⇒ `T-372-W1-6` (el gemelo) y
+  `T-LINK-1` quedaron verdes ⇒ **no** es falso KILLED. Y las dos mitades se midieron por separado:
+  `MUT-CR-2b` (borrar **sólo** la frase) ⇒ `× T-372-W1-6b` *«se fue la advertencia … expected
+  'Instalar Phantom y crear mi billetera…' to contain 'Si al llegar no ves lo que cargaste, …'»*;
+  `MUT-CR-2c` (apuntar el `href` a otra URL) ⇒ `× T-372-W1-6b` sobre `toHaveAttribute`.
+- **Aplicar en**: cuando una ola escribe **la misma propiedad en dos sitios**, el guard de uno no
+  cubre al otro. La pregunta antes de cerrar: *¿cuántas instancias de esta expresión hay, y cuántas
+  tienen un mutante propio que murió?*
+
+---
+
+### [2026-08-31 16:55] Fix-pack 3 (CR) — Una enumeración publicada como exhaustiva, falsa en tres puntos
+
+- **Error**: el docblock de `T-372-W1-1b` decía *«las **cuatro** entradas a `bienvenida`»* y *«esa card
+  es la **ÚNICA** que vuelve a un destino sin tocar la remesa»*. Faltaba una quinta entrada
+  (`irADestino`, `flow.tsx:429`, la pestaña «Enviar»); «la ÚNICA» era falso dos veces (`openHistory`
+  e `irADestino("recuperar")` tampoco tocan `rem`); y el sub-motivo de que a `send` sólo se llega con
+  `rem` en `null` era falso (`Bienvenida onEmpezar`, `flow.tsx:1195`, no lo toca).
+- **Causa raíz**: la lista se escribió **desde el camino que el fixture recorre** y se publicó como si
+  fuera un censo. La conclusión (el cuadrante es alcanzable) no cambia —es alcanzable por MÁS
+  caminos—, pero éste es el único registro escrito del análisis que cerró `AR-it2/BLQ-BAJO-2` y F4 lo
+  iba a leer como exhaustivo.
+- **Fix — re-derivada a mano y no copiada del CR** (que nombra 7 sitios y le faltan dos):
+  `/usr/bin/grep -n 'setStep(' src/presentation/flow.tsx` ⇒ **24 líneas**; las que entran a
+  `bienvenida` o `send` son `:208 :429 :587 :794 :807 :1185 :1186 :1195 :3533`. Se descartan **dos** y
+  se dice por qué: `:208` es `setStep(destino)` con `destino: "confirm" | "verify"` (ni `bienvenida`
+  ni `send`), y `:1185` es **prosa** (el literal vive adentro de un comentario). Quedan **cinco**
+  entradas a `bienvenida` y **dos** a `send`, cada una con qué le hace a `rem`.
+- **Aplicar en**: una enumeración con un número adelante («las cuatro…») es una afirmación falsable, y
+  se **re-deriva con una herramienta** antes de publicarla. Y ⛔ la salida del grep **no se vuelca**:
+  se lee sitio por sitio, porque el ruido (prosa, uniones de tipos que no incluyen el valor) sólo se
+  descarta leyendo, y volcarla habría dejado dos falsos positivos adentro de la lista nueva.
+
+---
+
+### [2026-08-31 16:55] Fix-pack 3 (CR/`MNR-1`) — Decisión correcta, motivo falso, y nadie lo medía
+
+- **Error**: el once-guard de `anotarLaSalidaAlNavegador` no lo medía nada (borrarlo dejaba el gate
+  verde) y el motivo escrito en su docblock era **inalcanzable desde su único llamador**: decía que sin
+  el `if` «la primera carga del formulario poblaría el disco y el hito diría `con-marca-y-borrador`»,
+  pero el efecto de `flow.tsx:146` le pasa `aterrizaje`, que es un valor **congelado**, así que
+  re-anotar escribiría exactamente el mismo valor.
+- **Causa raíz**: el motivo se escribió describiendo **el defecto que el guard previene en abstracto**
+  y no **lo que puede pasar desde los llamadores que existen**. Es la misma familia que el `it` en
+  plural con fixture en singular del fix-pack 2: una afirmación que nadie lee contra el código.
+- **Fix**: el guard **se queda** (decisión correcta) con el motivo verdadero escrito: la propiedad
+  «esto es la foto del ATERRIZAJE» queda como propiedad **de la función** y no prestada de la
+  disciplina de quien la llama; hoy hay un solo llamador y congela, mañana puede no ser así. Y deja de
+  ser una afirmación sin testigo: `T-372-W1-7d` la llama **dos veces con veredictos distintos** y
+  exige que gane el primero.
+- **Criterio de cierre — CUMPLIDO.** **MUT-CR-1** (borrar el `if (hitos.has(...)) return;`) contra la
+  suite COMPLETA ⇒ `1 failed | 3426 passed`, `× T-372-W1-7d` *«una segunda anotación pisó la foto del
+  aterrizaje … expected 'con-marca-y-borrador' to be 'con-marca-sin-borrador'»*.
+  ⚠️ El fixture lleva su propio CD-18 por un falso verde concreto: con el **mismo** veredicto las dos
+  veces el mutante SOBREVIVE (re-anotar escribe lo mismo). Por eso el `it` prueba primero, sobre un
+  `Map` limpio, que el segundo veredicto produce **otro** valor.
+- **Aplicar en**: antes de escribir el motivo de un guard, recorrer **sus llamadores reales** y
+  preguntarse si el escenario descrito es alcanzable desde alguno. Si no lo es, el guard puede seguir
+  siendo correcto, pero el motivo hay que reescribirlo — y ahí se descubre si además le falta testigo.
+
+---
+
+### [2026-08-31 16:55] Fix-pack 3 — Dos citas ANCLADAS que rompí yo mismo, con mi propia edición
+
+- **Error**: dos veces en la misma sesión, `src/composition/citas-ancladas.test.ts` se puso rojo por
+  citas que **yo** dejé colgando. (1) Escribí una cita anclada nueva
+  ``(`motivoParaNoMostrar`, `./splash-puerta.ts:97`)`` apuntando a la línea del `has(MARCA)`, que
+  **no nombra el símbolo** — el candado exige que la línea destino contenga el ancla. (2) Al ampliar
+  el docblock de `bitacora-de-vuelta.ts` corrí `anotarLaSalidaAlNavegador` de `:176` a `:226`, y la
+  cita que le apuntaba desde `:96` **de ese mismo archivo** quedó vieja; y una segunda vez, al
+  **recortar** prosa en el mismo archivo, volví a correrla junto con `BorradorEnElDisco`.
+- **Causa raíz**: agregar o sacar renglones de un docblock mueve **todo lo que está debajo**, y las
+  citas ancladas al número no se mueven solas. La segunda ocurrencia es la que enseña: pasó
+  **recortando**, o sea haciendo lo contrario de lo que había roto la primera vez.
+- **Fix**: re-derivadas con `/usr/bin/grep -n '<símbolo>'` después de CADA edición que cambia el conteo
+  de líneas, y el candado corrido como verificación (no como descubrimiento).
+- **Y un tercer caso, que el mismo candado atajó**: escribí
+  ``(`OFFERED_METHOD_COPY`, `./flow.tsx:107`)``, o sea una cita anclada **nueva hacia `flow.tsx`**, y
+  eso movió los marcadores `[[CENSO … entrantes=155]]` a 156 y `destinos=92` a 93 — **doce
+  desajustes en ocho archivos**, dos de ellos (`flow-vm.ts`, `confirm-and-send.ts`) fuera del Scope IN
+  de esta ola. Se resolvió dejando la cita **sin ancla**, que es la decisión que `flow.tsx:757` ya
+  tenía escrita con el mismo motivo.
+- **Aplicar en**: en este repo, **una cita anclada nueva hacia `flow.tsx` no es gratis**: paga en
+  ediciones a ocho archivos, algunos fuera de alcance. Y toda edición que cambie el número de líneas
+  de un archivo con citas ancladas se cierra corriendo `citas-ancladas.test.ts`, no al final del gate.
+
+---
+
+### [2026-08-31 16:55] Fix-pack 3 — Escala: la ola cruzó el 2x, y acá va la cuenta y la justificación
+
+- **Medición, re-derivada contra el ÍNDICE** (`git diff --numstat --cached cc02b61`, después del
+  `git add -A`, nunca sumándole un delta a un número anterior):
+
+  | Medición | Al `2ad4698` (CR) | Al fix-pack 3 |
+  |---|---:|---:|
+  | Total añadidas | 1569 | **1988** |
+  | Total borradas | — | **19** |
+  | Archivos tocados | 11 | **11** (ninguno nuevo) |
+  | Contra el `≤900` de `story-W1.md:770` | 1,74x | **2,21x** |
+  | Contra el `≤10` archivos de `story-W1.md:770` | 11 (+1) | **11 (+1)** |
+  | Los dos archivos de test grandes sobre el total | 1195/1569 = 76,2 % | **1462/1988 = 73,5 %** |
+
+  Este fix-pack, aparte: **451 añadidas / 32 borradas en 5 archivos**, de las cuales **113 añadidas /
+  22 borradas son producción** (`bitacora-de-vuelta.ts` 65/18, `salida-al-navegador-de-la-billetera.ts`
+  44/0, `flow.tsx` **4/4**) y **338/10 son tests**.
+
+- 🔴 **CRUZÓ EL 2x, ASÍ QUE VA JUSTIFICADO POR ESCRITO** (regla 10 del `CLAUDE.md`), y se dice
+  primero lo que NO lo justifica: el disparador de **1.800 líneas** del check 7 también quedó cruzado
+  (1988). El de 20 archivos no. Ninguna de las dos cosas estaba declarada en el fix-pack anterior y
+  ésta es la primera vez que se escriben.
+- **Qué sostiene el exceso, a la pregunta que decide** (*¿qué parte de esto seguiría existiendo si lo
+  escribiera alguien que ya conoce este repo?*):
+  · **73,5 % son dos archivos de tests**, y el más grande (`recorrido-…test.tsx`, 768) es W1.0: la
+    premisa falsable corrida **antes** de una línea de producción, y la razón por la que producción
+    de toda la ola son **9 líneas reescritas en `flow.tsx` con Δ0**.
+  · **La producción entera de la ola son 279 líneas añadidas** (`salida-…​.ts` 185 + `bitacora-…​.ts`
+    84 + `flow.tsx` 9 **reescritas** + `diagnostico-…​.tsx` 1), más 22 de `src/test-support/`, que no
+    es producción ni test. O sea que el presupuesto de ~690 se pasó **en tests, no en código**.
+  · De las **451** de este fix-pack, **338 son los cuatro `it` que cierran los cuatro bloqueantes**,
+    cada uno con su mutante corrido contra la suite completa y su `×` nombrado, más el registro medido
+    que `BLQ-BAJO-3` exige por escrito. **Ninguno es relleno**: los cuatro mutantes murieron, cada uno
+    con un solo `×`.
+- **Lo que SÍ se recortó antes de escribir esto**, para no justificar lo que se podía sacar: 9 líneas
+  de docblock en `bitacora-de-vuelta.ts` y 4 en `wallet-availability.test.tsx`, todas duplicación de
+  algo ya escrito en el mismo archivo o en el módulo de producción vecino. Lo que queda no se recorta
+  sin perder o el contrato (los cuatro desenlaces), o el motivo corregido que el CR pidió por escrito,
+  o el mutante declarado de un `it`.
+- **Aplicar en**: el presupuesto de escala del story file se contrasta **en cada fix-pack**, no sólo
+  al cerrar la ola: un fix-pack de 451 líneas movió la ola de 1,74x a 2,21x, y el cruce del umbral es
+  invisible si cada fix-pack se mide sólo contra sí mismo. Y las **dos** magnitudes del presupuesto
+  (líneas **y** archivos) se contrastan las dos, aunque una sola se desborde.
