@@ -627,7 +627,7 @@ puede volver a pasar. No es teoría: todos se descubrieron corriendo algo.
   · **La producción entera de la ola son 279 líneas añadidas** (`salida-…​.ts` 185 + `bitacora-…​.ts`
     84 + `flow.tsx` 9 **reescritas** + `diagnostico-…​.tsx` 1), más 22 de `src/test-support/`, que no
     es producción ni test. O sea que el presupuesto de ~690 se pasó **en tests, no en código**.
-  · De las **451** de este fix-pack, **338 son los cuatro `it` que cierran los cuatro bloqueantes**,
+  · De las **451** de este fix-pack, **338 son los CINCO `it` con mutante** (61 de `T-372-W1-9b` + 277 de `-6b`/`-7d`/`-7e`/`-7f`),
     cada uno con su mutante corrido contra la suite completa y su `×` nombrado, más el registro medido
     que `BLQ-BAJO-3` exige por escrito. **Ninguno es relleno**: los cuatro mutantes murieron, cada uno
     con un solo `×`.
@@ -640,3 +640,91 @@ puede volver a pasar. No es teoría: todos se descubrieron corriendo algo.
   al cerrar la ola: un fix-pack de 451 líneas movió la ola de 1,74x a 2,21x, y el cruce del umbral es
   invisible si cada fix-pack se mide sólo contra sí mismo. Y las **dos** magnitudes del presupuesto
   (líneas **y** archivos) se contrastan las dos, aunque una sola se desborde.
+
+---
+
+### [2026-08-31 17:41] Wave W1 · fix-pack 4 (F4/QA) — `QA-MNR-1` tenía **DOS** sitios en el código, no uno
+
+- **Error**: el reporte de F4 listó **un** sitio stale con el «TRES» dentro del código
+  (`wallet-availability.test.tsx:1531`, el `describe`) y **cinco** en documentos. Barriendo `src/`
+  entero con `/usr/bin/grep -rn` aparece un **segundo**, y está en **producción**:
+  `salida-al-navegador-de-la-billetera.ts:166` decía *«⇒ HAY TRES DESENLACES OBSERVABLES, NO DOS»* y
+  enumeraba tres, cuando el fix-pack 3 (cierre de `CR/BLQ-BAJO-1`) ya había hecho cuatro.
+- **Causa raíz**: el fix-pack 3 actualizó los **dos** sitios que nombran los desenlaces por su
+  etiqueta (`flow.tsx:757` con sus `(1)(2)(3)(4)` y `bitacora-de-vuelta.ts` con *«CUATRO VALORES»*) y
+  se salteó el que los enumera **en prosa, sin usar las etiquetas**. Un `grep` por
+  `con-marca-disco-ilegible` —que es lo natural al agregar el 4º valor— **no lo encuentra**: el
+  párrafo viejo no contiene ninguna de las cuatro etiquetas. Lo que lo encuentra es buscar el
+  **numeral** («TRES»), que es la palabra que el cambio volvió falsa.
+- **Fix**: `CUATRO` + el 4º renglón, en el mismo número de líneas físicas (Δ0 en el archivo, para no
+  correr las citas `:35-38`, `:40` y `:144` que le entran desde `flow.tsx:146`,
+  `wallet-availability.test.tsx:1473` y tres documentos). Idem el `describe` (Δ0: sólo cambia el
+  string). **Verificado que la frase nueva es verdadera**, que es la regla de este fix-pack: las
+  cuatro etiquetas aparecen **dentro** del bloque `1531-1870` (`con-marca-y-borrador` ×2,
+  `con-marca-sin-borrador` ×8, `con-marca-disco-ilegible` ×1, `sin-marca` ×5) y los dos símbolos que
+  el renglón nuevo nombra existen en el vecino (`BorradorEnElDisco`, `bitacora-de-vuelta.ts:168`;
+  `DESENLACE_CON_MARCA`, `:179`). ⚠️ El `:179` **se midió**: contándolo a mano me había dado `:178`.
+- **Un sitio que NO se tocó, y por qué**: `wallet-availability.test.tsx:1214` dice *«El aviso de
+  aterrizaje, TRES casos (AC-1-4b) → `T-372-W1-7`»*. Es **verdadero**: `T-372-W1-7` mide exactamente
+  tres casos y su propio nombre los enumera; el cuarto vive en `T-372-W1-7f`. Corregir el numeral ahí
+  habría metido una frase **falsa** para tapar una que no lo era. El índice sí queda **incompleto**
+  (no nombra `-7d`, `-7e` ni `-7f`), y eso es otra clase de hallazgo, no éste.
+- **Aplicar en**: cuando un fix-pack agrega un valor a una unión cerrada, el barrido no es por la
+  **etiqueta nueva** —los sitios viejos no la contienen, por definición— sino por el **numeral que
+  deja de valer** (`TRES`/`tres`/`3`) y por el nombre del **tipo**. Y el barrido va sobre `src/`
+  entero: dos de los tres sitios de esta ola estaban en archivos que el fix-pack anterior **ya había
+  editado**.
+
+### [2026-08-31 17:41] Wave W1 · fix-pack 4 (F4/QA) — `QA-MNR-3`: la inercia se **midió**, no se heredó
+
+- **Error**: el docblock de `viajesALaBilletera`
+  (`recorrido-en-el-navegador-de-la-billetera.test.tsx:205-207`) prometía *«un href impareseable se
+  conserva como tal para que no desaparezca de la cuenta en silencio»* y el `catch` de `:213` hace
+  `return false`, o sea que **lo descarta**: la frase describía justo lo contrario de su código.
+- **Causa raíz**: la nota se escribió sobre la **intención** del contador, no sobre la rama que se
+  implementó. Es la clase `CD-W1-10` aplicada al propio instrumento de la métrica principal de la ola.
+- **Fix**: se cambió **la frase**, no el `catch` —el orquestador lo pidió y la medición lo respalda—.
+  ⛔ **La inercia no se copió del reporte de QA: se midió.** Mutante en un **worktree aislado** sobre
+  `b402ab7` (nunca sobre el árbol entregado): el cuerpo del `catch` pasa a
+  `throw new Error("MUT_CATCH_ALCANZADO_MNR3")`, **marcador verificado dentro del archivo antes de
+  correr la suite** (`:213`), y `vitest run recorrido-…test.tsx` ⇒ **`6 passed (6)`, exit 0**. El
+  mutante **SOBREVIVE** ⇒ la rama del `catch` **no se ejecuta ni una vez** en los tres llamadores.
+  ⚠️ Y el instrumento no está vacío: en `T-372-W1-13`(b) la lista trae **un** href y el `filter`
+  **sí** corre su callback (la rama del `try`), así que el verde no sale de un `filter` que nunca
+  entró. Worktree removido + `git worktree prune` + `git status --porcelain` vacío + `HEAD` en
+  `b402ab7` al terminar.
+- **Aplicar en**: *«hoy es inerte»* es una afirmación sobre **ejecución**, y leer los tres llamadores
+  no la prueba: prueba que **parece** inerte. Ponerle un `throw` a la rama sospechada y ver la suite
+  seguir verde sí la prueba, cuesta una corrida, y deja el número escrito en el propio docblock para
+  el que venga.
+
+---
+---
+
+# 📋 CONSOLIDACIÓN AL CIERRE — escrita por `nexus-docs` el 2026-08-31, en la fase DONE
+
+⛔ **Nada de lo de arriba se editó, se resumió ni se borró.** Las **27 entradas** de F3 y de los
+cuatro fix-packs quedan íntegras, con su crónica, su medición y su commit. Este bloque es **puramente
+aditivo** y va al final justamente para no mover ningún número de línea: `validation.md` cita
+`auto-blindaje.md:600-620`, y el CR cita `:381-383`.
+
+**Las lecciones transferibles a otros proyectos —ordenadas por lección y no por cronología— viven en
+`report.md` §10.** Este es su índice, con las entradas de las que sale cada una:
+
+| | Lección transferible | Sale de |
+|---|---|---|
+| **A** | Un fixture que no reproduce el defecto es indistinguible de un guard que funciona. Y un arnés de mutación con el `.orig` cacheado puede **revertir una ola entera en silencio**, con el `md5` confirmando el revert en vez de cazarlo | W1.0 ×3, W1.3 |
+| **B** | La cobertura se cierra **por expresión**, no por el mutante que el reporte nombró ni por el guard del vecino. *¿Cuántas decisiones toma esta expresión?* — un `×` nombrado por cada una, con su mitad negativa | fix-packs 1, 2, 3 |
+| **C** | Toda afirmación escrita es falsable y envejece con el commit siguiente: exclusividades, plurales, enumeraciones con número adelante, motivos de guard, y *"hoy es inerte"* (que es una afirmación sobre **ejecución**) | fix-packs 1, 2, 3, 4 |
+| **D** | 🔴 **Cuando un fix-pack agrega un valor a una unión cerrada, el barrido no es por la etiqueta nueva** —los sitios viejos no la contienen, por definición— **sino por el numeral que deja de valer**, y sobre `src/` entero | fix-pack 4 |
+| **E** | 🔴 **Las citas cruzadas entre repos no las vigila nada**: `citas-ancladas.test.ts` sólo mira dentro de `chaski-v3` y los documentos viven en `wasiai-a2a`. **7 citas rotas por esta causa.** Su perímetro además es opt-in, y una cita ANCLADA es una escritura sobre el archivo destino ⇒ **candidato a HU propia** | W1.0 ×2, W1.4, fix-pack 3 |
+| **F** | 🔴 **Una cita a un test se escribe por el nombre del `it`**, con el número anclado a un commit: el nombre sobrevive a los fix-packs, el número no. ⚠️ **Y su límite medido por QA: el nombre del `it` NO es único** (`T-CABLE-1`/`T-CABLE-2` existen también en `container.test.ts`) ⇒ **va siempre con su archivo** | nota del orquestador + `validation.md` §3.2 |
+| **G** | Un número publicado **se re-mide contra el árbol**, nunca sumando deltas (las líneas reemplazadas se cuentan dos veces). Lleva su commit. Y el presupuesto de escala se contrasta **en cada fix-pack**, en sus **dos** magnitudes | fix-packs 1, 2, 3 |
+| **H** | Un `catch` que asigna `false`/`0`/`[]` convierte *"no pude preguntar"* en *"la respuesta es no"*. Un booleano **no tiene dónde poner el tercer valor**: el colapso no es una decisión y no se ve leyendo | fix-pack 3 |
+| **I** | Una marca de URL que significa *"esto acaba de pasar"* **se consume al leerla**, desde un efecto y nunca desde el inicializador de un `useState`. Y cuando un mutante muere, mirar **cuál** aserción produjo el rojo | fix-pack 3 |
+| **J** | Antes de leer un rojo como hallazgo del sujeto, medí si lo produce **el entorno**: bajo `jsdom`, `Buffer.from(x) instanceof Uint8Array` es `false` | W1.0 |
+| **K** | **Correr las partes de un gate no es correr el gate**: `lint` va primero y es el eslabón al que nadie llega. Y antes de escribir copy, leer qué guards vigilan esa pantalla | W1.2 |
+| **L** | Cuando una métrica **empeora al arreglar un bug**, la pregunta es *"¿qué otro defecto estaba compensando este verde?"* | W1.2 |
+| **M** | Un guard de existencia de archivos que vive en un archivo que importa lo que vigila muere **por colapso del resolvedor**, no por aserción ⇒ **no cuenta como KILLED** | W1.0 |
+
+*Consolidado por `nexus-docs` · WKH-372 ola W1 · `chaski-v3@f295a6f` · sin tocar ninguna entrada previa.*
