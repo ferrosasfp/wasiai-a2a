@@ -1104,3 +1104,45 @@ que la próxima HU que abra ese archivo no lo re-descubra:
 - **Aplicar en**: cuando un módulo nuevo se escribe como **calco** de otro, un arreglo en la copia
   deja al original peor que antes — porque ahora hay dos versiones y la vieja es la que el docblock
   manda a leer. El arreglo va a los dos, o la deuda se declara con su medición. Acá se declara.
+
+---
+
+# 📋 CONSOLIDACIÓN AL CIERRE DE W3 — escrita por `nexus-docs` el 2026-09-01, en la fase DONE
+
+⛔ **Nada de lo de arriba se editó, se resumió ni se borró.** Las **20 entradas** de W3 quedan
+íntegras, con su crónica, su medición y su commit, y la sección de W1 y su consolidación siguen
+byte a byte como estaban. Este bloque es **puramente aditivo** y va al final justamente para no mover
+ningún número de línea: `validation.md` cita `auto-blindaje.md:600-620`, el CR de W1 cita `:381-383`,
+y el fix-pack del CR de W3 cita `:639-641`.
+
+**Las lecciones transferibles a otros proyectos —ordenadas por lección y no por cronología— viven en
+`report-w3.md` §12.** Este es su índice, con las entradas de las que sale cada una.
+
+⚠️ **Una observación de proceso, medida acá**: **el fix-pack del AR (`726b9c4`) no dejó ninguna
+entrada.** Las entradas saltan de `W3.4` (13:05) al fix-pack del CR (15:10). Sus seis hallazgos están
+en `adversarial-review-w3.md` y fueron verificados ejecutando en `code-review-w3.md` §A, así que no
+se perdieron — pero **la lección de cada uno no se escribió donde vive el resto**, y eso es lo que
+hace que se pierda la próxima vez.
+
+| | Lección transferible | Sale de |
+|---|---|---|
+| **N** | 🔴 **Un ancla de cita partida por un salto de línea con `//` en el medio NO entra al conjunto del guard**: el regex exige whitespace. La cita queda **rota y verde**, por AUSENCIA y no por corrección. Pasó **dentro del fix-pack que cerraba las citas rotas**, en el renglón que nombra el candado de las credenciales. ⇒ una cita anclada se escribe **en una sola línea física**, y el control de que está cubierta es **ponerla en rojo a propósito** y leer que el mensaje la nombre. **47 ocurrencias preexistentes del mismo patrón en el árbol** | fix-pack CR (15:10) |
+| **O** | 🔴 **Una condición escrita dos veces, con una implicada por la otra, es un conjunto muerto**: la receta de mutación publicada **da verde en su lectura literal y nadie puede distinguirlo** de un control que funciona. ⇒ **una receta se corre en su lectura literal ANTES de publicarla**; si el mutante sobrevive, o la receta está mal o hay código muerto — **las dos veces el hallazgo es real** | fix-pack CR (15:35) |
+| **P** | 🔴 **Arreglar un hallazgo puede invalidar la receta de mutación de otro.** Borrado el conjunto muerto, la receta hermana pasó a arrastrar dos condiciones y mataba en la rama equivocada (**falso KILLED de manual**); se re-escribió para **aflojar y no borrar**. **Lo detectó re-correr, no razonar** ⇒ al tocar un `if`, re-correr **las otras recetas del mismo `if`** | fix-pack CR (15:35) |
+| **Q** | 🔴 **El desborde de escala estaba en la PROSA DE PRODUCCIÓN, no en los tests** (261 de código contra 416 de comentario ⇒ 61 % contra el ~50 % de la casa; los tests, 4,7:1, **por encima** del piso de 4:1) — **y ahí vivían los tres bloqueantes del CR.** ⇒ **más prosa es más superficie de afirmación sin testigo**; separar tests / código de producción / prosa de producción **antes** de justificar un exceso | fix-pack CR (15:45) + `code-review-w3.md` check 7 |
+| **R** | 🔴 **Cerrar el modo de falla en la COPIA y dejarlo abierto en el ORIGINAL.** `InMemorySesionStore` es calco de `InMemoryPopProofStore`: el guard del reloj se arregló en la copia y el original sigue abierto (`peek tras 100 anios` **devuelve la prueba**), con la frase falsa viva y textual — **en el archivo al que el módulo nuevo manda a leer como exemplar**. ⇒ el arreglo va a los dos, **o la deuda se declara con su medición**. Acá se declaró | W3 (16:05) + `CR/MNR-1`, `CR/MNR-2` |
+| **S** | **Un número publicado se re-mide contra el árbol.** Si el rango contiene el merge de otra HU, el diff de dos puntos **miente por exceso** (`f295a6f..a392f6b` da `3908/58`): se suman los segmentos propios y se dice cuáles son. ⚠️ **Corolario re-medido en el cierre**: sumarle el delta de un fix-pack a un total anterior **cuenta dos veces las líneas reescritas** — 2.857 publicado contra **2.834** re-derivado. **La lección G de W1 no se aplica sola a la línea de abajo** | fix-pack CR (15:45) + medición de `nexus-docs` |
+| **T** | *"Tiene que fallar con el código de hoy"* se mide contra **`main`** (con `git stash`), **no contra un mutante propio**: los dos rojos se parecen y son indistinguibles en el reporte si no se dice cuál se corrió | W3.4 (13:05) |
+| **U** | **Un mutante puede morir por la aserción del INSTRUMENTO y no por la de la pantalla** (`expected 3 to be 4`, sin llegar a mirar nada) ⇒ cuando un mutante muere, **mirar cuál aserción produjo el rojo**. Y un mutante que **SOBREVIVE** se reporta como tal, con su guard declarado inalcanzable | W3.5 (12:40) · W3.2 (00:05) |
+| **V** | **Un número de línea sale de un `grep -n` del símbolo**, nunca del rango con el que leíste el archivo — y nunca leído **antes de tu propia edición**. El guard de citas ancladas **no las caza todas**: 3 de 4, porque una cayó dentro del docblock correcto | W3.0 (22:45) · W3.2 (23:40) · W3.4 (12:25) |
+| **W** | **El orden de despliegue se verifica por consecuencia observable, no por confianza.** Un `exit 0` contra el servicio vivo probó cuatro cosas —receptor desplegado, cliente no desplegado, **la env secreta puesta en producción**, y **que el instrumento sabe fallar** (`exit 30`)—. ⇒ un `exit 0` **sin control positivo del instrumento no dice nada** | W3.3 (00:15) + `validation-w3.md` §4 |
+| **X** | **Un Story File puede contradecirse consigo mismo** (§3.2 prohibía tocar 7 archivos; `T-45` obligaba a re-derivar las citas que la ola moviera, y vivían ahí). Se eligió `T-45` —una cita rota es un defecto real, un comentario tocado no— **y la violación del Scope OUT se registró** en vez de justificarse al pasar | W3.4 (12:25) + `validation-w3.md` §6.1 |
+| **Y** | **El gate del repo puede NO cubrir un entregable de la ola.** `biome` ignora los `.mjs` de `scripts/` y `tsconfig.scripts.json` sólo incluye `.ts`: el probe **no lo mira ninguna herramienta**. ⇒ antes de apoyarse en un gate verde, **medir el alcance del gate sobre los archivos que la ola agregó**, y corregir el documento que afirme lo contrario (el Story File §0.3 lo afirmaba) | W3.3 (00:15) |
+| **Z** | **Un mutante puede morir por TDZ y parecer KILLED**, y **correr `vitest` solo no es correr el gate**: `lint` y los dos `tsc` van aparte y son a los que nadie llega | W3.2 (23:55) · W3.1 (23:10) |
+
+**Las de W1 que W3 volvió a activar**, sin repetirlas acá: **C** (toda afirmación escrita es
+falsable), **F** (una cita a un test se escribe por el nombre del `it`), **G** (un número publicado
+se re-mide contra el árbol) y **K** (correr las partes de un gate no es correr el gate).
+
+*Consolidado por `nexus-docs` · WKH-372 ola W3 · `chaski-v3@c1bd8d3` · sin tocar ninguna entrada
+previa ni la consolidación de W1.*
