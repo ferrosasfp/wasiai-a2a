@@ -728,3 +728,379 @@ aditivo** y va al final justamente para no mover ningún número de línea: `val
 | **M** | Un guard de existencia de archivos que vive en un archivo que importa lo que vigila muere **por colapso del resolvedor**, no por aserción ⇒ **no cuenta como KILLED** | W1.0 |
 
 *Consolidado por `nexus-docs` · WKH-372 ola W1 · `chaski-v3@f295a6f` · sin tocar ninguna entrada previa.*
+
+---
+
+# Auto-Blindaje · WKH-372 · ola W3
+
+> Sección NUEVA, abierta por `nexus-dev` el 2026-08-31 al empezar W3. ⛔ **No se tocó ni una línea de
+> la sección de W1 ni de su consolidación de cierre.**
+
+### [2026-08-31 22:45] Wave W3.0 — Escribí 4 citas `archivo:línea` de memoria en vez de derivarlas
+
+- **Error**: las 4 citas al molde `src/presentation/recorrido-en-el-navegador-de-la-billetera.test.tsx`
+  que puse en el archivo **A** apuntaban a `:113`, `:146`, `:225` y `:258`. Las reales son `:115`,
+  `:149`, `:226` y `:262`. `src/composition/citas-ancladas.test.ts` puso rojas **3 de las 4** (la de
+  `inyectarWallet` cayó igual dentro del docblock correcto y el guard la dio por buena, o sea que el
+  guard **no** las caza todas).
+- **Causa raíz**: derivé los números de los **offsets del `sed -n 'Np'` con el que había leído el
+  molde** (`sed -n '1,200p'`, `sed -n '200,420p'`), no de un `grep -n` del símbolo. Un offset de
+  lectura no es un número de línea. **La tarea T2 del Story File dice exactamente esto y la salteé.**
+- **Fix**: `/usr/bin/grep -n "function <símbolo>"` sobre el molde y reemplazo puntual de las 4.
+- **Aplicar en**: **toda** cita nueva de W3, y en particular las de W3.2 (`prepare/route.ts`) y W3.4
+  (`container.ts:106`, `:161`, `:185`), donde el guard **sí** las va a cazar pero el documento del
+  otro repo **no**. ⇒ regla operativa: **el número sale de un `grep -n` del símbolo, nunca del rango
+  que usé para leer el archivo.**
+
+### [2026-08-31 22:38] Wave W3.0 — Medición del entorno que acota lo que W3.0 puede probar
+
+- **Error**: ninguno todavía; es una **precondición medida antes de escribir**, no un fallo.
+- **Medición**: bajo `jsdom`, `nacl.sign.detached(...)` **TIRA** `unexpected type, use Uint8Array`
+  (`node_modules/tweetnacl/nacl-fast.js:2165`, `checkArrayTypes`). O sea que en un archivo `jsdom`
+  **no se puede PRODUCIR una firma ed25519**. Lo que **sí** funciona en ese realm, verificado en la
+  misma sonda: `canonicalizeAddress` (`new PublicKey(...)`, devuelve 44 chars) y el HMAC del challenge
+  (`issueSolanaPopChallenge` → `verifySolanaPopChallenge` ⇒ `true`).
+- **Consecuencia de diseño**: el archivo **A** ejercita `prepare` sólo hasta `P1`, que es justo el
+  guard que la premisa 3 mide. Toda mitad que necesite un PoP **REAL** vive en
+  `app/api/payout/prepare/route.test.ts`, que corre en entorno **node**.
+- **Aplicar en**: `T-372-W3-2` y `T-372-W3-5`, que necesitan un PoP válido con su control positivo.
+  ⛔ **No intentarlos desde el archivo A**: el rojo sería del realm y no del sujeto, y en W1 un rojo
+  así estuvo a un paso de reportarse como *«la premisa de la ola es falsa»*.
+
+### [2026-08-31 23:10] Wave W3.1 — Corrí `vitest` solo y lo llamé "verde"
+
+- **Error**: los 3 `it` de `sesion-de-posesion.test.ts` daban `3 passed`, y el gate estaba **rojo**:
+  `tsc` cazó tres `TS18048: 'macB64' is possibly 'undefined'`.
+- **Causa raíz**: correr **una parte** del gate (`vitest`) y leerlo como el gate. Es la lección K de la
+  consolidación de W1, cometida otra vez.
+- **Fix**: `if (!payloadB64 || !macB64) throw` — fail-loud, ⛔ **no un `?? ""`**, que habría dejado el
+  resto del `it` midiendo strings vacíos en verde.
+- **Aplicar en**: **cada** wave. La regla operativa que adopté después de esto: `git add -A` +
+  `npm run qa` **antes** de cualquier commit, nunca `vitest <archivo>` como criterio de cierre.
+
+### [2026-08-31 23:40] Wave W3.2 — Rompí 16 citas ancladas con mi propia edición, en dos tandas
+
+- **Error**: agregar imports y ~53 líneas a `app/api/payout/prepare/route.ts` corrió las líneas que
+  **6 archivos** citan por número. `citas-ancladas.test.ts` puso rojas 16. Las arreglé, y al reescribir
+  después el comentario de `S3` **rompí 3 más**, ya con el gate en verde.
+- **Causa raíz**: dos cosas distintas. (1) No pensé el import como una escritura sobre los números de
+  todo el archivo. (2) Re-derivé las citas **antes** de la última edición, no después.
+- **Fix**: (a) los **tres** imports nuevos (`prepare/route.ts`, `kyc/verdict/route.ts` y
+  `prepare/route.test.ts`) entran en **líneas que ya existían** ⇒ Δ0 de imports, y así `:75-77`,
+  `:214`, `:1407`, `:1849` y `:343` no se movieron. Eso solo bajó 16 → 5. (b) Las 5 restantes son
+  inevitables (el bloque `S1..S5` corre las líneas de abajo) y se re-derivaron con `grep -n` del
+  símbolo.
+- **Aplicar en**: 🔴 **W3.4 toca `container.ts`, `ports.ts` y dos gateways, todos muy citados.**
+  Regla: **un import nuevo va en la línea que ya existe** cuando el archivo recibe citas por número,
+  y la re-derivación se corre **después de la ÚLTIMA edición de la wave**, nunca antes.
+
+### [2026-08-31 23:55] Wave W3.2 — Un mutante mío murió por TDZ y casi lo cuento como KILLED
+
+- **Error**: el mutante *«mover la rama de identidad por debajo de `PR5.5`»* lo apliqué moviendo
+  también la declaración `let direccionProbada`. El `it` murió, pero con `expected 503 to be 403` en
+  un `expect` **sin mensaje** — el 503 salía de un `ReferenceError` de zona muerta temporal atrapado
+  por el `try/catch` de la lectura del veredicto. **Eso es un falso KILLED**: mató el mutante un error
+  de scope, no la propiedad de orden.
+- **Fix**: mover **sólo el `if/else`** y dejar la declaración en su lugar. El rojo pasó a ser
+  `"un caller sin credencial llegó a leer la fila del veredicto: expected 3 to be +0"`, que es la
+  propiedad `P-7` con su nombre. Lo mismo pasó con el mutante de `T-372-W3-13` (`rl is not defined`),
+  y se rehízo moviendo el bloque `PR3` **entero**.
+- **Aplicar en**: todo mutante de *«mover un bloque»*. La pregunta previa: **¿este mutante puede matar
+  el `it` por un error de scope o de sintaxis en vez de por la propiedad?** Si sí, no sirve.
+
+### [2026-09-01 00:05] Wave W3.2 — 🔴 UN MUTANTE QUE **SOBREVIVE**, y se reporta como tal
+
+- **Hallazgo**: borrar el guard `S3` (`sesion.tipo !== SESION_TIPO`) de `prepare/route.ts` deja los
+  **5** `it` de `T-372-W3-*` en **VERDE**. Medido, no supuesto.
+- **Causa**: `verificarSesionDePosesion` ya rechaza cualquier `tipo` distinto **y devuelve el literal
+  `SESION_TIPO`** en su retorno ⇒ **no existe input que llegue a `S3` con otro `tipo`**. El Story File
+  pedía que ese mutante matara `T-372-W3-2`, y no puede.
+- **Qué NO se hizo**: ⛔ no se debilitó el módulo para volver `S3` alcanzable, y ⛔ no se disfrazó de
+  KILLED. El testigo real del dominio es la **mitad (c)** de `T-372-W3-2` —una sesión bien formada
+  firmada con `PAYOUT_POP_SECRET`—, que sí mata al mutante del **secreto compartido**, que es el
+  riesgo `R-1`.
+- **Fix**: `S3` se conserva con su inalcanzabilidad **escrita en el propio comentario**, con el mismo
+  criterio con el que `kyc/verdict/route.ts` conserva su rama `!tokenStore`.
+- **Aplicar en**: cualquier guard duplicado entre un módulo y su llamador. **Un guard que el vecino ya
+  cierra no tiene testigo posible**: o se declara inalcanzable, o no se escribe.
+
+### [2026-09-01 00:15] Wave W3.3 — 🔴 El Story File dice que biome lintea el `.mjs`. Es FALSO
+
+- **Afirmación del Story File (§0.3)**: *«`lint` = `biome lint src app scripts` ⇒ el `.mjs` nuevo SÍ se
+  lintea»*.
+- **Medido**: `biome.jsonc` → `files.includes` enumera **sólo** `src/**/*.ts(x)`, `app/**/*.ts(x)` y
+  `scripts/**/*.ts(x)`. `./node_modules/.bin/biome lint scripts/probe-sesion-de-posesion.mjs` contesta
+  *«No files were processed … These paths were provided but ignored»*, y el conteo de `npm run lint`
+  quedó en **304 archivos antes y después** de crear el probe.
+- **Consecuencia**: `scripts/probe-sesion-de-posesion.mjs` **no lo revisa ninguna herramienta del
+  gate**: ni biome ni `typecheck:scripts` (que incluye `scripts/**/*.ts`). Es **preexistente** —le pasa
+  igual a `scripts/probe-vuelta-por-enlace.mjs`— y ⛔ no se arregla ensanchando el `includes` dentro de
+  esta ola.
+- **Fix**: control automático propio y declarado en su docblock: `node --check` + **dos auto-pruebas
+  del camino de `exit 30`** (sin URL, y contra una URL que no responde), las dos verificadas.
+- **Aplicar en**: antes de decir *«X lo vigila»*, **correr X sobre el archivo y mirar si lo procesó**.
+  El nombre del script del gate no dice qué archivos ve.
+
+---
+
+### [2026-09-01 12:10] Wave W3.4 — El constructor requerido habría costado 36 sitios de test, y el `?` abre el defecto que `T-CABLE-1` ya midió
+- **Error**: el story file dice *«el `SesionRecorder` entra como SEGUNDO argumento del constructor»*
+  sin decir si es requerido. Requerido era la lectura literal, y `http-solana-prepare-gateway.ts`
+  tiene escrito, con su motivo, que el `PopSigner` **no** es opcional *«para que alguien no se olvide
+  de cablearlo»*. Medido antes de escribir: hacerlo requerido obliga a tocar **21** sitios en
+  `http-solana-prepare-gateway.test.ts` y **15** en `http-kyc-verdict-gateway.test.ts` — 36 ediciones
+  mecánicas que el presupuesto de §9 daba en **0 borradas** para esos dos archivos.
+- **Causa raíz**: el argumento del docblock viejo (*«opcional se olvida de cablearse»*) es correcto y
+  ya cobró una víctima en este repo (041/MNR-5, con `tsc` en exit 0 y la suite verde). Pero el remedio
+  que ese repo eligió para el caso idéntico —el 3er argumento OPCIONAL de `ConnectWallet`— **no fue
+  volverlo requerido: fue `T-CABLE-1`**, un `it` que ejercita el objeto que el container devuelve.
+- **Fix**: opcional en los dos gateways, y el riesgo cerrado con `T-372-W3-16`, por nombre, en
+  `src/composition/container.test.ts`. ⛔ Y **no con un `toBeDefined()`**: dos instancias distintas
+  también están definidas, así que el `it` **graba por la cara de escritura y lee por la de lectura**.
+  Mutante corrido: instanciar un segundo almacén en `container.ts:161` ⇒ `× T-372-W3-16 … expected
+  null to be 'sesion-de-prueba.mac'`.
+- **Aplicar en**: cada vez que un docblock diga *«requerido para que no se olviden de cablearlo»*,
+  **buscar si el repo ya resolvió el mismo caso** antes de pagar el costo. Y si se elige opcional, el
+  `it` que lo cubre **tiene que ejercitar**, no afirmar existencia.
+
+### [2026-09-01 12:25] Wave W3.4 — Mi propio arreglo rompió 9 citas ancladas, y dos viven en Scope OUT
+- **Error**: insertar 13 líneas de docblock arriba del constructor de
+  `http-solana-prepare-gateway.ts` corrió **todas** sus líneas destino. El candado
+  `src/composition/citas-ancladas.test.ts` cazó **9** citas rotas, y **dos de las emisoras están en el
+  Scope OUT duro del story file**: `src/infrastructure/solana-wallet.ts:2366` y
+  `src/presentation/flow-vm.ts:1598`. O sea: no tocar un archivo prohibido y romperle una cita **no
+  son la misma cosa**, y el guard sólo conoce la segunda.
+- **Causa raíz**: el Scope OUT está escrito por ARCHIVO EDITADO, y las citas ancladas son una relación
+  **entrante**: cualquier inserción en un archivo del Scope IN puede obligar a editar un archivo del
+  Scope OUT. Eso no estaba previsto en §3.2.
+- **Fix**: las 9 corregidas re-derivando el destino con `grep -n` sobre el árbol final. Para los dos
+  archivos del Scope OUT, el cambio es de **un número dentro de un comentario**, verificado Δ0 en
+  líneas (`wc -l` idéntico) y con los **seis** marcadores `[[CENSO … solana-wallet.ts …]]` medidos
+  antes y después: `entrantes-desde-893=78`, `entrantes-desde-906=78`, `lineas=2498`, `entrantes=130`,
+  `entrantes-desde-2241=9`, `destinos-desde-2241=6`, `destinos=69` — **ninguno cambió**.
+- **Aplicar en**: antes de insertar líneas en un archivo, `grep -rn "<archivo>:" src/ app/ scripts/`
+  para saber a cuántos les vas a mover el piso. Y al declarar un Scope OUT, declararlo también para
+  las **citas entrantes**, no sólo para las ediciones.
+
+### [2026-09-01 12:40] Wave W3.5 — El mutante murió por la aserción del instrumento, no por la de la pantalla
+- **Error**: el primer mutante de `T-372-W3-10` (borrar la 4ª frase de la constante en
+  `flow.tsx:3902`) mató el `it` con el mensaje *«el copy de AC-3-6 dejó de tener cuatro frases»*, que
+  es la aserción de **calibración del instrumento** (`COPY_FIRMA_DE_IDENTIDAD.length === 4`), no la
+  que mira el DOM. Leído solo, ese rojo **no dice nada** sobre si la pantalla muestra las frases.
+- **Causa raíz**: la constante es a la vez el sujeto y el instrumento del `it`, así que un mutante
+  sobre ella dispara primero el control de calibración. Es la forma sutil del falso KILLED: el `it`
+  murió, pero por el vecino que tiene adentro.
+- **Fix**: un **segundo** mutante, corrido por separado, que deja la constante intacta y borra el
+  bloque `<Muted>…COPY_FIRMA_DE_IDENTIDAD.map…</Muted>` del render de `flow.tsx:963`. Ése murió con
+  *«la frase «Te vamos a pedir una firma…» NO se muestra con la disponibilidad en "injected"»*, que sí
+  es la mitad de la pantalla.
+- **Aplicar en**: cuando un `it` empieza con una aserción de calibración, **el mutante del sujeto
+  tiene que dejar la calibración en pie**, o hay que correr un segundo mutante que la esquive.
+
+### [2026-09-01 12:55] Wave W3.5 — El story file predijo un rojo que NO ocurre, y la predicción se leía como tarea
+- **Error**: §8 y la tarea T37 del story file declaran que `T-065-21`
+  (`src/presentation/wallet-availability.test.tsx`) *«SE VA A PONER ROJO»* al agregar copy al paso
+  `connect`, y piden actualizarlo *«a propósito»*. **Medido: no se pone rojo.** Ese `it` no compara
+  contra un `innerHTML` congelado: compara **dos renders vivos** entre sí (bandera apagada vs
+  prendida) con `.not.toBe(...)`. Copy que aparece en los dos lados no cambia esa relación. Lo mismo
+  vale para `T-UI-3`, que compara antes/después de `setWalletAvailability`.
+- **Causa raíz**: el nombre del `it` dice *«byte-idéntico al de hoy»* y eso se lee como un snapshot
+  contra el pasado. Su cuerpo mide otra cosa: que la BANDERA sea lo que decide.
+- **Fix**: no se tocó `T-065-21` ni se aflojó ninguna comparación. La suite de
+  `wallet-availability.test.tsx` corre **48/48 en verde** con el copy puesto. Queda declarado acá para
+  que el AR no lea la ausencia del cambio como una tarea salteada.
+- **Aplicar en**: ⛔ **una predicción de rojo escrita en un documento no es una medición.** Antes de
+  «actualizar un test a propósito», correrlo: si está verde, lo que hay que corregir es el documento.
+
+### [2026-09-01 13:05] Wave W3.4 — El rojo que cierra la ola se produjo con `git stash`, no con un mutante
+- **Error potencial evitado**: el criterio de cierre pedía que `T-372-W3-1` **falle con el código de
+  hoy**. El camino cómodo era correr el mutante que §7 nombra (*«hacer que `peek()` devuelva siempre
+  `null`»*) y llamarlo *«falla con el código de hoy»*. **No es lo mismo**: un mutante mide el test
+  contra una variante que yo escribo; el criterio pide medirlo contra `main`.
+- **Causa raíz**: los dos rojos se parecen (los dos dan `expected 2 to be 1`) y son indistinguibles en
+  el reporte si no se dice cuál se corrió.
+- **Fix**: `git stash push -- <los 3 archivos de producción>` para dejarlos **byte-idénticos a
+  `main`** (verificado con `git diff --stat HEAD` vacío) y correr el `it` ahí. Rojo citado:
+  `src/presentation/sesion-borra-la-segunda-firma.test.tsx` · `it` **«T-372-W3-1: con el almacén
+  cableado, el MISMO recorrido invoca signMessage EXACTAMENTE 1 vez»** ·
+  `AssertionError: se siguen pidiendo DOS firmas de identidad: la sesión no está reemplazando a la
+  segunda: expected 2 to be 1`. Y con el mismo stash, `T-372-W3-8` cayó por
+  `expected 2 to be 1` en *«la primera visita no llegó a usar la sesión»*. Restaurado con
+  `git stash pop` y re-verificado en verde.
+- **Aplicar en**: cuando el criterio diga *«tiene que fallar con el código de hoy»*, el control es
+  **el árbol de `main`**, no un mutante. Y se cita cuál de los dos se corrió.
+
+### [2026-09-01 15:10] Wave W3 · fix-pack del CR — El ancla partida por un salto de línea sale del conjunto que el candado mira
+
+- **Error**: la cita que el fix-pack anterior escribió para cerrar `AR/BLQ-MED-1` quedó rota
+  (`app/api/payout/prepare/route.ts:479-480`, blame `726b9c4`): decía
+  `` (`sinCredenciales`, `./route.test.ts:2172`) `` y `:2172` es un **comentario**; `sinCredenciales`
+  aparece en `:2179` y la aserción descrita, en `:2208`. Reincidencia exacta del hallazgo que ese
+  mismo fix-pack cerraba.
+- **Causa raíz**: dos causas encadenadas, y la segunda es la que importa. (1) El número se leyó del
+  bloque del `it` en vez de derivarse con `sed -n 'Np'`. (2) **El ancla quedó partida entre dos
+  líneas físicas, con `// ` en el medio**, y el regex `ANCLADA` de
+  `src/composition/citas-ancladas.test.ts:74` es `` `sym`,\s*`path:NN` `` — `//` **no es whitespace**
+  ⇒ la cita nunca entró al conjunto del candado. Verde por AUSENCIA, no por corrección.
+- **Fix**: el ancla se re-derivó con `sed -n` y quedó **en una sola línea física**, y se partió en dos
+  porque la frase describía dos cosas: `` (`sinCredenciales`, `./route.test.ts:2181`) `` para la
+  captura del `/compose` y `` (`sinCredenciales`, `./route.test.ts:2208`) `` para la ausencia de las
+  tres claves. Δ0 en `route.ts` (3 líneas por 3).
+- **Verificado que el candado AHORA SÍ la mira** (que es lo que faltaba, no el número): mutando
+  `:2181`→`:2180` ⇒ `src/composition/citas-ancladas.test.ts` rojo, y el mensaje **nombra el sitio**:
+  `app/api/payout/prepare/route.ts:480 → (sinCredenciales, ./route.test.ts:2180): la línea dice
+  «fetchMock.mockImplementation(...)»`. Mutando `:2208`→`:2207` ⇒ rojo nombrando `route.ts:481`.
+  Restaurados los dos y verde `9 passed`. Y la frase «volver esto a `{ ...body, … }` ⇒ rojo» se
+  re-midió: `T-372-W3-21` cae con *«la credencial `sessionToken` viajó al agente, que es un tercero
+  elegido por capacidad: expected [...] to not include 'sessionToken'»*.
+- **Aplicar en**: ⛔ **una cita anclada se escribe SIEMPRE en una sola línea física.** El formateador
+  no la va a reunir y el candado no la va a ver partida. Y el control de que una cita está *cubierta*
+  no es que el gate esté verde: es **ponerla en rojo a propósito** y leer que el mensaje la nombre.
+  Contexto medido y **fuera de alcance**: el patrón «ancla partida» tiene **47 ocurrencias
+  preexistentes** en el árbol de `chaski-v3`; esta ola sólo introdujo ésta.
+
+### [2026-09-01 15:20] Wave W3 · fix-pack del CR — «El candado que ata las dos puntas es X» cuando X no toca una de las dos
+
+- **Error**: `src/infrastructure/settlement/http-solana-prepare-gateway.ts:56-57` afirmaba que la
+  duplicación del literal `payout_pop_unverified` entre el cliente y la route la ataba
+  `T-372-W3-17`. **Falso, medido**: ese `it` arma su 403 con un `Response` fabricado y no toca la
+  route. Renombrando las **12** emisiones del enum en `app/api/payout/prepare/route.ts`, la suite del
+  gateway da `1 failed | 27 passed` y **el que cae es otro** (*«una firma que no verifica ⇒ 403 de la
+  route propagado como payout_pop_unverified»*, que sí pasa por la route real): `T-372-W3-17` queda
+  **VERDE**.
+- **Causa raíz**: se escribió lo que el `it` *debería* atar leyendo su nombre («el enum que la route
+  emite de verdad»), no lo que su cuerpo construye. Decisión correcta, motivo falso.
+- **Fix**: opción (a) del CR — nombrar los testigos reales y decir qué punta cubre cada uno. Δ0
+  (3 líneas por 3). La punta del cliente la clava `T-372-W3-17`; la de la route, `T-372-W3-2` y
+  `T-372-W3-4`.
+- **⚠️ La lista del CR NO se copió, y por eso se corrigió**: el CR decía que mutar sólo la rama de la
+  sesión daba 4 rojos *«`T-372-W3-2`, `T-372-W3-4`, `T-372-W3-5` y `T-PANT-2`»*. Corrido acá sobre la
+  suite completa: `Tests 4 failed | 3487 passed (3491)`, y los cuatro son `T-372-W3-2`, `T-372-W3-4`,
+  `T-372-W3-5` y **`src/composition/citas-ancladas.test.ts`** (por el ancla de `:379`, único sitio del
+  árbol que cita `payout_pop_unverified` en `route.ts:241`). **`T-PANT-2` NO muere**, y tiene sentido
+  que no muera: deriva el conjunto de enums **leyendo la route**, así que un rename se lo lleva puesto
+  al conjunto y sigue verde. Mutante de la punta del cliente (la constante de `:59`): `T-372-W3-17`
+  rojo por *«el repliegue no reintentó, o entró en bucle: tiene que ser EXACTAMENTE 2: expected 1 to
+  be 2»*.
+- **Aplicar en**: al citar un candado por su nombre, **abrir su cuerpo**: si construye su propio
+  input, mide su lado y no el del otro. Y una lista de testigos que viene de otro documento se
+  **re-corre**, no se copia: acá una de las cuatro filas era falsa.
+
+### [2026-09-01 15:35] Wave W3 · fix-pack del CR — Dos conjuntos muertos volvían IRREPRODUCIBLE la receta de mutación publicada
+
+- **Error**: la receta de `http-solana-prepare-gateway.test.ts:874-877` decía *«(i) quitar la
+  condición `res.status === 403`»*, y su lectura literal (`sed -i '387d'`) dejaba **vivo el mutante**.
+  La condición estaba escrita **dos veces**: en el ternario de `:384` y otra vez en el `if` de
+  `:385-390`. Como `enumDelRechazo` es `undefined` salvo que ya sea `!res.ok && status === 403`, los
+  conjuntos `!res.ok &&` y `res.status === 403 &&` del `if` **no podían cambiar su resultado**. Dos
+  conjuntos muertos en la ruta del dinero, y a cuarenta líneas de una frase del propio commit que
+  dice *«Un control que no puede fallar es indistinguible de uno que funciona»*.
+- **Causa raíz**: el `if` se escribió «defensivo» repitiendo lo que el ternario de arriba ya
+  garantizaba. La redundancia no fue gratis: **partió el sitio de la condición en dos**, y la receta
+  nombró uno solo.
+- **Fix**: se borraron los dos conjuntos muertos (`if (enumDelRechazo === PREPARE_403_QUE_LA_SESION_ARREGLA && tokenDeSesion !== null)`),
+  el status quedó escrito **una sola vez** en `:384`, y la receta ahora nombra ese sitio con un ancla.
+  Δ0 en el archivo de producción (11 por 11), para no correr la cita `:455` que le entra desde
+  `scripts/smoke-helpers.ts:142`.
+- **Y la receta (ii) hubo que RE-ESCRIBIRLA, que es lo que el borrado destapó**: sacado el conjunto
+  muerto, la condición de status llega al `if` **a través de** `enumDelRechazo`. Medido: borrar el
+  conjunto del enum entero mata en la rama **(c)** (*«se reintentó ante un 500 que trae el enum de la
+  sesión»*) y no dice nada del enum — un falso KILLED de manual. La receta (ii) pasó a **aflojar y no
+  borrar** (`enumDelRechazo !== undefined`), y así muere en la rama **(d)**, por su motivo:
+  *«se reintentó ante un 403 `prepare_kyc_verdict_missing`, que cambiar de credencial no arregla»*.
+  Receta (i) re-medida con la redacción nueva: rama (c) roja, *«expected 2 to be 1»*.
+- **Aplicar en**: ⛔ **una receta de mutación se corre en su lectura literal antes de publicarla.** Si
+  el mutante sobrevive, o la receta está mal o hay código muerto: las dos veces el hallazgo es real.
+  Y al borrar un conjunto redundante, **re-correr las OTRAS recetas del mismo `if`**: lo que antes
+  aislaba una condición puede pasar a arrastrar dos.
+
+### [2026-09-01 15:45] Wave W3 · fix-pack del CR — `CD-W3-10`: la escala, RE-DERIVADA acá y no copiada
+
+- **Error**: `CD-W3-10` («el presupuesto de escala se contrasta en cada fix-pack») no se cumplió en el
+  fix-pack anterior — el modo de falla que este mismo archivo ya tiene escrito de W1 (`:639-641`).
+- **Fix**: re-derivado con `/usr/bin/git diff --numstat`, y con el método escrito para que se pueda
+  repetir: el rango `f295a6f..a392f6b` **contiene el merge de WKH-373** (`3178360`), así que el diff
+  de dos puntos da `3908 / 58` y **no es la escala de esta ola**. La cuenta correcta es la unión de
+  los dos segmentos que sí son W3 — `f295a6f..8ffdd78` + `3178360..a392f6b` — agregando por archivo:
+
+  | Magnitud | Presupuesto | Ola al cerrar el CR | + este fix-pack | Factor |
+  |---|---:|---:|---:|---:|
+  | Líneas añadidas | ≤ **1.700** | **2.823** | **2.857** | **1,68x** |
+  | Archivos | ≤ **22** | **38** | **38** | **1,73x** |
+
+  El **2.823 / 38** del CR **reproduce exacto** con este método. Este fix-pack suma `+34 / -24` sobre
+  **5 archivos, los cinco ya dentro de los 38**: no agrega ninguno.
+- **Qué es el exceso, dicho sin adornos**: el CR ya lo separó y la separación aguanta — el desborde
+  está en los **docblocks de producción** (261 líneas de código contra 416 de comentario, 61 % de
+  prosa contra el ~50 % de la casa), y es exactamente donde vivieron **los tres bloqueantes de este
+  CR**. Este fix-pack agrega 34 líneas y **27 son prosa**, así que empuja en la misma dirección; lo
+  que compra a cambio es que las tres frases que no reproducían ahora reproducen, con su mutante
+  citado por mensaje. No se recortó nada más porque no hay prosa borrable sin perder un motivo
+  medido.
+- **Aplicar en**: cuando el rango de una ola **contenga el merge de otra HU**, el `git diff A..B`
+  miente por exceso. Se suman los segmentos propios y se dice cuáles son.
+
+### [2026-09-01 15:50] Wave W3 · fix-pack del CR — Una nota Δ0 que protegía un número que ya no cita nadie
+
+- **Error**: `src/infrastructure/kyc/http-kyc-verdict-gateway.ts:48` justificaba su disciplina Δ0 con
+  *«`solana-wallet.ts:2374` cita `:60` de este archivo por número»*. El fix-pack anterior re-derivó y
+  **ancló** ese emisor a `:74`, y `:60` hoy es **una línea en blanco**. La nota seguía en pie
+  protegiendo un número muerto.
+- **Causa raíz**: la nota nombraba **un** emisor concreto en vez del conjunto, así que arreglar ese
+  emisor la volvió falsa sin que nadie la tocara.
+- **Fix**: la nota ahora nombra el **conjunto**, derivado con
+  `/usr/bin/grep -rn "http-kyc-verdict-gateway.ts:" src app scripts contracts` ⇒ **seis** citas por
+  número: `:19-24` desde dos sitios, `:48` (anclada, desde `app/api/kyc/verdict/route.ts:257`), `:57`,
+  `:61` y `:74`. Verificada cada una contra su línea destino. Δ0 (1 línea por 1).
+- **Aplicar en**: una nota «EN ESTA LÍNEA» que nombra **un** emisor caduca cuando ese emisor se
+  arregla. Nombrar el conjunto y decir con qué comando se re-deriva.
+
+### [2026-09-01 15:55] Wave W3 · fix-pack del CR — La cita cross-repo estaba corrida 3 líneas, y la frase que la acompañaba también era falsa
+
+- **Error**: `app/api/payout/prepare/route.ts` citaba
+  `wasiai-remittance-agents/src/manifest/registry.ts:203-210` para el `required` del manifiesto. El
+  `required` real vive en **`:206-213`**; `:203-205` son las últimas tres líneas del docblock de
+  `senderIdentity`.
+- **Y un segundo error que el CR no pedía y salió al verificar**: la frase decía que el manifiesto
+  *«publica la misma lista»* que el `z.object`. **No es la misma.** Leído en el otro repo:
+  `CashoutPayoutInputSchema` (`src/agents/cashout-payout.ts:47-83`) declara **siete** claves
+  —`quoteId`, `amountUsd`, `kycVerificationId`, `senderIdentity`, `address`, `beneficiary`,
+  `idempotencyKey`— y el `required` del manifiesto lista **seis**: **no incluye `address`**, que es el
+  alias legado y por eso no es obligatorio. La conclusión no cambia (ninguna de las tres credenciales
+  está en ninguna de las dos listas), el motivo publicado sí.
+- **Fix**: `:206-213`, el conteo corregido a seis, y dicho qué falta y por qué. También `:47-82` → 
+  `:47-83`, que es donde cierra el `z.object`. Δ0 (2 líneas por 2).
+- **Aplicar en**: al verificar una cita cross-repo, **leer el bloque citado entero**, no confirmar el
+  número: acá el número estaba mal Y la frase que lo acompañaba también, y sólo el segundo era
+  interesante.
+
+### [2026-09-01 16:00] Wave W3 · fix-pack del CR — El `.env.example` no decía de quién es el secreto, y eso ya indujo una decisión equivocada
+
+- **Error**: el bloque de `PAYOUT_SESSION_SECRET` explica en 20 líneas qué firma, por qué no puede
+  compartir valor con `PAYOUT_POP_SECRET` y cómo se repliega, y **nunca dice que el secreto es
+  nuestro**. La omisión tiene consecuencia medida: el founder leyó el nombre, entendió que dependía
+  de un proveedor de payout externo y descartó la variable por eso.
+- **Fix**: **un renglón**, no un rename. El nombre es la palanca de rollback documentada y renombrarlo
+  costaría más de lo que arregla. El renglón dice que lo generamos nosotros (`openssl rand -hex 32`),
+  que lo firma y lo verifica este repo, que no es la credencial de ningún proveedor de payout, KYC ni
+  billetera, y que «SESSION» habla de la sesión de posesión de la persona.
+- **Aplicar en**: cuando el nombre de una env se parezca al de una credencial de un tercero, la
+  primera línea de su bloque dice **de quién es**. Explicar qué hace no impide la lectura equivocada:
+  la evita decir quién la emite.
+
+### [2026-09-01 16:05] Wave W3 — DEUDA declarada, NO arreglada acá: `pop-proof-store.ts` tiene el mismo defecto de reloj y la misma frase falsa
+
+⛔ **Fuera del diff de W3**, y por eso no se tocó en este fix-pack. Queda anotado con su medición para
+que la próxima HU que abra ese archivo no lo re-descubra:
+
+- **`CR/MNR-1`** — `src/infrastructure/auth/pop-proof-store.ts` es el exemplar del que
+  `InMemorySesionStore` es calco, y **ya divergieron**: el guard del reloj ilegible se arregló en la
+  copia y el original sigue abierto. Probe corrido por el CR: `peek tras 100 anios` **devuelve la
+  prueba**. No es alcanzable con el `Clock` real y falla hacia un POST desperdiciado, igual que el
+  original (`AR/MNR-3`).
+- **`CR/MNR-2`** — la frase que `AR/BLQ-BAJO-1` derribó en `sesion-store.ts` **sigue viva, textual**,
+  en `pop-proof-store.ts:36-37`, que es el archivo al que el módulo nuevo manda a leer como exemplar.
+  Medido por el CR: también da verde con la edición de una línea que la falsifica.
+- **Aplicar en**: cuando un módulo nuevo se escribe como **calco** de otro, un arreglo en la copia
+  deja al original peor que antes — porque ahora hay dos versiones y la vieja es la que el docblock
+  manda a leer. El arreglo va a los dos, o la deuda se declara con su medición. Acá se declara.
