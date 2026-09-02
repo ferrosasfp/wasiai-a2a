@@ -285,11 +285,30 @@ patrón, que ⛔ no se inventa: es el **mismo** con el que el candado del repo d
 Aplicado a **los 16 archivos del diff `25c3f73..HEAD`**, que es el conjunto que el §10.3 decía estar
 contando:
 
-| Conteo | Valor |
-|---|---:|
-| Citas ancladas, contando sobre el ARCHIVO entero | **39** |
-| Citas ancladas, sumando el conteo LÍNEA por LÍNEA | **39** |
-| ⇒ **partidas** (una cita a caballo de dos líneas) | **0** |
+| Conteo | Valor en `0d3e3ce` | Valor tras el fix-pack de F4 |
+|---|---:|---:|
+| Citas ancladas, contando sobre el ARCHIVO entero | **39** | **42** |
+| Citas ancladas, sumando el conteo LÍNEA por LÍNEA | **39** | **42** |
+| Citas ancladas, **normalizando primero el salto de línea del docblock** | **41** | **42** |
+| ⇒ **partidas** (una cita a caballo de dos líneas) | 🔴 **2** | **0** |
+
+🔴 **ACÁ SE DECLARABAN «0 PARTIDAS» Y ERAN DOS, Y EL DEFECTO ESTABA EN EL MÉTODO, ⛔ NO EN EL
+CONTEO.** Las dos columnas de arriba —«archivo entero» y «línea por línea»— ⛔ **no pueden**
+distinguir una cita partida: entre el símbolo y el destino queda `\n * `, y `\s*` ⛔ no matchea ese
+` * `. O sea que una cita partida es invisible para las DOS, dan el mismo número, y ese empate se leyó
+como «ninguna partida». **Una cita partida no es una que se cuenta dos veces: es una que ⛔ no cuenta
+nadie**, y por lo tanto una que el candado del repo ⛔ no valida.
+
+**El método que sí las ve** —y es el que hay que usar de acá en adelante— normaliza el salto de línea
+del docblock (`\n\s*(?:\*|//)?[ \t]*` ⇒ un espacio) ANTES de aplicar el patrón, y compara ese conteo
+contra el de línea por línea. La diferencia son las partidas.
+
+**Las dos que había en `0d3e3ce`, corregidas las dos:**
+
+| Archivo | Cita | Estado |
+|---|---|---|
+| `src/presentation/recorrido/salto.ts` | `(`PARAM_ERROR`, `…/protocol.ts:44`)` | La que F4 reportó (`H-5`). Unida en una línea. |
+| `src/presentation/bienvenida-composicion.test.tsx` | `(`resolveSolanaRpcUrlPublic`, `../infrastructure/chain.ts:190`)` | 🔴 **F4 declaró 1 partida y eran 2**: ésta no la vio ninguno de los tres. Unida **línea-neutro** (dos líneas antes, dos después), porque este archivo **recibe** citas ancladas por número (`:289` y `:854`) y merger las dos las corría. Destino verificado: `chain.ts:190` **es** `export function resolveSolanaRpcUrlPublic`. |
 
 ⚠️ **Y por qué da 39 y no 21**: el conjunto de 39 incluye los dos README (2 cada uno) y los tres
 archivos de `T-17` (`bienvenida.tsx` 6, `bienvenida-composicion.test.tsx` 6, `grecas.tsx` 2), que
@@ -475,8 +494,11 @@ la misma marca). El `×` que cuenta para `MNR-1` es el de `T-374-W1-0`, citado a
 - **`flow.tsx` Δ0**: `wc -l` ⇒ **4453** · `/usr/bin/git diff --numstat main -- src/presentation/flow.tsx`
   ⇒ **vacío**.
 - **Bandera apagada**: ningún `.env` la define; `T-374-W1-11` sigue verde.
-- **Citas ancladas**: **21** en los archivos del diff, **conteo por archivo = conteo por línea ⇒
-  ninguna partida**. Las **tres nuevas** apuntan a `protocol.ts:335`, `flow-vm.ts:1503` y
+- **Citas ancladas**: **21** en los archivos del diff. ⚠️ ACÁ SE CONCLUÍA «conteo por archivo =
+  conteo por línea ⇒ ninguna partida», y esa inferencia ⛔ **no se sostiene**: las dos formas de
+  contar son ciegas a una cita partida, así que su empate ⛔ no dice nada. Con el método de §6.4
+  había **2 partidas**, corregidas en el fix-pack de F4. Las **tres nuevas** apuntan a
+  `protocol.ts:335`, `flow-vm.ts:1503` y
   `connect-wallet.ts:73` — ⛔ **ninguna** a los seis destinos censados. Ni un marcador `[[CENSO …]]`
   aparece en el diff.
 - **Ninguna pantalla toca disco ni la URL**: `T-374-W1-12`, ahora con el barrido normalizado.
@@ -554,11 +576,26 @@ que se cablee, la trampa no está.
 | *«Se guarda solo mientras lo completás.»* | `createRemittance` (el único `repo.save` del camino) corre **recién al tocar «Seguir»**; el borrador vive en estado de React y ninguna pantalla toca el disco (lo mide `T-374-W1-12`). Repro: los tres campos + recargar ⇒ todo vacío, en la pantalla de entrada. | *«Todavía no se guarda nada: si recargás la página, esto se vuelve a empezar.»* | `MW-29` ⇒ `T-374-W1-8` **ROJO** |
 | *«Una vez sola. Después de esto, tus próximos envíos no la vuelven a pedir.»* | `identidadYaVerificada` tiene **cero productores**; el montaje real no pasa props ⇒ `false` ⇒ el paso aparece siempre. | *«Verificamos quién sos antes de mandar la plata.»* | `MW-30` ⇒ `T-374-W1-8` **ROJO** |
 
-⛔ Los dos predicados que las cazan están escritos **por el sentido y no por la frase exacta**, y
-tienen su propia calibración ejecutable en `T-374-W1-24`: se le pasan al barrido los **literales que
-estaban renderizados en `5afe979`** y se exige que lo pongan rojo, más un control positivo con copy
-sano que ⛔ no puede ponerse rojo. Sin esa calibración, dos `not.toMatch` verdes son indistinguibles
-de dos líneas que no pueden fallar.
+🔴 **ACÁ DECÍA QUE LOS DOS PREDICADOS ESTÁN ESCRITOS «POR EL SENTIDO Y NO POR LA FRASE EXACTA», Y ES
+FALSO — F4 lo midió (`H-2`) y el fix-pack de F4 lo corrigió.** Son una disyunción de **tres
+redacciones cercanas** cada uno: cazan literales parecidos, ⛔ no un significado. F4 falsificó la
+frase con dos paráfrasis que dicen la MISMA mentira con otras palabras y pasan con la suite en
+`13 passed`; el fix-pack corrió **otras tres inventadas para la ocasión** y las cinco pasaron los dos
+`not.toMatch`. Y `T-374-W1-24` ⛔ no puede detectarlo por construcción: le pasa los **literales que
+estaban renderizados en `5afe979`**, o sea confirma la única forma que ya funcionaba.
+
+**Lo que hay hoy, y es lo único que se afirma:**
+
+| Control | Qué garantiza | Qué ⛔ NO garantiza |
+|---|---|---|
+| Los dos `not.toMatch` de `revisarCopy` | Que ⛔ no vuelva la redacción **vieja** ni sus vecinas inmediatas | Nada sobre una redacción distinta |
+| `T-374-W1-24` | Que esos dos predicados **pueden fallar** (calibrados contra los literales de `5afe979`), más un control positivo con copy sano | Que cubran el sentido |
+| `T-374-W1-26` (nuevo) | El copy visible de las cinco pantallas **pineado palabra por palabra**: cualquier redacción nueva, fiel o mentirosa, es un diff que una persona aprueba a propósito | El copy que sólo aparece tras una interacción, y el bloque reusado del alquiler de red, que se **enmascara** |
+
+⛔ **Y el arreglo ⛔ NO fue ensanchar los predicados**: cerrar las dos paráfrasis conocidas es el mismo
+control que confirma la forma que ya funcionaba, un escalón más arriba, y una tercera redacción
+volvería a pasar. Un guard de **texto** no puede cazar un **sentido**; lo que sí puede es **congelar
+el texto**.
 
 ### 11.3 · Los mutantes, uno por uno
 
@@ -630,9 +667,10 @@ Esto es lo que más vale de esta tanda, así que va con nombre y medición:
 - **`flow.tsx` Δ0**: `wc -l` ⇒ **4453** · `/usr/bin/git diff --numstat 25c3f73..HEAD -- src/presentation/flow.tsx` ⇒ **vacío**.
 - **Bandera apagada**: ningún `.env` la define; `T-374-W1-11` verde.
 - **Citas ancladas**: **0 nuevas** en `5afe979..HEAD` (medido con el patrón de §6.4 sobre las líneas
-  `+` del diff ⇒ lista vacía), **0 partidas** en los 16 archivos, y **0 marcadores `[[CENSO …]]`** en
-  el diff. La única cita al árbol viejo que hacía falta —el molde del `guard`— quedó **sin ancla y
-  sin número de línea**, a propósito.
+  `+` del diff ⇒ lista vacía), **0 marcadores `[[CENSO …]]`** en
+  el diff, y ⚠️ **«0 partidas» era falso**: eran **2**, medidas por F4 (una) y por su fix-pack (la
+  otra), y las dos están corregidas — el método que las ve está en §6.4. La única cita al árbol viejo
+  que hacía falta —el molde del `guard`— quedó **sin ancla y sin número de línea**, a propósito.
 - **Ninguna pantalla toca disco ni la URL**: `T-374-W1-12`, ahora con el barrido de seis formas de
   salida y sus cuatro controles de lectura (una lectura de `href` ⛔ NO puede ponerse roja: el
   anfitrión la necesita en el montaje).
@@ -667,6 +705,155 @@ dos README siguen diciendo la verdad. Los **140 warnings** son la deuda preexist
 `biome.jsonc` declara; ⛔ ninguno está en el árbol nuevo.
 ⚠️ El flake preexistente de `vuelta-por-enlace-carrera.test.tsx` ⛔ **no apareció** en ninguna de las
 dos corridas. No se lo tocó ni se lo puso en cuarentena.
+
+---
+
+## 12 · FIX-PACK DEL F4 (2026-09-02) — los tres hallazgos que bloqueaban PRENDER la bandera
+
+F4 dio *«SÍ se puede desplegar con la bandera apagada. NO se puede prenderla todavía»*. Este fix-pack
+cierra los tres que faltaban, y ⛔ nada más. ⛔ El residual de `AC-6` (§1.6 de F4) queda como estaba,
+declarado y acotado, y ⛔ no se recortó una sola línea de prosa.
+
+### 12.1 · `H-1` · `AC-8` mandaba a la persona UN PASO MÁS ADELANTE
+
+**El defecto**: una sola tabla de aterrizaje servía a los dos caminos, así que la rama de error
+devolvía el paso SIGUIENTE. Medido por F4 con el código de rechazo real de Phantom:
+`?dl=firmar-tx&errorCode=4001` ⇒ *Seguimiento*, con *«Todavía no hay ningún envío en curso»* y sin
+forma de reintentar la firma. Y el docblock lo presentaba **como el cumplimiento**.
+
+**El arreglo**: `ORIGEN_POR_ENLACE` + `origenDe`, en `src/presentation/recorrido/salto.ts`. Sin
+código de error, el aterrizaje (`AC-7`); con código, **el paso del que se salió** (`AC-8`).
+
+| Marca | De dónde SALE, y el sitio de producción que lo emite | Con rechazo, la persona ve |
+|---|---|---|
+| el connect | `connectWallet.execute()` ⇒ pantalla de entrada | *Cuánto y para quién* (el desvío del NUNCA) |
+| firma de la transacción | `confirmAndSend.execute()` ⇒ pantalla de firmar | *Firmar y enviar* |
+| firma del patrocinio | ídem | *Firmar y enviar* |
+| creación del nonce | ídem (salto DENTRO de preparar la firma) | *Firmar y enviar* |
+| PoP del pago | `confirmAndSend.execute()`, antes del `prepare` | *Firmar y enviar* |
+| PoP de la identidad | 🔴 `connectWallet.execute()`, ⛔ **no** la pantalla de identidad | *Cuánto y para quién* |
+| el verificador | pantalla de identidad (la única que lo ofrece) | *Tu identidad* |
+| la salida al navegador | pantalla de entrada (la única que la ofrece) | *Cuánto y para quién* |
+
+⚠️ **El choque entre las dos mitades de `AC-8`, resuelto y ⛔ no disimulado**: para las marcas que
+salen de la pantalla de entrada, *«el mismo paso donde estaba»* **es** el paso que el mismo AC
+prohíbe con la palabra NUNCA. **Gana la prohibición**: `aterrizajeDelAnfitrion` las desvía por
+`aterrizaEnLaEntrada` —que así deja de ser un fallo-cerrado hipotético y pasa a tener camino de
+producción— **y conserva el motivo**. Desde ahí la pantalla de entrada queda a un «Volver».
+
+**Sus dos tests, con sus dos mutantes, los dos corridos:**
+
+| Mutante | Aplicado | Muere en | Mensaje |
+|---|---|---|---|
+| `MW-3` · la PoP del pago vuelve a apuntar al aterrizaje | `salto.ts:156` | `T-374-W1-3` | *«la prueba de posesión del pago dejó de tener su origen en la pantalla de firmar…: expected 'seguimiento' to be 'firmar'»* |
+| `MW-3b` · `origenDe` = `aterrizajeDe` (la TABLA ÚNICA) | `salto.ts:172` | `T-374-W1-3` | *«ninguna marca vuelve a un paso ANTERIOR al del camino feliz: las dos tablas colapsaron…: expected 0 to be greater than or equal to 1»* |
+| `MW-15` · idem `MW-3`, medido de punta a punta | `salto.ts:156` | `T-374-W1-25` | *«una firma rechazada deja a la persona en otra pantalla que la que salió…: expected 'Seguimiento' to be 'Firmar y enviar'»* — y `14 passed`, o sea ⛔ ningún vecino lo mató |
+
+⛔ **Por qué `T-374-W1-3` necesitaba DOS redes**: comparar el error contra el feliz es verdadero para
+la tabla única Y para las dos tablas, así que ⛔ no separa el arreglo del defecto — era un candado
+**sobre** el defecto. Hoy hay (a) ligaduras marca → origen contra los nombres que producción exporta
+y (b) un conteo POSITIVO de marcas que retroceden, que con la tabla única da **0**.
+
+### 12.2 · `H-2` · «los predicados van por el SENTIDO» era falso — **se cambió el MECANISMO, opción (b)**
+
+**La opción elegida: (b), pinear el copy aprobado.** El motivo, en una línea: **un guard de texto ⛔
+no puede cazar un sentido**, y (a) es el mismo control que confirma la forma que ya funcionaba, un
+escalón más arriba — cerrás las dos paráfrasis conocidas y la sexta redacción vuelve a pasar. El pin
+es **infalsificable por paráfrasis**: no entiende el copy, lo **congela**.
+
+**Las cinco paráfrasis, corridas de a una, con el marcador verificado en disco antes de cada suite:**
+
+| # | Copy inyectado | ¿Lo caza `revisarCopy`? | ¿Lo caza el pin? |
+|---|---|---|---|
+| F4/`M1b` | *«Lo que vas escribiendo queda en este navegador mientras completás.»* | ⛔ NO | ✅ `T-374-W1-26` |
+| F4/`M2b` | *«Es una sola vez: en tus próximos envíos ya no hace falta repetirla.»* | ⛔ NO | ✅ `T-374-W1-26` |
+| **mía P3** | *«Tus datos quedan acá guardados hasta que vuelvas.»* | ⛔ NO | ✅ `T-374-W1-26` |
+| **mía P4** | *«Con una verificación te alcanza para todos tus envíos.»* | ⛔ NO | ✅ `T-374-W1-26` |
+| **mía P5** | *«Cuando termines, te dejamos de nuevo en esta pantalla.»* (la mentira de `H-3`) | ⛔ NO | ✅ `T-374-W1-26` |
+
+Las cinco dieron `1 failed | 14 passed`, y el `1 failed` es **siempre `T-374-W1-26`, por su nombre**:
+o sea que ⛔ ninguna la mató un vecino, y que las cinco **sobreviven** a los dos `not.toMatch`. ⇒ tres
+redacciones **nuevas, inventadas para este fix-pack**, confirman que (a) no era viable.
+
+**Y la frase que declaraba la cobertura ahora dice la verdad** (`recorrido.test.tsx`, docblock de
+`revisarCopy`; `T-374-W1-24` renombrado a *«los dos LITERALES»*; §11.2 de este reporte): los dos
+predicados cazan **literales cercanos**, y de ahí ⛔ no se concluye nada sobre otra redacción.
+
+⚠️ **Lo que el pin ⛔ NO cubre, dicho en su propio docblock**: el copy que aparece sólo tras una
+interacción o una vuelta con marca; el bloque del alquiler de red, que se **enmascara** a propósito
+(no es copy de esta ola y su cifra sale de una constante de la cadena ⇒ pinearlo pondría el guard en
+rojo por algo que ⛔ no es copy, y el arreglo natural sería actualizar el pin sin leerlo); y el
+itinerario corto, que hoy ⛔ no tiene productor.
+
+### 12.3 · `H-3` · la tercera frase que le mentía a la persona
+
+`volves` decía *«Cuando termines, volvés a esta misma pantalla y seguimos donde estabas.»*. **Cinco de
+las seis marcas aterrizan en otra pantalla**, y la frase **contradecía a `AC-7`**.
+
+**Dice hoy**: *«Cuando termines, el recorrido sigue. Si rechazás alguna firma, te avisamos y podés
+volver a intentar.»*
+
+**Las dos afirmaciones, verificadas ANTES de escribirla, para las SEIS marcas y los DOS caminos:**
+
+1. *«el recorrido sigue»* ⇒ el camino feliz ⛔ nunca deja a la persona en un paso ANTERIOR al que
+   salió. Lo mide `T-374-W1-3` (`adelantadas` vacío + los índices) y la mitad (a) de `T-374-W1-25`.
+   ⛔ **No dice «el siguiente»** (falso para el nonce, que vuelve a su propia pantalla) ni **«esta
+   misma pantalla»** (falso para las otras cinco).
+2. *«si rechazás alguna firma, te avisamos y podés volver a intentar»* ⇒ toda vuelta con código trae
+   MOTIVO (`T-374-W1-3`, aserción por marca) y aterriza en un paso **con un control vivo**
+   (`T-374-W1-25`, `toBeEnabled` sobre el botón del anuncio).
+
+⛔ **Lo que la frase NO dice, a propósito**: ⛔ no nombra ninguna pantalla; ⛔ no promete que lo
+cargado sobreviva (un salto REMONTA EL ÁRBOL y el borrador de esa pestaña se pierde — es el caso que
+`MOTIVO_SIN_ENVIO` existe para explicar); ⛔ no promete un motivo específico (la billetera puede
+mandar un código que este repo no traduce y ahí `humanError` contesta su texto genérico).
+
+### 12.4 · Las citas partidas — **eran DOS, no una**
+
+F4 encontró **1** donde el fix-pack anterior declaró **0**. Midiendo con el método correcto (§6.4)
+eran **2**. Las dos corregidas; la de `bienvenida-composicion.test.tsx` **línea-neutro**, porque ese
+archivo recibe citas ancladas por número. Conteo hoy sobre los 16 archivos: **por línea 42 =
+normalizado 42 ⇒ 0 partidas**. **Una cita anclada NUEVA** en todo el fix-pack —
+`(`anterior`, `./pasos.ts:111`)`— y ⛔ **ninguna** a los seis destinos censados.
+
+### 12.5 · El presupuesto — la CORRECCIÓN DEL ARGUMENTO, sin recortar nada
+
+F4 aceptó la decisión y **rechazó el argumento**, con razón: *«este fix-pack no los tocó»* es una
+regla de procedencia que, aplicada siempre, hace que el presupuesto **sólo pueda crecer**. El motivo
+bueno es el **contenido**: esas líneas contienen **evidencia medida** —incluida una retractación de
+su propia evidencia en `bandera.ts`, que F4 re-midió sobre su propio artefacto de build—. ⛔ Este
+fix-pack ⛔ no recortó nada, por pedido explícito. ⚠️ Queda en pie la deuda que F4 marcó: *«el salto
+remonta el árbol»* escrito **cuatro veces** es repetición, ⛔ no evidencia. **Declarada, ⛔ no
+bloqueante.**
+
+### 12.6 · El gate, corrido DOS veces, entero y en orden
+
+Con `/usr/bin/git add -A` antes de cada corrida.
+
+| Corrida | `npm run qa` | `npm run build` |
+|---|---|---|
+| 1 | exit **0** · `0 errores` / **140 warnings** · **178 archivos / 3522 tests** | exit **0** |
+| 2 | exit **0** · mismos números | exit **0** |
+
+**3520 → 3522** son los DOS `it` nuevos (`T-374-W1-25` y `T-374-W1-26`). **178 archivos**, sin
+cambios ⇒ los dos README siguen diciendo la verdad.
+
+🔴 **EL FLAKE DEL GATE COMPLETO ES PREEXISTENTE, Y ESTÁ MEDIDO — ⛔ no supuesto.** Una corrida previa
+de `npm run qa` sobre este árbol dio **exit 1** con `T-373-1b` (`solana-wallet.test.ts`, causa
+`deeplink_reloj_inconsistente`), un archivo que este fix-pack ⛔ **no toca** y que en aislamiento da
+`85 passed`. Para no atribuirlo ni descartarlo por corazonada, monté un **worktree del árbol LIMPIO
+de `0d3e3ce`** y corrí el gate entero **10 veces**:
+
+| Árbol | Corridas | Rojos | Cuáles |
+|---|---:|---:|---|
+| `0d3e3ce` **limpio** | 10 | **2** | `T-372-W3-10b` (`sesion-borra-la-segunda-firma.test.tsx`) en una; la otra no quedó identificada por nombre |
+| este fix-pack | 3 | 1 | `T-373-1b` (`solana-wallet.test.ts`) |
+
+⇒ **el árbol limpio también se pone rojo, y en un `it` DISTINTO y en otro archivo.** ⇒ ⛔ no es un
+`it` flakeando: es una condición intermitente del gate completo en paralelo, presente **antes** de
+este fix-pack. ⚠️ Y esto es **más ancho** que el flake de `vuelta-por-enlace-carrera.test.tsx` que
+`sesion.ts` documenta: son otros dos archivos. ⛔ **No se puso nada en cuarentena** y ⛔ no se afirma
+la causa: lo establecido es que **el árbol limpio flakea**, ⛔ no por qué.
 
 ---
 
