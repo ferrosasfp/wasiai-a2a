@@ -453,3 +453,79 @@
   cambió: `git add -A && npm run qa` **antes** de dar por cerrado cualquier bloque, no al final.
 - **Aplicar en**: **siempre.** Correr las partes de un gate no es correr el gate, y el sub-gate que
   más se saltea es el que va primero.
+
+### [2026-09-01 23:01] W1 fix-pack del CR — `git checkout --` borró el trabajo SIN COMMITEAR del archivo mutado
+- **Error**: para restaurar un mutante corrí `/usr/bin/git checkout -- src/presentation/recorrido/pantallas.tsx`
+  con **el fix-pack todavía sin commitear**. Eso no restauró «el archivo antes del mutante»: lo
+  restauró **al último commit**, o sea que se llevó puestas las ~15 ediciones del fix-pack en ese
+  archivo. Lo detecté porque el segundo mutante de la tanda no encontró su ancla y `git diff --numstat`
+  mostraba `pantallas.tsx` SIN NINGUNA línea, con los otros cinco archivos con cientos.
+- **Causa raíz**: `git checkout -- <archivo>` restaura contra **el índice/HEAD**, no contra «lo que
+  había hace un minuto». Es la restauración correcta para un mutante **sólo si el árbol limpio es el
+  commit**. La disciplina dice «restaurados contra `git diff --numstat`» y eso es justamente lo que
+  la delató; lo que faltaba era la PRECONDICIÓN: **el entregable tiene que estar commiteado ANTES de
+  empezar a mutar.**
+- **Fix**: re-apliqué las 15 ediciones desde un script idempotente con `assert s.count(old)==1` por
+  cada una (así una re-aplicación parcial aborta en vez de dejar el archivo a medias), verifiqué
+  `tsc --noEmit` y `25 passed`, y **commiteé el fix-pack antes de correr un solo mutante más**.
+- **Aplicar en**: cualquier barrido de mutación. La regla operativa queda: `git add -A` + commit ⇒
+  recién ahí mutar ⇒ `git checkout --` ⇒ `git diff --numstat` vacío. ⚠️ Y el `git diff --numstat`
+  después de restaurar hay que leerlo **sobre el árbol entero**, no sobre el archivo mutado: mirando
+  sólo el archivo mutado, «0 líneas» es exactamente lo que devuelve el caso en el que se borró todo.
+
+### [2026-09-01 23:08] W1 fix-pack del CR — el `it` medía el `disabled` con el nombre de la guarda
+- **Error**: `T-374-W1-23` decía cerrar la guarda de reentrada de `BLQ-MED-4`. El mutante que la
+  borra (`MW-26`) **SOBREVIVIÓ**: `13 passed`, con el marcador verificado en disco.
+- **Causa raíz**: el `it` daba **un toque por `act()`**. Con eventos discretos, React alcanza a
+  pintar el `disabled` entre un toque y el siguiente, así que el segundo ⛔ nunca llegaba al
+  manejador. ⇒ el verde venía del `disabled`, no de la guarda. Los dos controles existen y los dos
+  funcionan, pero **el `it` no podía distinguirlos**, así que uno de los dos estaba sin defensa.
+- **Fix**: los dos primeros toques van **dentro del mismo `act()`**, que es la carrera real del
+  teléfono (dos toques antes de que la pantalla se entere del primero). Con eso `MW-26` muere con
+  *«expected 2 to be 1»*, y `MW-26b` (sin `disabled`) muere por la etiqueta que falta. Cada mitad con
+  su propio mutante.
+- **Aplicar en**: todo control que tenga **dos defensas superpuestas** (una que se ve y una que
+  decide). La pregunta que lo destapa es la del protocolo: *¿qué OTRO control podría estar matando a
+  este mutante?* Si la respuesta es «el de al lado», el rojo no dice nada del control nuevo.
+
+### [2026-09-01 23:09] W1 fix-pack del CR — un mutante aplicado a un componente que el `it` no renderiza
+- **Error**: `MW-26b` mutaba el botón del componente compartido `Salir` y **sobrevivió** con el
+  marcador presente en disco. Leerlo como KILLED-que-no-fue habría dado por defendido el botón que
+  dispara `startKyc` (cuota de proveedor) y `confirmAndSend` (el depósito).
+- **Causa raíz**: `PantallaEntrar` usa su **propio** `<Button>`, no el de `Salir`; y `Salir` sólo
+  aparece en su forma de botón cuando todavía no hay destino. El `it` nunca renderizaba esa rama ⇒ el
+  mutante estaba **bien escrito, bien aplicado, y sobre código muerto para ese test**.
+- **Fix**: se partió en dos mutantes (`MW-26b` al botón propio, `MW-26c` al compartido) y se agregó
+  la pata (D) al `it`, que monta el paso de la identidad con un `startKyc` que ⛔ no resuelve y
+  afirma la etiqueta en curso y el `disabled` **del componente compartido**.
+- **Aplicar en**: antes de dar un mutante por vivo, verificar que **el camino que muta se ejecuta** en
+  el `it` que se le apunta. Un componente compartido defendido «porque su hermano lo está» no está
+  defendido: son dos sitios de render distintos.
+
+### [2026-09-01 23:07] W1 fix-pack del CR — mi aserción del apagador era un control VACÍO
+- **Error**: la aserción (A) de `T-374-W1-22` afirmaba que el estado «estamos en la otra app» se
+  apaga al cambiar de paso. Miraba **la pantalla del envío**, que ⛔ **no renderiza ese bloque en
+  ningún caso** ⇒ el texto desaparecía de ahí con apagador y sin él.
+- **Causa raíz**: elegí el paso de destino por conveniencia («Volver» es un clic) y ⛔ no verifiqué
+  que ese destino pudiera **mostrar** lo que la aserción niega. Una aserción de AUSENCIA sobre una
+  pantalla que nunca puede mostrar esa presencia es verde para siempre.
+- **Fix**: lo destapé **sondeando el arreglo**, no leyéndolo: atar el efecto a `[]` en vez de a
+  `[paso]` daba **`13 passed`**. Se reescribió para volver **al mismo paso** («Volver» y después
+  «Seguir»), que es la reproducción literal del CR, y ahí el mutante muere.
+- **Aplicar en**: toda aserción `not.toContain` / `queryBy…).toBeNull()`. La pregunta antes de
+  escribirla: *¿este sitio PUEDE mostrar lo que estoy negando?* Si no puede, la aserción no mide nada.
+
+### [2026-09-01 23:11] W1 fix-pack del CR — dos guards del repo se pusieron rojos por MI PROSA
+- **Error**: dos veces escribí en un comentario el literal que otro candado del repo vigila.
+  (1) `` `return` `` entre acentos graves en `pasos.test.ts` ⇒ `T-374-W1-4` rojo, porque `return` es
+  el valor de `VALOR_VUELTA_KYC` y ese barrido es literal-shaped con los tres tipos de comilla.
+  (2) el nombre del método de navegación blanda en `inercia.test.tsx` ⇒ `T-374-W0-3` rojo.
+- **Causa raíz**: los barridos de este repo son *literal-shaped* justamente para **no** cazar prosa,
+  pero «entre comillas» y «entre acentos graves» es la forma en que la prosa técnica de este repo
+  cita cosas. ⇒ el patrón que evita el falso positivo del comentario en prosa **sí** caza el
+  comentario que usa comillas de código.
+- **Fix**: reescribir las dos frases sin el literal, y **dejar dicho en el comentario por qué**, para
+  que el que venga no lo «arregle» de vuelta.
+- **Aplicar en**: antes de escribir prosa nueva en un árbol vigilado por barridos estáticos, correr
+  la suite del directorio. Los dos rojos aparecieron **en el gate completo**, no en el archivo que
+  estaba editando: el segundo vivía en `src/presentation/`, tres directorios más arriba.
