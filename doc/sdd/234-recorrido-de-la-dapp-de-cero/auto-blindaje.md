@@ -529,3 +529,87 @@
 - **Aplicar en**: antes de escribir prosa nueva en un árbol vigilado por barridos estáticos, correr
   la suite del directorio. Los dos rojos aparecieron **en el gate completo**, no en el archivo que
   estaba editando: el segundo vivía en `src/presentation/`, tres directorios más arriba.
+
+### [2026-09-02 00:20] W1 fix-pack de F4 — «los predicados van por el SENTIDO» era una frase de cobertura FALSA
+- **Error**: el fix-pack del CR afirmó, en `recorrido.test.tsx` y en `w1-report.md`, que los dos
+  predicados que cazan las frases mentirosas iban «por el SENTIDO y no por la frase exacta». Son una
+  disyunción de **tres redacciones cercanas** cada uno. F4 lo falsificó con dos paráfrasis; este
+  fix-pack corrió **otras tres inventadas** y las cinco pasaron los dos `not.toMatch`.
+- **Causa raíz**: escribí la frase describiendo la **intención** del predicado y no lo que el
+  predicado **hace**. Un `not.toMatch` con tres alternativas se lee como «cubre la idea» y cubre tres
+  redacciones. Y `T-374-W1-24`, que lo calibra, le pasa **los literales que estaban renderizados**,
+  o sea confirma la única forma que ya funcionaba: no podía detectarlo por construcción.
+- **Fix**: dos partes, y la primera es la que importa. **(1)** La frase dice la verdad: los
+  predicados cazan **literales cercanos**, y de ahí ⛔ no se concluye nada sobre otra redacción.
+  **(2)** El mecanismo cambió: el copy visible de las cinco pantallas queda **pineado palabra por
+  palabra** en `T-374-W1-26`, así que cualquier redacción nueva es un diff que alguien aprueba a
+  propósito. ⛔ **No** se ensancharon los predicados con las dos paráfrasis conocidas: eso es el mismo
+  control que confirma la forma que ya funcionaba, un escalón más arriba, y la sexta redacción
+  volvería a pasar.
+- **Aplicar en**: toda frase que declare COBERTURA. La prueba, antes de escribirla: *escribí vos
+  mismo tres inputs nuevos que la frase dice cubrir, y corrélos*. Si no se te ocurren tres, la frase
+  está describiendo la intención. Y si el control que calibra el predicado usa **el input viejo**,
+  no es una calibración del alcance: es una calibración de que el predicado no está muerto.
+
+### [2026-09-02 00:24] W1 fix-pack de F4 — un docblock que RE-LEE el AC y lo presenta como cumplimiento
+- **Error**: `salto.ts` declaraba «LAS DOS RAMAS —feliz y error— DEVUELVEN EL MISMO `paso`, y ésa es
+  la mitad de `AC-8` que importa», y `T-374-W1-3` medía exactamente esa frase. `AC-8` pide *«el mismo
+  paso DONDE ESTABA»*; la frase decía «el mismo paso que el camino feliz». Los dos enunciados sólo
+  coinciden cuando el salto vuelve a su propia pantalla, y F4 midió que para **cinco de las seis
+  marcas** no coinciden: rechazar la firma dejaba a la persona **un paso más adelante**.
+- **Causa raíz**: el `it` se escribió **desde el docblock** y no desde el AC. Cuando el código, su
+  prosa y su test dicen los tres lo mismo, no hay ninguna fricción que delate que ninguno de los tres
+  está leyendo el requisito.
+- **Fix**: dos tablas —aterrizaje y **origen**—, y `T-374-W1-3` reescrito con dos redes: la ligadura
+  marca → origen contra los nombres que producción exporta, **y** un conteo POSITIVO de marcas cuyo
+  camino de error deja a la persona ANTES que el feliz, que con la tabla única da **0**. Las dos
+  medidas: `MW-3` muere por la ligadura, `MW-3b` (colapsar las dos tablas) por el conteo.
+- **Aplicar en**: cuando un `it` afirme un AC, la aserción se escribe **con las palabras del AC**, ⛔
+  no con las del docblock de la función. Y si el AC pide dos cosas, hacen falta dos aserciones: una
+  prosa que se queda con una mitad es indistinguible del cumplimiento hasta que alguien lee el AC.
+
+### [2026-09-02 00:27] W1 fix-pack de F4 — la tercera frase que le mentía a la persona
+- **Error**: el anuncio del salto decía *«Cuando termines, volvés a esta misma pantalla y seguimos
+  donde estabas.»*. **Cinco de las seis marcas aterrizan en otra pantalla**, y la frase además
+  **contradecía a `AC-7`**, que pide el paso siguiente: la frase y el AC no podían ser ciertos a la vez.
+- **Causa raíz**: la frase se escribió para tranquilizar, ⛔ no para describir. Y ⛔ no la cazaba
+  nada: `revisarCopy` ⛔ no tenía predicado para esto, así que las dos mentiras cerradas por el CR se
+  fueron y ésta se quedó, en el mismo bloque y con la misma forma.
+- **Fix**: la frase nueva hace **dos afirmaciones y las dos se miden** para las seis marcas y para
+  los dos caminos. ⛔ No nombra ninguna pantalla —«el siguiente» y «esta misma» son las dos falsas
+  para alguna marca—, ⛔ no promete que el borrador sobreviva (un salto remonta el árbol) y ⛔ no
+  promete un motivo específico (la billetera puede mandar un código que este repo no traduce).
+- **Aplicar en**: antes de escribir una frase que la persona lee, **enumerar los casos del universo y
+  verificarla en cada uno**. Si vale para la mayoría pero no para todos, no es una frase «casi
+  cierta»: es la próxima que hay que sacar. Van **tres rondas seguidas** con este mismo defecto en
+  esta ola, y las tres frases estaban en el mismo archivo que el código que las desmiente.
+
+### [2026-09-02 00:31] W1 fix-pack de F4 — dos formas de contar citas ciegas al mismo defecto
+- **Error**: el reporte declaraba **«conteo por archivo = conteo por línea ⇒ ninguna partida»**. Las
+  dos formas de contar son **ciegas** a una cita partida —entre el símbolo y el destino queda
+  `\n * `, y el `\s*` del patrón ⛔ no matchea ese ` * `—, así que dan el mismo número y el empate se
+  leyó como ausencia. F4 encontró **1**; midiendo con el método correcto eran **2**.
+- **Causa raíz**: usé como control de una propiedad **dos instrumentos con el mismo punto ciego**.
+  Repetir la medición con la misma herramienta no valida nada: las dos comparten el defecto.
+- **Fix**: el método normaliza el salto de línea del docblock **antes** de aplicar el patrón y
+  compara contra el conteo por línea; la diferencia son las partidas. Las dos se unieron, y la de
+  `bienvenida-composicion.test.tsx` **línea-neutro**, porque ese archivo **recibe** citas ancladas
+  por número (`:289`, `:854`) y merger las dos líneas las corría a las dos.
+- **Aplicar en**: cuando dos conteos «se confirman entre sí», preguntar *¿qué defecto verían los dos
+  igual de mal?*. Y **una cita partida no es una que se cuenta dos veces: es una que ⛔ no cuenta
+  nadie** — o sea que el candado del repo tampoco la valida, y se rompe en silencio.
+
+### [2026-09-02 00:34] W1 fix-pack de F4 — el buen motivo para no recortar el presupuesto NO era el que escribí
+- **Error**: la decisión de no recortar la prosa (659 / 400, 1,65x) se justificó con *«este fix-pack
+  ⛔ no los tocó»*. F4 aceptó la **decisión** y **rechazó el argumento**, con razón.
+- **Causa raíz**: es un principio que, aplicado siempre, hace que **el presupuesto sólo pueda
+  crecer** y ningún archivo se recorte nunca. Es una regla de procedencia, no una de valor.
+- **Fix**: el argumento que sí la sostiene es **el contenido**, y F4 lo verificó ejecutando: de esas
+  líneas, las 50 de `bandera.ts` contienen una **retractación de su propia evidencia** —el motivo
+  falso de las `NEXT_PUBLIC_`— y el motivo verdadero, y F4 re-midió las dos rutas de `grep` sobre su
+  propio artefacto de build. **Las líneas contienen evidencia medida**; ⛔ eso es lo que las salva, no
+  quién las escribió. ⛔ Este fix-pack ⛔ no recortó nada, por pedido explícito.
+- **Aplicar en**: toda justificación de un exceso de presupuesto. La pregunta es *¿qué dicen estas
+  líneas?*, ⛔ nunca *¿de qué commit vienen?*. ⚠️ Y queda en pie lo que F4 marcó como recortable y no
+  se recortó: el argumento «el salto remonta el árbol» está escrito **cuatro veces**. Eso es
+  repetición, ⛔ no evidencia. **Deuda técnica declarada, ⛔ no bloqueante.**
