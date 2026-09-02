@@ -330,3 +330,126 @@
   diff con el mismo regex que usa el candado y **contá**. Si el conteo no coincide con lo que
   escribiste, las que faltan están partidas. ⛔ Un `grep` del símbolo NO sirve: el símbolo está, lo que
   falta es que el par entre entero en un renglón.
+
+### [2026-09-01 21:10] Wave 1 — Mi propio guard cazó los docblocks que escriben lo que el guard prohíbe
+- **Error**: `T-374-W1-12` salió ROJO en su primera corrida completa, con seis hallazgos, y los seis
+  eran **líneas de prosa mías**: `pantallas.tsx:4` y `recorrido.tsx:14` dicen «⛔ ninguno toca
+  `localStorage`, `sessionStorage`, `document.cookie`» — o sea, nombran los delatores **para
+  prohibirlos**, y el barrido los contó como usos.
+- **Causa raíz**: escribí los patrones como **substrings crudos** (`/\blocalStorage\b/`). Este repo ya
+  tiene el hallazgo escrito con nombre propio —la «TRAMPA 3» de `FORBIDDEN` en
+  `no-evm-surface.test.ts:56`, y el `MNR-2` del CR de W0 sobre el guard de `L-5`— y aun así lo repetí
+  en el mismo archivo donde estaba copiando esos moldes.
+- **Fix**: los patrones pasaron a ser **call-shaped / asignación-shaped**
+  (`/\blocalStorage\s*\.\s*\w+\s*[([=]/`, `/\bdocument\s*\.\s*cookie\s*=[^=]/`, …), más una fila nueva
+  que caza el **alias** (`/=\s*(?:window\s*\.\s*)?(?:local|session)Storage\b/`), y cada una con su
+  cebo literal en el control negativo. ⛔ **No se tocó ni una línea de prosa para acomodar el guard**:
+  el que estaba mal era el guard.
+- **Aplicar en**: **todo guard textual nuevo.** Antes de correrlo, preguntate *¿mi propio docblock lo
+  pone rojo?* Si un guard prohíbe un nombre, ese nombre va a aparecer en la prosa que explica la
+  prohibición. El patrón tiene que matchear **código**, no menciones. Y el corolario incómodo: la
+  primera corrida roja de un guard nuevo es más probable que sea culpa del guard que del árbol.
+
+### [2026-09-01 21:25] Wave 1 — Dos citas ancladas partidas, otra vez, con la lección ya escrita arriba
+- **Error**: de las **17** citas ancladas que escribí, **2 quedaron partidas** por el salto de línea de
+  un docblock (`salto.ts` hacia `splash-puerta.ts:84`, `inercia.test.tsx` hacia
+  `no-evm-surface.test.ts:35`) ⇒ **rotas y verdes POR AUSENCIA**. Pasó con la entrada de W0 sobre
+  exactamente esto tres pantallas más arriba en este mismo archivo.
+- **Causa raíz**: la envoltura del párrafo, igual que en W0. Leer la lección **no** la aplica; lo que
+  la aplica es **correr el control**.
+- **Fix**: el control de W0 corrido tal cual —enumerar las citas del propio diff con el regex del
+  candado y contar—: daba **15** contra **17** escritas. Las dos se reacomodaron para que el par
+  `` `símbolo`, `ruta:NN` `` entre entero en un renglón.
+- **Aplicar en**: ídem W0, y con un agregado: **el control se corre aunque estés seguro.** El costo es
+  un script de diez líneas y el modo de falla es invisible desde el verde. Ponelo en la lista de
+  cierre de la ola, no en la memoria.
+
+### [2026-09-01 21:30] Wave 1 — El Story File tenía una cita corrida, y el candado la cazó antes que yo
+- **Error**: copié `(`clasesDe`, `../ola-2-pantallas.test.tsx:89`)` del Story File. El símbolo está en
+  **`:91`**; `:89` es la primera línea de su docblock. Salió rojo el candado de citas ancladas.
+- **Causa raíz**: tomé una cita del documento **sin re-derivarla**, aunque §0 del propio Story File
+  dice que las citas se re-derivan. Re-derivé las que iba a *importar* y no las que iba a *citar*.
+- **Fix**: `/usr/bin/grep -n "function clasesDe"` ⇒ `:91`. Corregido **en el código**, no en el
+  documento, y anotado en el reporte.
+- **Aplicar en**: **toda cita que copies de un documento a un docblock.** Un `archivo:línea` que viene
+  de un documento es una afirmación de otro; verificala como verificás un símbolo externo. La regla
+  práctica: si vas a escribir un número de línea, el `grep` que lo produce va antes.
+
+---
+
+## Fix-pack del AR de la ola W1 — 2026-09-01
+
+### [2026-09-01 22:05] Fix-pack W1 — El mutante llevaba el marcador ADENTRO del defecto y por eso no reprodujo nada
+- **Error**: `MW-12c` tenía que reproducir el escape que el AR midió (el **alias partido en dos
+  líneas**) contra el barrido de disco ya arreglado. Lo escribí como
+  `const almacenDelMutante = // MUTANTE-MW12C` + salto de línea + `window.localStorage;`.
+  Resultado: **`3 passed`, mutante SOBREVIVIENTE**. Casi lo reporto como «el barrido sigue abierto».
+- **Causa raíz**: el marcador que mi arnés exige para verificar *«el mutante se aplicó»* lo puse
+  **entre el `=` y el nombre del almacén**, o sea **adentro del patrón que el delator busca**
+  (`/=\s*(?:window\s*\.\s*)?(?:local|session)Storage\b/`). Un `// …` no es `\s`, así que el mutante
+  dejó de ser el defecto: era otro texto que ningún barrido tiene por qué cazar. El mutante estaba en
+  disco —el marcador se verificó— y aun así **no reproducía el defecto**.
+- **Fix**: el marcador se movió a **una línea propia arriba**, dejando intacta la forma que el guard
+  vigila. `MW-12c'` ⇒ rojo en `T-374-W1-12`, *«una pantalla del recorrido nuevo toca disco o la barra
+  de direcciones… expected [ Array(1) ] to deeply equal []»*. Y se agregó `MW-12d` para la forma nueva
+  (índice por corchetes), también rojo.
+- **Aplicar en**: **todo mutante contra un guard TEXTUAL.** «El mutante está en disco» y «el mutante
+  reproduce el defecto» son dos cosas distintas, y la verificación de la primera puede **destruir** la
+  segunda. La pregunta antes de correr: *¿mi marcador cae adentro de lo que el patrón mira?* Si sí, va
+  afuera. Y el corolario que casi me cuesta un reporte falso: **un mutante sobreviviente es primero
+  sospechoso de estar mal escrito, y recién después evidencia de un guard vacío.**
+
+### [2026-09-01 22:06] Fix-pack W1 — Un mutante «equivalente» que sobrevive, y la limitación REAL que destapó
+- **Error**: `MW-17a` para el debounce lo escribí como `setTimeout(…, 0)`. **`8 passed`, sobrevivió.**
+- **Causa raíz**: con **temporizadores falsos** el tiempo sólo avanza cuando el `it` lo avanza, y la
+  limpieza del efecto cancela el temporizador anterior en cada tecla ⇒ con **cualquier** demora,
+  incluida 0, las dos teclas colapsan en un solo pedido. El mutante era **equivalente** bajo ese
+  reloj, no un agujero.
+- **Fix**: dos cosas, y la segunda importa más. (1) El mutante correcto es el **defecto real**: que el
+  pedido **no se difiera** (el cuerpo corre dentro del propio efecto) ⇒ rojo en `T-374-W1-17`,
+  *«se pidió una cotización POR TECLA… expected [ 9, 95 ] to deeply equal [ 95 ]»*, que es la misma
+  forma que el AR midió (`[2, 25]`). (2) **La limitación quedó escrita en el `it`**: lo que clava es
+  que el pedido esté **diferido fuera del render**, ⛔ **no** que la demora sean 300 ms. Ese número
+  vive en `MS_DE_ESPERA_DE_LA_COTIZACION` y **no lo vigila nada**.
+- **Aplicar en**: **todo test con `vi.useFakeTimers()`.** Un reloj que sólo avanza a pedido no
+  distingue demoras entre sí: distingue *diferido* de *no diferido*. Si el `it` se llama «debounce»,
+  tiene que decir cuál de las dos propiedades clava, porque quien lea el nombre va a asumir la otra.
+
+### [2026-09-01 22:08] Fix-pack W1 — `.not.toBeInTheDocument()` DESCARTA el mensaje de la aserción
+- **Error**: escribí las aserciones clave de `T-374-W1-15` y `T-374-W1-17` como
+  `expect(queryByRole(...), "mensaje que explica el hallazgo").not.toBeInTheDocument()`. Al correr los
+  mutantes, el rojo salió como **`expect(element).not.toBeInTheDocument()` / «expected document not to
+  contain element, found <button»** y **mi mensaje no aparecía por ningún lado**.
+- **Causa raíz**: los matchers de `jest-dom` arman su propio mensaje y **se comen** el segundo
+  argumento de `expect`. El `it` seguía siendo correcto; lo que se perdía era **la única línea que
+  explica por qué el rojo importa**, que es lo que alguien va a leer en un CI dentro de seis meses.
+- **Fix**: las aserciones que tienen que citar su motivo pasaron a `expect(queryBy…, "mensaje")
+  .toBeNull()` —matcher de vitest, que sí lo respeta—. Re-corridos `MW-15` y `MW-17c`: el rojo ahora
+  sale con el mensaje literal.
+- **Aplicar en**: **toda aserción cuyo mensaje sea parte del entregable.** La disciplina del repo pide
+  citar el rojo por *archivo · `it` · mensaje del assert*; con un matcher de librería puede no haber
+  mensaje que citar. Comprobalo **corriendo el mutante**, no leyendo el código.
+
+### [2026-09-01 22:07] Fix-pack W1 — Un mutante que no compila da «no tests», y eso NO es un KILLED
+- **Error**: la primera versión de `MW-17a''` dejó el archivo con un `}` de más ⇒ vitest salió con
+  **`Unexpected ","` · `Tests no tests`** y `1 failed` a nivel de archivo.
+- **Causa raíz**: sustituí la apertura del `setTimeout` sin tocar su cierre. El arnés verificó el
+  marcador —estaba— pero **el marcador no dice nada sobre si el archivo sigue siendo válido**.
+- **Fix**: el mutante se rehízo respetando la estructura (sustituir la FUNCIÓN, no el bloque), y el
+  criterio de KILLED se endureció: un rojo cuenta **sólo** si viene con un `×` sobre un `it`
+  NOMBRADO. `Tests no tests` es una falla de la herramienta, no del control.
+- **Aplicar en**: **todo barrido de mutación.** Un `1 failed` a nivel de archivo se parece mucho a un
+  KILLED en la salida y no lo es. Filtrá por el `×` y por el nombre del `it`, siempre.
+
+### [2026-09-01 22:04] Fix-pack W1 — Un `export` en un archivo de test sólo lo caza el gate COMPLETO
+- **Error**: extraje el normalizador del barrido a una función y la exporté (`export function
+  normalizar`). `tsc --noEmit` verde, `vitest` del archivo verde, `vitest` del directorio verde.
+  **`npm run qa` rojo**: `lint/suspicious/noExportsInTest` — *«Do not export from a test file»*,
+  **1 error** contra un baseline de **0**.
+- **Causa raíz**: corrí las **partes** del gate (typecheck + el archivo de test) y no el gate. Es la
+  lección que este ecosistema ya tiene escrita con nombre propio —`lint` va primero en `npm run qa` y
+  un `import` sin usar sobrevivió cinco revisiones porque nadie llegaba a lint— y la repetí.
+- **Fix**: la función dejó de exportarse (nadie la usa fuera del archivo). Y el orden de trabajo
+  cambió: `git add -A && npm run qa` **antes** de dar por cerrado cualquier bloque, no al final.
+- **Aplicar en**: **siempre.** Correr las partes de un gate no es correr el gate, y el sub-gate que
+  más se saltea es el que va primero.
