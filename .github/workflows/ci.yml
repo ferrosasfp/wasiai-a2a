@@ -43,7 +43,7 @@ jobs:
           fetch-depth: 0   # historia completa: ver el bloque de arriba
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -119,7 +119,7 @@ jobs:
           fetch-depth: 0   # historia completa: ver `build-test`
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
